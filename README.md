@@ -106,6 +106,9 @@ send to a human, or split the task further.
 The workbench uses one React UI for both browser and Electron. Python remains
 the source of DAG behavior through a local FastAPI API.
 
+The detailed workbench roadmap lives in
+[`docs/workbench_tasklist.md`](docs/workbench_tasklist.md).
+
 Install dependencies:
 
 ```bash
