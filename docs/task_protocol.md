@@ -12,15 +12,7 @@ nodes: []
 ```
 
 YAML is the preferred hand-authored format because task nodes contain long
-natural-language fields. JSON remains supported for generated DAGs and strict
-machine interchange.
-
-Treat YAML as the source of truth and JSON as generated output:
-
-```bash
-python -m agents_swarm export-json examples/optimization_dag.yaml examples/optimization_dag.json
-python -m agents_swarm check-sync examples/optimization_dag.yaml examples/optimization_dag.json
-```
+natural-language fields. DAG documents and run records both use YAML.
 
 ## Node Fields
 
@@ -64,3 +56,9 @@ Recommended values:
 - `escalate_to_large_model`: Re-run using the review or orchestrator model.
 - `send_to_human`: Stop and ask for human judgment.
 - `split_task_further`: The node is too broad and should be decomposed.
+
+## Run Records
+
+Execution records are also stored as YAML documents in `runs/`. They are
+machine-written artifacts, but they follow the same single-format rule as the
+task graph itself.

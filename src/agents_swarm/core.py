@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 from string import Template
 from typing import Any
@@ -205,35 +204,22 @@ class Dag:
 
 
 def load_dag(path: Path) -> Dag:
+    if path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ProtocolError("DAG documents must use .yaml or .yml")
     with path.open("r", encoding="utf-8") as handle:
-        if path.suffix.lower() in {".yaml", ".yml"}:
-            data = yaml.safe_load(handle)
-        else:
-            data = json.load(handle)
+        data = yaml.safe_load(handle)
     if not isinstance(data, dict):
         raise ProtocolError("DAG document must be an object")
     return Dag.from_dict(data)
-
-
-def write_dag_json(dag: Dag, path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(dag.to_dict(), handle, indent=2)
-        handle.write("\n")
-    return path
-
-
-def dag_documents_match(left_path: Path, right_path: Path) -> bool:
-    return load_dag(left_path).to_dict() == load_dag(right_path).to_dict()
 
 
 def load_run_records(runs_dir: Path) -> list[dict[str, Any]]:
     if not runs_dir.exists():
         return []
     records = []
-    for path in sorted(runs_dir.glob("*.json")):
+    for path in sorted(runs_dir.glob("*.yaml")):
         with path.open("r", encoding="utf-8") as handle:
-            record = json.load(handle)
+            record = yaml.safe_load(handle)
         if isinstance(record, dict):
             records.append(record)
     return records
@@ -346,10 +332,9 @@ def create_run_record(
 
 def write_run_record(runs_dir: Path, record: dict[str, Any]) -> Path:
     runs_dir.mkdir(parents=True, exist_ok=True)
-    path = runs_dir / f"{record['task_id']}-{record['run_id']}.json"
+    path = runs_dir / f"{record['task_id']}-{record['run_id']}.yaml"
     with path.open("w", encoding="utf-8") as handle:
-        json.dump(record, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+        yaml.safe_dump(record, handle, sort_keys=True)
     return path
 
 
@@ -365,9 +350,9 @@ def update_review_status(
         raise ProtocolError(f"Invalid review_status: {review_status}")
 
     matches = []
-    for path in sorted(runs_dir.glob(f"{task_id}-*.json")):
+    for path in sorted(runs_dir.glob(f"{task_id}-*.yaml")):
         with path.open("r", encoding="utf-8") as handle:
-            record = json.load(handle)
+            record = yaml.safe_load(handle)
         if not isinstance(record, dict):
             continue
         if run_id is not None and record.get("run_id") != run_id:
@@ -382,8 +367,7 @@ def update_review_status(
     record["review_status"] = review_status
     record["reviewed_at"] = datetime.now(timezone.utc).isoformat()
     with path.open("w", encoding="utf-8") as handle:
-        json.dump(record, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+        yaml.safe_dump(record, handle, sort_keys=True)
     return path
 
 

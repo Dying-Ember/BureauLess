@@ -4,13 +4,11 @@ from agents_swarm.core import (
     Dag,
     ProtocolError,
     create_run_record,
-    dag_documents_match,
     load_dag,
     load_run_records,
     ready_nodes,
     render_prompt,
     update_review_status,
-    write_dag_json,
     write_run_record,
 )
 
@@ -167,14 +165,21 @@ def test_load_yaml_dag() -> None:
     assert dag.nodes["baseline-inventory"].recommended_model == "gpt-5-mini"
 
 
-def test_yaml_and_json_examples_are_synced() -> None:
-    assert dag_documents_match(
-        Path("examples/optimization_dag.yaml"),
-        Path("examples/optimization_dag.json"),
-    )
+def test_rejects_non_yaml_dag_path(tmp_path) -> None:
+    path = tmp_path / "dag.json"
+    path.write_text("{}", encoding="utf-8")
+    try:
+        load_dag(path)
+    except ProtocolError as exc:
+        assert ".yaml or .yml" in str(exc)
+    else:
+        raise AssertionError("Expected ProtocolError")
 
 
-def test_export_json_round_trip(tmp_path) -> None:
-    dag = load_dag(Path("examples/optimization_dag.yaml"))
-    output = write_dag_json(dag, tmp_path / "dag.json")
-    assert load_dag(output).to_dict() == dag.to_dict()
+def test_run_records_are_written_as_yaml(tmp_path) -> None:
+    dag = _dag()
+    record = create_run_record(dag, "a", model="mini", status="passed")
+    path = write_run_record(tmp_path, record)
+    assert path.suffix == ".yaml"
+    records = load_run_records(tmp_path)
+    assert records[0]["task_id"] == "a"

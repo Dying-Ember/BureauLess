@@ -7,41 +7,31 @@ import sys
 from .core import (
     ProtocolError,
     create_run_record,
-    dag_documents_match,
     load_dag,
     load_run_records,
     ready_nodes,
     render_prompt,
     update_review_status,
-    write_dag_json,
     write_run_record,
 )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agents-swarm")
-    parser.add_argument("--runs-dir", default="runs", help="Directory for run records")
+    parser.add_argument("--runs-dir", default="runs", help="Directory for YAML run records")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    validate_parser = subparsers.add_parser("validate", help="Validate a DAG file")
+    validate_parser = subparsers.add_parser("validate", help="Validate a YAML DAG file")
     validate_parser.add_argument("dag")
 
-    export_parser = subparsers.add_parser("export-json", help="Export a DAG as canonical JSON")
-    export_parser.add_argument("dag")
-    export_parser.add_argument("output")
-
-    sync_parser = subparsers.add_parser("check-sync", help="Check two DAG files match")
-    sync_parser.add_argument("left")
-    sync_parser.add_argument("right")
-
-    ready_parser = subparsers.add_parser("ready", help="List ready task nodes")
+    ready_parser = subparsers.add_parser("ready", help="List ready task nodes from a YAML DAG")
     ready_parser.add_argument("dag")
 
-    prompt_parser = subparsers.add_parser("prompt", help="Render a task prompt")
+    prompt_parser = subparsers.add_parser("prompt", help="Render a task prompt from a YAML DAG")
     prompt_parser.add_argument("dag")
     prompt_parser.add_argument("task_id")
 
-    record_parser = subparsers.add_parser("record", help="Write a run record")
+    record_parser = subparsers.add_parser("record", help="Write a YAML run record")
     record_parser.add_argument("dag")
     record_parser.add_argument("task_id")
     record_parser.add_argument("--model", required=True)
@@ -67,19 +57,6 @@ def main(argv: list[str] | None = None) -> int:
             dag = load_dag(Path(args.dag))
             print(f"valid: {dag.project} ({len(dag.nodes)} nodes)")
             return 0
-
-        if args.command == "export-json":
-            dag = load_dag(Path(args.dag))
-            path = write_dag_json(dag, Path(args.output))
-            print(path)
-            return 0
-
-        if args.command == "check-sync":
-            if dag_documents_match(Path(args.left), Path(args.right)):
-                print("synced")
-                return 0
-            print("not synced", file=sys.stderr)
-            return 1
 
         if args.command == "ready":
             dag = load_dag(Path(args.dag))
