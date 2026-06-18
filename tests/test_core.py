@@ -166,7 +166,7 @@ def test_load_yaml_dag() -> None:
 
 
 def test_rejects_non_yaml_dag_path(tmp_path) -> None:
-    path = tmp_path / "dag.json"
+    path = tmp_path / "dag.txt"
     path.write_text("{}", encoding="utf-8")
     try:
         load_dag(path)

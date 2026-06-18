@@ -21,24 +21,23 @@ the protocol; provider-specific dispatch can sit on top.
 ## Quick Start
 
 ```bash
-python -m agents_swarm validate examples/optimization_dag.yaml
-python -m agents_swarm ready examples/optimization_dag.yaml
-python -m agents_swarm prompt examples/optimization_dag.yaml baseline-inventory
-python -m agents_swarm record examples/optimization_dag.yaml baseline-inventory \
+uv run python -m agents_swarm validate examples/optimization_dag.yaml
+uv run python -m agents_swarm ready examples/optimization_dag.yaml
+uv run python -m agents_swarm prompt examples/optimization_dag.yaml baseline-inventory
+uv run python -m agents_swarm record examples/optimization_dag.yaml baseline-inventory \
   --model gpt-5-mini \
   --status passed \
   --output-commit abc1234 \
   --changed-file docs/baseline.md \
   --verification "pytest -q"
-python -m agents_swarm review examples/optimization_dag.yaml field-resolver-skeleton \
+uv run python -m agents_swarm review examples/optimization_dag.yaml field-resolver-skeleton \
   --status orchestrator_approved
 ```
 
-Use `PYTHONPATH=src` if you are running from a fresh checkout without installing
-the package:
+Use `uv run` from a fresh checkout:
 
 ```bash
-PYTHONPATH=src python -m agents_swarm ready examples/optimization_dag.yaml
+uv run python -m agents_swarm ready examples/optimization_dag.yaml
 ```
 
 After installing the package, the equivalent command is:
@@ -101,3 +100,36 @@ send to a human, or split the task further.
 5. Record the result.
 6. Review gated nodes.
 7. Repeat until the DAG is complete.
+
+## Workbench
+
+The workbench uses one React UI for both browser and Electron. Python remains
+the source of DAG behavior through a local FastAPI API.
+
+Install dependencies:
+
+```bash
+uv sync --dev
+npm install
+```
+
+Run the local API:
+
+```bash
+uv run uvicorn agents_swarm.server:app --reload
+```
+
+Run the browser workbench:
+
+```bash
+npm run web:dev
+```
+
+Run the Electron shell:
+
+```bash
+npm run desktop:dev
+```
+
+The UI follows the system color scheme by default and also exposes
+`system / light / dark` controls. DAG documents and run records remain YAML-only.
