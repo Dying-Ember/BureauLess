@@ -7,4 +7,5 @@ __pycache__/
 *.tsbuildinfo
 node_modules/
 dist/
+test-results/
 runs/

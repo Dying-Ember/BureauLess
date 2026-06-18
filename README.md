@@ -125,6 +125,12 @@ Run the browser workbench:
 npm run web:dev
 ```
 
+Run the browser smoke test after the API and web server are running:
+
+```bash
+npm run web:smoke
+```
+
 Run the Electron shell:
 
 ```bash
