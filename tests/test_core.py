@@ -4,11 +4,13 @@ from agents_swarm.core import (
     Dag,
     ProtocolError,
     create_run_record,
+    dag_documents_match,
     load_dag,
     load_run_records,
     ready_nodes,
     render_prompt,
     update_review_status,
+    write_dag_json,
     write_run_record,
 )
 
@@ -163,3 +165,16 @@ def test_load_yaml_dag() -> None:
     dag = load_dag(Path("examples/optimization_dag.yaml"))
     assert dag.project == "automation-inspection-optimization"
     assert dag.nodes["baseline-inventory"].recommended_model == "gpt-5-mini"
+
+
+def test_yaml_and_json_examples_are_synced() -> None:
+    assert dag_documents_match(
+        Path("examples/optimization_dag.yaml"),
+        Path("examples/optimization_dag.json"),
+    )
+
+
+def test_export_json_round_trip(tmp_path) -> None:
+    dag = load_dag(Path("examples/optimization_dag.yaml"))
+    output = write_dag_json(dag, tmp_path / "dag.json")
+    assert load_dag(output).to_dict() == dag.to_dict()

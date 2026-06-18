@@ -22,6 +22,8 @@ the protocol; provider-specific dispatch can sit on top.
 
 ```bash
 python -m agents_swarm validate examples/optimization_dag.yaml
+python -m agents_swarm check-sync examples/optimization_dag.yaml examples/optimization_dag.json
+python -m agents_swarm export-json examples/optimization_dag.yaml examples/optimization_dag.json
 python -m agents_swarm ready examples/optimization_dag.yaml
 python -m agents_swarm prompt examples/optimization_dag.yaml baseline-inventory
 python -m agents_swarm record examples/optimization_dag.yaml baseline-inventory \
@@ -66,6 +68,20 @@ gswarm status
 ```
 
 ## Core Concepts
+
+### Source Format
+
+YAML is the human-authored source of truth. JSON is a generated compatibility
+artifact for tools that prefer strict machine-readable input.
+
+After editing `examples/optimization_dag.yaml`, regenerate and check JSON:
+
+```bash
+python -m agents_swarm export-json examples/optimization_dag.yaml examples/optimization_dag.json
+python -m agents_swarm check-sync examples/optimization_dag.yaml examples/optimization_dag.json
+```
+
+Use `check-sync` in tests or CI so drift is caught before a task graph is used.
 
 ### Task Node
 

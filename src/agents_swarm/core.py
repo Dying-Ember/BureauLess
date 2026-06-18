@@ -117,6 +117,27 @@ class TaskNode:
                 f"{self.id}: recommended_model must be included in allowed_models"
             )
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "goal": self.goal,
+            "dependencies": self.dependencies,
+            "target_files": self.target_files,
+            "context_files": self.context_files,
+            "allowed_models": self.allowed_models,
+            "recommended_model": self.recommended_model,
+            "risk_level": self.risk_level,
+            "review_gate": self.review_gate,
+            "acceptance_criteria": self.acceptance_criteria,
+            "verification_commands": self.verification_commands,
+            "do_not": self.do_not,
+            "prompt_template": self.prompt_template,
+            "failure_policy": self.failure_policy,
+            "outputs": self.outputs,
+            "tags": self.tags,
+        }
+
 
 @dataclass(frozen=True)
 class Dag:
@@ -156,6 +177,14 @@ class Dag:
                     raise ProtocolError(f"{node.id}: unknown dependency {dependency!r}")
         self._assert_acyclic()
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "project": self.project,
+            "default_review_model": self.default_review_model,
+            "nodes": [node.to_dict() for node in self.nodes.values()],
+        }
+
     def _assert_acyclic(self) -> None:
         temporary: set[str] = set()
         permanent: set[str] = set()
@@ -184,6 +213,18 @@ def load_dag(path: Path) -> Dag:
     if not isinstance(data, dict):
         raise ProtocolError("DAG document must be an object")
     return Dag.from_dict(data)
+
+
+def write_dag_json(dag: Dag, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(dag.to_dict(), handle, indent=2)
+        handle.write("\n")
+    return path
+
+
+def dag_documents_match(left_path: Path, right_path: Path) -> bool:
+    return load_dag(left_path).to_dict() == load_dag(right_path).to_dict()
 
 
 def load_run_records(runs_dir: Path) -> list[dict[str, Any]]:

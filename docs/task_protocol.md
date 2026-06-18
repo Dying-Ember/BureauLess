@@ -15,6 +15,13 @@ YAML is the preferred hand-authored format because task nodes contain long
 natural-language fields. JSON remains supported for generated DAGs and strict
 machine interchange.
 
+Treat YAML as the source of truth and JSON as generated output:
+
+```bash
+python -m agents_swarm export-json examples/optimization_dag.yaml examples/optimization_dag.json
+python -m agents_swarm check-sync examples/optimization_dag.yaml examples/optimization_dag.json
+```
+
 ## Node Fields
 
 Required fields:
