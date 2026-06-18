@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agents-swarm"
+version = "0.1.0"
+description = "Local DAG orchestration primitives for model-routed agent workflows."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+agents-swarm = "agents_swarm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

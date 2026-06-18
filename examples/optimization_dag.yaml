@@ -1,0 +1,147 @@
+schema_version: "0.1"
+project: automation-inspection-optimization
+default_review_model: gpt-5
+nodes:
+  - id: baseline-inventory
+    title: Baseline Inventory
+    goal: >
+      Create a concise inventory of current optimization targets and obvious
+      low-risk cleanup areas.
+    dependencies: []
+    target_files:
+      - docs/
+    context_files:
+      - docs/optimization_task_breakdown.md
+    allowed_models:
+      - gpt-5-mini
+      - gpt-5
+    recommended_model: gpt-5-mini
+    risk_level: low
+    review_gate: auto_pass
+    acceptance_criteria:
+      - Inventory names concrete files or modules.
+      - No production code is changed.
+      - Follow-up tasks are phrased as bounded work.
+    verification_commands: []
+    do_not:
+      - Do not edit runtime code.
+      - Do not invent files that are not present in the repository.
+    prompt_template: >
+      Read the context files and produce a short inventory report. Keep the
+      output factual and cite file paths.
+    failure_policy: retry_same_model
+    outputs:
+      - inventory_report
+    tags:
+      - mini-safe
+      - docs
+      - parallel
+
+  - id: field-resolver-skeleton
+    title: FieldResolver Skeleton
+    goal: >
+      Introduce a pure helper skeleton for field name resolution without
+      migrating existing call sites.
+    dependencies:
+      - baseline-inventory
+    target_files:
+      - engine/
+      - tests/
+    context_files: []
+    allowed_models:
+      - gpt-5-mini
+      - gpt-5
+    recommended_model: gpt-5-mini
+    risk_level: medium
+    review_gate: orchestrator_review
+    acceptance_criteria:
+      - Helper is pure and covered by focused tests.
+      - No existing read/write paths are migrated.
+      - Public behavior remains unchanged.
+    verification_commands:
+      - pytest -q
+    do_not:
+      - Do not change GUI behavior.
+      - Do not migrate call sites in this node.
+    prompt_template: >
+      Implement only the helper skeleton and focused tests. Avoid broad
+      refactors.
+    failure_policy: escalate_to_large_model
+    outputs:
+      - commit
+      - test_result
+    tags:
+      - mini-with-review
+      - helper
+
+  - id: worker-stop-lifecycle
+    title: Worker Stop Lifecycle
+    goal: >
+      Change worker stop behavior toward cooperative cancellation while
+      preserving UI responsiveness.
+    dependencies:
+      - baseline-inventory
+    target_files:
+      - app/
+      - engine/
+      - tests/
+    context_files: []
+    allowed_models:
+      - gpt-5
+    recommended_model: gpt-5
+    risk_level: high
+    review_gate: human_review
+    acceptance_criteria:
+      - Default stop path does not forcefully terminate active work.
+      - Cancellation is observable between records or safe checkpoints.
+      - Tests cover stop state transitions.
+    verification_commands:
+      - pytest -q
+    do_not:
+      - Do not add a new emergency kill UI.
+      - Do not rewrite unrelated worker code.
+    prompt_template: >
+      Inspect worker lifecycle code first. Propose the smallest cooperative stop
+      change, implement it, and add targeted tests.
+    failure_policy: send_to_human
+    outputs:
+      - commit
+      - test_result
+      - risk_notes
+    tags:
+      - large-first
+      - runtime
+      - must-land-alone
+
+  - id: integration-review
+    title: Integration Review
+    goal: >
+      Review completed task outputs and decide merge order, conflict risk, and
+      regression follow-up.
+    dependencies:
+      - field-resolver-skeleton
+      - worker-stop-lifecycle
+    target_files: []
+    context_files: []
+    allowed_models:
+      - gpt-5
+    recommended_model: gpt-5
+    risk_level: high
+    review_gate: human_review
+    acceptance_criteria:
+      - Each dependency has a reviewed run record.
+      - Merge order is explicit.
+      - Regression risks and follow-up tasks are recorded.
+    verification_commands: []
+    do_not:
+      - Do not merge unreviewed high-risk changes.
+    prompt_template: >
+      Review the completed run records and produce a merge and stabilization
+      plan.
+    failure_policy: send_to_human
+    outputs:
+      - review_report
+    tags:
+      - orchestrator
+      - review
+
