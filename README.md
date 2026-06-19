@@ -69,7 +69,7 @@ gswarm status
 ### Source Format
 
 Both DAG documents and run records use YAML. The project does not maintain a
-parallel JSON representation.
+second persisted representation.
 
 ### Task Node
 
@@ -90,6 +90,24 @@ require human review before downstream nodes become ready.
 
 Failures are explicit: retry with the same model, escalate to a larger model,
 send to a human, or split the task further.
+
+### Orchestrator/Harness Direction
+
+The long-term architecture separates the control plane from execution:
+
+- The orchestrator plans, routes, records, reviews, and replans.
+- Worker agents execute bounded tasks.
+- The harness enforces roles, events, gates, budget policy, and provenance.
+- Advisors are lazy and budget-gated.
+
+Design notes and protocol drafts:
+
+- [`docs/research_and_design_notes.md`](docs/research_and_design_notes.md)
+- [`docs/orchestrator_system_prompt.md`](docs/orchestrator_system_prompt.md)
+- [`docs/harness_protocol.md`](docs/harness_protocol.md)
+- [`docs/advisor_policy.md`](docs/advisor_policy.md)
+- [`docs/context_economy.md`](docs/context_economy.md)
+- [`docs/workflow_examples.md`](docs/workflow_examples.md)
 
 ## Suggested Flow
 
