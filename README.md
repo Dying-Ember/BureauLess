@@ -22,6 +22,8 @@ the protocol; provider-specific dispatch can sit on top.
 
 ```bash
 uv run python -m agents_swarm validate examples/optimization_dag.yaml
+uv run python -m agents_swarm mission validate examples/missions/demo/mission.yaml
+uv run python -m agents_swarm workflow compile examples/missions/demo/workflows/coder_reviewer_committer.yaml
 uv run python -m agents_swarm ready examples/optimization_dag.yaml
 uv run python -m agents_swarm prompt examples/optimization_dag.yaml baseline-inventory
 uv run python -m agents_swarm record examples/optimization_dag.yaml baseline-inventory \

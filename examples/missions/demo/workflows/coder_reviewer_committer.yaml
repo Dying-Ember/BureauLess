@@ -1,0 +1,70 @@
+workflow_id: coder-reviewer-committer-001
+mission_id: demo
+proposed_by: orchestrator
+status: proposed
+mode: small_dag
+reason: >
+  A patch must be implemented, reviewed, and committed only after approval.
+roles:
+  coder:
+    can_emit:
+      - patch_ready
+      - implementation_blocked
+    can_consume: []
+  reviewer:
+    can_consume:
+      - patch_ready
+    can_emit:
+      - review_approved
+      - changes_requested
+  committer:
+    can_consume:
+      - patch_ready
+      - review_approved
+    can_emit:
+      - commit_created
+events:
+  patch_ready:
+    producer_roles:
+      - coder
+  review_approved:
+    producer_roles:
+      - reviewer
+  commit_created:
+    producer_roles:
+      - committer
+nodes:
+  - id: implement
+    role: coder
+    waits_for: []
+    emits:
+      - patch_ready
+  - id: review
+    role: reviewer
+    waits_for:
+      all_of:
+        - patch_ready
+    emits:
+      - review_approved
+  - id: commit
+    role: committer
+    waits_for:
+      all_of:
+        - patch_ready
+        - review_approved
+    emits:
+      - commit_created
+gates:
+  - id: commit_gate
+    node_id: commit
+    requires:
+      all_of:
+        - patch_ready
+        - review_approved
+terminal_events:
+  - commit_created
+broadcast_policy:
+  default: filtered_delta
+budget_policy:
+  max_coordination_ratio: 0.25
+

@@ -30,6 +30,8 @@ nodes:
     emits:
       - task_complete
 gates: []
+terminal_events:
+  - task_complete
 broadcast_policy:
   default: filtered_delta
 ```
@@ -45,7 +47,7 @@ roles:
   worker:
     can_emit:
       - task_complete
-  orchestrator_reviewer:
+  control_reviewer:
     can_consume:
       - task_complete
     can_emit:
@@ -56,19 +58,21 @@ events:
       - worker
   orchestrator_approved:
     producer_roles:
-      - orchestrator_reviewer
+      - control_reviewer
 nodes:
   - id: execute
     role: worker
     emits:
       - task_complete
   - id: review
-    role: orchestrator_reviewer
+    role: control_reviewer
     waits_for:
       all_of:
         - task_complete
     emits:
       - orchestrator_approved
+terminal_events:
+  - orchestrator_approved
 ```
 
 ## Coder Reviewer Committer
@@ -132,6 +136,8 @@ gates:
       all_of:
         - patch_ready
         - review_approved
+terminal_events:
+  - commit_created
 ```
 
 ## Parallel Inventory
@@ -151,7 +157,7 @@ roles:
   code_inventory:
     can_emit:
       - inventory_complete
-  orchestrator:
+  ledger_acceptor:
     can_consume:
       - inventory_complete
     can_emit:
@@ -164,7 +170,7 @@ events:
       - code_inventory
   ledger_updated:
     producer_roles:
-      - orchestrator
+      - ledger_acceptor
 nodes:
   - id: docs_inventory
     role: docs_inventory
@@ -179,7 +185,7 @@ nodes:
     emits:
       - inventory_complete
   - id: merge_inventory
-    role: orchestrator
+    role: ledger_acceptor
     waits_for:
       all_of:
         - docs_inventory.inventory_complete
@@ -187,6 +193,8 @@ nodes:
         - code_inventory.inventory_complete
     emits:
       - ledger_updated
+terminal_events:
+  - ledger_updated
 broadcast_policy:
   default: filtered_delta
 ```
@@ -255,6 +263,8 @@ nodes:
         - high_risk_change_ready
     emits:
       - human_approved
+terminal_events:
+  - human_approved
 ```
 
 ## Stop And Ask Human
@@ -272,4 +282,3 @@ required_user_decision:
   - remove commit action
   - approve explicit bypass
 ```
-

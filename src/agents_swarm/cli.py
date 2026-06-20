@@ -14,6 +14,7 @@ from .core import (
     update_review_status,
     write_run_record,
 )
+from .harness import compile_workflow, load_mission, load_workflow
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,6 +24,16 @@ def main(argv: list[str] | None = None) -> int:
 
     validate_parser = subparsers.add_parser("validate", help="Validate a YAML DAG file")
     validate_parser.add_argument("dag")
+
+    mission_parser = subparsers.add_parser("mission", help="Mission operations")
+    mission_subparsers = mission_parser.add_subparsers(dest="mission_command", required=True)
+    mission_validate_parser = mission_subparsers.add_parser("validate", help="Validate a mission YAML file")
+    mission_validate_parser.add_argument("mission")
+
+    workflow_parser = subparsers.add_parser("workflow", help="Workflow operations")
+    workflow_subparsers = workflow_parser.add_subparsers(dest="workflow_command", required=True)
+    workflow_compile_parser = workflow_subparsers.add_parser("compile", help="Compile a workflow YAML file")
+    workflow_compile_parser.add_argument("workflow")
 
     ready_parser = subparsers.add_parser("ready", help="List ready task nodes from a YAML DAG")
     ready_parser.add_argument("dag")
@@ -57,6 +68,22 @@ def main(argv: list[str] | None = None) -> int:
             dag = load_dag(Path(args.dag))
             print(f"valid: {dag.project} ({len(dag.nodes)} nodes)")
             return 0
+
+        if args.command == "mission" and args.mission_command == "validate":
+            mission = load_mission(Path(args.mission))
+            print(f"valid: {mission.mission_id} ({mission.status})")
+            return 0
+
+        if args.command == "workflow" and args.workflow_command == "compile":
+            workflow = load_workflow(Path(args.workflow))
+            result = compile_workflow(workflow)
+            if result.ok:
+                print(f"compiled: {workflow.workflow_id}")
+                return 0
+            for error in result.errors:
+                location = f" node={error.node_id}" if error.node_id else ""
+                print(f"{error.code}{location}: {error.message}", file=sys.stderr)
+            return 1
 
         if args.command == "ready":
             dag = load_dag(Path(args.dag))

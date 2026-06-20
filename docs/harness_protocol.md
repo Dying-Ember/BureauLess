@@ -21,6 +21,9 @@ The harness owns:
 - Broadcast filtering.
 - Replay and recovery.
 
+The orchestrator may approve ledger updates, but the harness validates and
+writes canonical ledger state.
+
 ## Mission
 
 A mission captures the user's goal, constraints, budget, and allowed execution
@@ -93,6 +96,9 @@ created_at: "2026-06-19T00:00:00Z"
 A workflow is an executable coordination proposal. It must compile before any
 assignment is dispatched.
 
+Workflows must declare `terminal_events`. A workflow is complete when the
+runtime observes those events and all required gates for them are satisfied.
+
 ```yaml
 workflow_id: workflow-001
 mission_id: optimize-worker-lifecycle
@@ -156,6 +162,8 @@ gates:
       all_of:
         - patch_ready
         - review_approved
+terminal_events:
+  - commit_created
 broadcast_policy:
   default: filtered_delta
 budget_policy:
@@ -306,7 +314,7 @@ It checks:
 - `waits_for` conditions are satisfiable.
 - Join gates have all required upstream events.
 - Committer-like roles cannot run without review and patch events.
-- Terminal condition exists.
+- Terminal events exist.
 - Obvious deadlocks are rejected.
 
 Compiler output:
@@ -346,4 +354,3 @@ Mission state should be recoverable from:
 
 Replay should explain why each node became runnable, blocked, completed, or
 rejected.
-

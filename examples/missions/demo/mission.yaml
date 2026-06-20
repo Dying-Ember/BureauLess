@@ -1,0 +1,27 @@
+mission_id: demo
+goal: >
+  Demonstrate a gated coder, reviewer, and committer workflow without running
+  real agents.
+created_at: "2026-06-20T00:00:00Z"
+status: planning
+default_mode: single_agent
+allowed_modes:
+  - single_agent
+  - single_agent_with_review
+  - small_dag
+  - parallel_swarm
+  - stop_and_ask_human
+budget:
+  max_total_tokens: 300000
+  max_coordination_ratio: 0.25
+  max_usd: 10.00
+models:
+  gpt-5:
+    role: large_reasoning
+  gpt-5-mini:
+    role: bounded_execution
+human_gate:
+  required_for:
+    - high_risk
+    - commit_to_main
+

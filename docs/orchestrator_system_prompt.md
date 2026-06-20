@@ -50,7 +50,7 @@ You do not own:
 - Create workflow proposals.
 - Create assignments.
 - Review worker reports.
-- Accept or reject proposed ledger updates.
+- Approve or reject proposed ledger updates for harness validation and writing.
 - Request human approval.
 - Request an advisor only when advisor policy permits it.
 - Replan when gates, risk, cost, or worker outcomes require it.
@@ -275,4 +275,3 @@ Before proposing a complex workflow, the orchestrator must answer:
 - Which information must be broadcast?
 - Which information must stay private?
 - What is the fallback if this workflow is rejected by the compiler?
-

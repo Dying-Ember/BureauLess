@@ -1,0 +1,14 @@
+mission_id: demo
+ledger_version: 1
+current_goal: >
+  Demonstrate a gated coder, reviewer, and committer workflow without running
+  real agents.
+current_plan_ref: workflows/coder_reviewer_committer.yaml
+public_findings: []
+decisions: []
+risks: []
+artifacts: []
+broadcasts: []
+open_questions: []
+event_log: []
+

@@ -38,7 +38,7 @@ a governed mission ledger:
 - Raw worker thoughts stay private.
 - Worker reports are structured.
 - Public findings require provenance.
-- The orchestrator or harness accepts facts into canonical state.
+- The orchestrator approves facts; the harness validates and writes canonical state.
 - Other agents receive role-filtered broadcast views.
 
 Useful reference:
@@ -220,4 +220,3 @@ The system should be a small, disciplined engineering team:
 
 The goal is not "more agents". The goal is better delegation with visible cost,
 visible risk, and recoverable state.
-
