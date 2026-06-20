@@ -10,7 +10,7 @@ async function createWindow() {
     minHeight: 720,
     minWidth: 1100,
     show: false,
-    title: 'agents-swarm',
+    title: 'BureauLess',
     width: 1440,
     webPreferences: {
       contextIsolation: true,
@@ -20,7 +20,7 @@ async function createWindow() {
 
   window.once('ready-to-show', () => window.show());
 
-  const devUrl = process.env.AGENTS_SWARM_WEB_URL ?? 'http://127.0.0.1:5173';
+  const devUrl = process.env.BUREAULESS_WEB_URL ?? 'http://127.0.0.1:5173';
   if (process.env.NODE_ENV === 'production') {
     await window.loadFile(path.resolve(__dirname, '../../web/dist/index.html'));
   } else {

@@ -21,6 +21,11 @@ The harness owns:
 - Broadcast filtering.
 - Replay and recovery.
 
+Related protocol files define hardening rules that the harness should enforce
+as implementation catches up:
+
+- [`workflow_selection_policy.md`](workflow_selection_policy.md)
+
 The orchestrator may approve ledger updates, but the harness validates and
 writes canonical ledger state.
 
@@ -77,6 +82,8 @@ open_questions: []
 event_log: []
 ```
 
+Accepted artifacts should use immutable artifact records.
+
 Every public finding needs provenance:
 
 ```yaml
@@ -86,10 +93,44 @@ content: >
 source_event: event-012
 source_agent: inventory-agent
 artifact_refs:
-  - artifacts/inventory-report.md
+  - artifact_id: artifact-001
+    path: artifacts/inventory-report.md
+    sha256: "6f5902ac237024bdd0c176cb93063dc4..."
 accepted_by: orchestrator
 created_at: "2026-06-19T00:00:00Z"
 ```
+
+## Artifact Integrity
+
+Artifacts are immutable evidence objects. Ledger records should refer to
+artifact identifiers, not mutable paths alone.
+
+```yaml
+artifact_id: artifact-001
+path: artifacts/inventory-report.md
+sha256: "6f5902ac237024bdd0c176cb93063dc4..."
+created_by: inventory-agent
+source_event: event-012
+created_at: "2026-06-20T00:00:00Z"
+mime_type: text/markdown
+size_bytes: 12431
+mutable: false
+supersedes: null
+invalidated_by: null
+```
+
+`path` is a retrieval hint. `artifact_id` plus `sha256` is the durable identity.
+String-only references are acceptable only for drafts that have not entered the
+canonical ledger.
+
+Rules:
+
+- An accepted artifact must not be modified in place.
+- A correction creates a new artifact with `supersedes` pointing to the old one.
+- A bad artifact is marked by an `artifact_invalidated` event, not overwritten.
+- Replay must verify the current file hash against the recorded `sha256`.
+- Missing artifacts make provenance incomplete; they do not silently become
+  trusted facts.
 
 ## Workflow
 
@@ -168,7 +209,13 @@ broadcast_policy:
   default: filtered_delta
 budget_policy:
   max_coordination_ratio: 0.25
+  price_snapshot: price-snapshot-2026-06-20
 ```
+
+Workflow mode selection must follow
+[`workflow_selection_policy.md`](workflow_selection_policy.md). A complex
+workflow without a routing decision and selection-policy rationale should be
+rejected.
 
 ## Assignment
 
@@ -231,7 +278,9 @@ status: passed
 emitted_events:
   - patch_ready
 artifact_refs:
-  - artifacts/patch.diff
+  - artifact_id: artifact-002
+    path: artifacts/patch.diff
+    sha256: "9b2cf535f27731c974343645a3985328..."
 verification:
   commands:
     - pytest -q
@@ -254,7 +303,9 @@ role: coder
 agent_id: coder-agent
 created_at: "2026-06-19T00:00:00Z"
 artifact_refs:
-  - artifacts/patch.diff
+  - artifact_id: artifact-002
+    path: artifacts/patch.diff
+    sha256: "9b2cf535f27731c974343645a3985328..."
 provenance:
   source_report: result-001
   accepted_by: harness
@@ -281,6 +332,59 @@ Supported gate combinators:
 - `orchestrator_approved`
 - `budget_approved`
 
+## Failure Lifecycle
+
+The runtime must model unhappy paths as first-class events. A mission that can
+only represent successful assignment completion is not replayable enough for
+real work.
+
+```yaml
+failure_lifecycle_events:
+  - worker_timeout
+  - assignment_cancelled
+  - assignment_retry_requested
+  - assignment_superseded
+  - budget_soft_limit_reached
+  - budget_hard_limit_reached
+  - artifact_invalidated
+  - gate_expired
+  - tool_call_failed
+  - partial_result_submitted
+```
+
+Timeouts, retries, cancellations, and supersessions block downstream gates until
+the orchestrator records what replaced or ended the assignment.
+
+```yaml
+event_id: event-022
+event_type: assignment_retry_requested
+assignment_id: assign-004
+retry_of: assign-003
+reason: >
+  The previous worker produced a partial result but missed required
+  verification.
+retry_policy:
+  max_attempts: 2
+  strategy: same_model_then_escalate
+  preserve_artifacts:
+    - artifact-007
+```
+
+Budget limits are also events:
+
+```yaml
+event_id: event-025
+event_type: budget_soft_limit_reached
+mission_id: optimize-worker-lifecycle
+usage:
+  actual_tokens: 240000
+  max_total_tokens: 300000
+runtime_action: require_replan_before_new_assignments
+```
+
+Soft limits may allow current assignments to finish. Hard limits block new
+assignments and advisor calls until human approval or budget revision.
+
 ## Broadcast View
 
 Workers receive filtered broadcast views, not the full ledger.
@@ -295,7 +399,9 @@ included_findings:
 included_decisions:
   - decision-003
 artifact_refs:
-  - artifacts/inventory-summary.md
+  - artifact_id: artifact-003
+    path: artifacts/inventory-summary.md
+    sha256: "0b4c2fda8f8f0f6f2d6f0b84d7a1c9e0..."
 excluded_reason:
   raw_tool_logs: too_large
   reviewer_private_notes: not_visible_to_role
@@ -353,4 +459,45 @@ Mission state should be recoverable from:
 - Accepted ledger updates.
 
 Replay should explain why each node became runnable, blocked, completed, or
-rejected.
+rejected. It should also explain cancellation, retry, supersession, artifact
+invalidation, and budget-limit transitions.
+
+## Protocol Invariants
+
+These rules should remain true across prompts, workflow compiler checks,
+gatekeeper decisions, and replay.
+
+Worker invariants:
+
+- A worker must not expand its assignment scope.
+- A worker must not request broader context unless it explains expected savings
+  or risk reduction.
+- A worker must not create new agents.
+- A worker must not convert private hypotheses into public findings.
+- A worker must not choose a larger model without model escalation approval.
+- A worker must not update the canonical ledger.
+- A worker must not satisfy gates by assertion; gates require events.
+- A worker must not overwrite accepted artifacts.
+- A worker must not perform forbidden actions listed in its assignment.
+
+Orchestrator invariants:
+
+- The orchestrator owns coordination, not execution.
+- The orchestrator must prefer `single_agent` unless a policy rule justifies
+  escalation.
+- The orchestrator must not bypass compiler or gatekeeper decisions.
+- The orchestrator must not accept public facts without provenance.
+- The orchestrator must not broadcast raw private worker context by default.
+- The orchestrator must not summon advisors without advisor policy approval.
+
+Harness invariants:
+
+- The harness is the enforcement layer.
+- Canonical ledger writes are validated by deterministic rules.
+- Accepted events are append-only.
+- Accepted artifacts are immutable.
+- Gate satisfaction is derived from accepted events and approvals.
+- Budget checks use a recorded price snapshot or explicitly mark price data as
+  unknown.
+
+Human override is allowed only when it is explicit, persisted, and replayable.

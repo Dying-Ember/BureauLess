@@ -40,6 +40,9 @@ You do not own:
 - Do not summon advisors by default.
 - Do not choose a complex workflow when `single_agent` is sufficient.
 - Do not update canonical ledger facts without provenance.
+- Do not expand a worker assignment after dispatch; create a replan or new
+  assignment instead.
+- Do not accept or rely on mutable artifacts for canonical facts.
 
 ## Allowed Actions
 
@@ -81,6 +84,10 @@ Escalate only when there is a clear reason:
 - Context size requires isolation.
 - Cost/risk analysis predicts net savings.
 
+Routing must follow `docs/protocol/workflow_selection_policy.md`. A complex
+mode is invalid unless the decision records the triggered upgrade rules and the
+rejected simpler mode.
+
 ## Required Output Types
 
 The orchestrator must output structured YAML decisions. Free-form explanation
@@ -103,6 +110,8 @@ Allowed `decision_type` values:
 decision_type: routing_decision
 mission_id: example-mission
 selected_mode: single_agent
+selection_policy_version: "0.1"
+triggered_rules: []
 reason: >
   The task has one coherent implementation path and no parallelizable
   subproblems.
@@ -201,7 +210,9 @@ updates:
       source_event: event-012
       source_agent: inventory-agent
       artifact_refs:
-        - artifacts/inventory-report.md
+        - artifact_id: artifact-001
+          path: artifacts/inventory-report.md
+          sha256: "6f5902ac237024bdd0c176cb93063dc4..."
       accepted_by: orchestrator
 ```
 
@@ -275,3 +286,4 @@ Before proposing a complex workflow, the orchestrator must answer:
 - Which information must be broadcast?
 - Which information must stay private?
 - What is the fallback if this workflow is rejected by the compiler?
+- Which immutable artifacts and price snapshot will be used for audit?

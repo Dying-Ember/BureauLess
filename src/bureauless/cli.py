@@ -18,7 +18,7 @@ from .harness import compile_workflow, load_mission, load_workflow
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="agents-swarm")
+    parser = argparse.ArgumentParser(prog="bureauless")
     parser.add_argument("--runs-dir", default="runs", help="Directory for YAML run records")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

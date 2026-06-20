@@ -45,8 +45,8 @@ Implemented:
 - Deterministic workflow compiler.
 - Demo coder/reviewer/committer mission.
 - CLI:
-  - `agents-swarm mission validate`
-  - `agents-swarm workflow compile`
+  - `bureauless mission validate`
+  - `bureauless workflow compile`
 
 Next:
 
@@ -64,6 +64,9 @@ Work:
 - Add event append helpers.
 - Enforce event provenance.
 - Enforce public finding provenance.
+- Enforce immutable artifact references with `artifact_id` and `sha256`.
+- Record timeout, retry, cancellation, supersession, budget-limit, and
+  artifact-invalidation events.
 - Separate raw worker reports from accepted public ledger state.
 - Add replay helper that derives current mission state from event history.
 
@@ -71,6 +74,7 @@ Acceptance:
 
 - Events can be appended to a YAML ledger.
 - Public findings without provenance are rejected.
+- Accepted artifact references verify against recorded hashes.
 - Replaying event history explains why a workflow node is blocked, runnable, or complete.
 
 ### A3: Gatekeeper
@@ -101,7 +105,8 @@ Goal: make advisor usage measurable instead of instinctive.
 Work:
 
 - Implement deterministic advisor gating policy from `docs/protocol/advisor_policy.md`.
-- Add a small model price table format.
+- Implement the budget oracle snapshot format from `docs/architecture/context_economy.md`.
+- Implement workflow selection checks from `docs/protocol/workflow_selection_policy.md`.
 - Estimate P50/P90 token and cost ranges.
 - Record `good_call`, `bad_call`, `good_skip`, and `missed_call` outcomes.
 
@@ -110,6 +115,7 @@ Acceptance:
 - Low-risk single-node workflows skip advisors.
 - High-risk parallel workflows invoke advisor review.
 - Estimation does not call an LLM.
+- Complex workflows without a selection-policy rationale are rejected.
 
 ### A5: Orchestrator Decision Artifacts
 
@@ -123,6 +129,7 @@ Work:
   review decisions.
 - Keep orchestrator outputs machine-readable.
 - Reject decision artifacts that attempt to bypass harness gates.
+- Enforce worker/orchestrator invariants from `docs/protocol/harness_protocol.md`.
 
 Acceptance:
 

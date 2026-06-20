@@ -4,7 +4,7 @@ This is the UI/workbench roadmap, not the full project roadmap. The project-leve
 split between harness/runtime work and workbench/UI work lives in
 `docs/roadmap/development_roadmap.md`.
 
-This task list covers the next phase of the agents-swarm workbench. The current
+This task list covers the next phase of the bureauless workbench. The current
 UI is primarily a DAG viewer and node inspector. The next goal is to turn it
 into a small, safe operations console before adding DAG editing.
 
@@ -102,7 +102,7 @@ Goal: make YAML and DAG problems obvious before editing is introduced.
 - Risk: medium
 - Dependencies: current `load_dag()` validation
 - Target files:
-  - `src/agents_swarm/server.py`
+  - `src/bureauless/server.py`
   - `tests/test_server.py`
 - Work:
   - Add `GET /api/validate?path=...`.
@@ -175,8 +175,8 @@ Goal: allow editing node metadata without changing DAG structure.
 - Risk: high
 - Dependencies: WB-04
 - Target files:
-  - `src/agents_swarm/core.py`
-  - `src/agents_swarm/server.py`
+  - `src/bureauless/core.py`
+  - `src/bureauless/server.py`
   - `tests/test_core.py`
   - `tests/test_server.py`
 - Work:

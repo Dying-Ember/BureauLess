@@ -1,5 +1,5 @@
 {
-  "name": "agents-swarm-workspace",
+  "name": "bureauless-workspace",
   "private": true,
   "workspaces": [
     "apps/web",

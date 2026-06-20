@@ -28,7 +28,10 @@ Use this path for design principles, tradeoffs, and long-lived reasoning.
 Use this path for machine-readable contracts and validation targets.
 
 - [`protocol/harness_protocol.md`](protocol/harness_protocol.md): mission,
-  ledger, workflow, assignment, report, event, gate, and broadcast protocol.
+  ledger, workflow, assignment, report, event, gate, broadcast, artifact,
+  failure lifecycle, and invariant protocol.
+- [`protocol/workflow_selection_policy.md`](protocol/workflow_selection_policy.md):
+  deterministic routing rules for choosing the simplest valid execution mode.
 - [`protocol/advisor_policy.md`](protocol/advisor_policy.md): lazy advisor
   gating policy and first-run heuristics.
 - [`protocol/workflow_examples.md`](protocol/workflow_examples.md): canonical

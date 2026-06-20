@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from agents_swarm.core import create_run_record, load_dag, write_run_record
-from agents_swarm.server import dag_payload, state_payload, update_review_status
+from bureauless.core import create_run_record, load_dag, write_run_record
+from bureauless.server import dag_payload, state_payload, update_review_status
 
 
 def test_api_dag_reads_yaml_dag() -> None:
@@ -21,7 +21,7 @@ def test_api_state_reports_ready_and_blocked() -> None:
 
 
 def test_api_prompt_renders_node_prompt() -> None:
-    from agents_swarm.core import render_prompt
+    from bureauless.core import render_prompt
 
     prompt = render_prompt(load_dag(Path("examples/optimization_dag.yaml")), "baseline-inventory")
     assert "Recommended model: gpt-5-mini" in prompt

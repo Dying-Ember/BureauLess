@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents_swarm.core import (
+from bureauless.core import (
     Dag,
     ProtocolError,
     create_run_record,

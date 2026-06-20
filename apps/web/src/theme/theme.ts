@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 
-const storageKey = 'agents-swarm-theme';
+const storageKey = 'bureauless-theme';
 
 export function useThemeMode() {
   const [mode, setMode] = useState<ThemeMode>(() => {

@@ -109,7 +109,7 @@ function Workbench() {
 function Toolbar({ mode, setMode, refetch }: { mode: ThemeMode; setMode: (mode: ThemeMode) => void; refetch: () => void }) {
   return (
     <header className="toolbar">
-      <div className="brand"><GitBranch size={18} /> agents-swarm</div>
+      <div className="brand"><GitBranch size={18} /> BureauLess</div>
       <div className="toolbar-center">automation-inspection-optimization</div>
       <button className="icon-button" onClick={refetch} title="Refresh"><RefreshCcw size={16} /></button>
       <div className="theme-toggle" aria-label="Theme">

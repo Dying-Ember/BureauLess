@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from agents_swarm.core import ProtocolError
-from agents_swarm.harness import (
+from bureauless.core import ProtocolError
+from bureauless.harness import (
     Ledger,
     Workflow,
     compile_workflow,

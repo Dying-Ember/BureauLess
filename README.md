@@ -1,4 +1,4 @@
-# agents-swarm
+# BureauLess
 
 A small, local orchestration layer for DAG-shaped agent workflows.
 
@@ -21,31 +21,31 @@ the protocol; provider-specific dispatch can sit on top.
 ## Quick Start
 
 ```bash
-uv run python -m agents_swarm validate examples/optimization_dag.yaml
-uv run python -m agents_swarm mission validate examples/missions/demo/mission.yaml
-uv run python -m agents_swarm workflow compile examples/missions/demo/workflows/coder_reviewer_committer.yaml
-uv run python -m agents_swarm ready examples/optimization_dag.yaml
-uv run python -m agents_swarm prompt examples/optimization_dag.yaml baseline-inventory
-uv run python -m agents_swarm record examples/optimization_dag.yaml baseline-inventory \
+uv run python -m bureauless validate examples/optimization_dag.yaml
+uv run python -m bureauless mission validate examples/missions/demo/mission.yaml
+uv run python -m bureauless workflow compile examples/missions/demo/workflows/coder_reviewer_committer.yaml
+uv run python -m bureauless ready examples/optimization_dag.yaml
+uv run python -m bureauless prompt examples/optimization_dag.yaml baseline-inventory
+uv run python -m bureauless record examples/optimization_dag.yaml baseline-inventory \
   --model gpt-5-mini \
   --status passed \
   --output-commit abc1234 \
   --changed-file docs/baseline.md \
   --verification "pytest -q"
-uv run python -m agents_swarm review examples/optimization_dag.yaml field-resolver-skeleton \
+uv run python -m bureauless review examples/optimization_dag.yaml field-resolver-skeleton \
   --status orchestrator_approved
 ```
 
 Use `uv run` from a fresh checkout:
 
 ```bash
-uv run python -m agents_swarm ready examples/optimization_dag.yaml
+uv run python -m bureauless ready examples/optimization_dag.yaml
 ```
 
 After installing the package, the equivalent command is:
 
 ```bash
-agents-swarm ready examples/optimization_dag.yaml
+bureauless ready examples/optimization_dag.yaml
 ```
 
 ## Git In This Workspace
@@ -143,7 +143,7 @@ npm install
 Run the local API:
 
 ```bash
-uv run uvicorn agents_swarm.server:app --reload
+uv run uvicorn bureauless.server:app --reload
 ```
 
 Run the browser workbench:

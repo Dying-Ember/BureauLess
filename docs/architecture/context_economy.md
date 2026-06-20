@@ -159,6 +159,49 @@ actual_usage:
   coordination_tokens: 0
 ```
 
+## Budget Oracle
+
+The budget oracle is the deterministic component that turns model usage into
+auditable cost estimates. It does not call a model and it does not decide
+workflow shape by itself.
+
+It should:
+
+- Store price snapshots used for a mission.
+- Explain token-priced, quota-priced, and bundled models.
+- Convert predicted and actual usage into comparable estimates when possible.
+- Mark estimates as unauditable when price data is missing.
+- Provide the price inputs used by advisor ROI calculations.
+
+```yaml
+model_price_snapshot:
+  snapshot_id: price-snapshot-2026-06-20
+  provider: mixed
+  captured_at: "2026-06-20T00:00:00Z"
+  currency: USD
+  source: manual
+  models:
+    kimi-code:
+      provider: opencode-go
+      pricing_model: token
+      input_per_million: 0.00
+      output_per_million: 0.00
+      source: manual
+      confidence: medium
+    m3:
+      provider: minimax
+      pricing_model: bundled_quota
+      quota_model: bundled
+      effective_cost_basis: monthly_pool
+      marginal_cost_usd: unknown
+      source: manual
+      confidence: low
+```
+
+Prices change and provider billing models differ. The snapshot must record what
+the orchestrator believed at decision time. When prices are bundled,
+quota-based, or unknown, estimates must say so instead of inventing precision.
+
 Record classification:
 
 - `good_call`

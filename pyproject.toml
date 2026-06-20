@@ -3,7 +3,7 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agents-swarm"
+name = "bureauless"
 version = "0.1.0"
 description = "Local DAG orchestration primitives for model-routed agent workflows."
 readme = "README.md"
@@ -14,7 +14,7 @@ dependencies = ["fastapi>=0.115", "PyYAML>=6.0", "uvicorn>=0.32"]
 dev = ["httpx>=0.28", "pytest>=9.0"]
 
 [project.scripts]
-agents-swarm = "agents_swarm.cli:main"
+bureauless = "bureauless.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

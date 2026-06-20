@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 test('renders DAG workbench and node inspector', async ({ page }) => {
   await page.goto('/');
 
-  await expect(page.getByText('agents-swarm')).toBeVisible();
+  await expect(page.getByText('BureauLess')).toBeVisible();
   await expect(page.getByText('Baseline Inventory').first()).toBeVisible();
   await expect(page.getByText('Worker Stop Lifecycle').first()).toBeVisible();
 

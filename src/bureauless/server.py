@@ -29,7 +29,7 @@ class ReviewRequest(BaseModel):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="agents-swarm workbench")
+    app = FastAPI(title="BureauLess workbench")
 
     @app.get("/api/dag")
     def api_dag(path: str = "examples/optimization_dag.yaml") -> dict[str, Any]:
