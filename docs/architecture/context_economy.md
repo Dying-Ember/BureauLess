@@ -180,4 +180,3 @@ The orchestrator should replan when:
 - A high-risk task lacks review or human approval.
 
 The simplest valid workflow should win.
-

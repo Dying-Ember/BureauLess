@@ -1,5 +1,9 @@
 # Workbench Task List
 
+This is the UI/workbench roadmap, not the full project roadmap. The project-level
+split between harness/runtime work and workbench/UI work lives in
+`docs/roadmap/development_roadmap.md`.
+
 This task list covers the next phase of the agents-swarm workbench. The current
 UI is primarily a DAG viewer and node inspector. The next goal is to turn it
 into a small, safe operations console before adding DAG editing.

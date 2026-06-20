@@ -104,12 +104,14 @@ The long-term architecture separates the control plane from execution:
 
 Design notes and protocol drafts:
 
-- [`docs/research_and_design_notes.md`](docs/research_and_design_notes.md)
-- [`docs/orchestrator_system_prompt.md`](docs/orchestrator_system_prompt.md)
-- [`docs/harness_protocol.md`](docs/harness_protocol.md)
-- [`docs/advisor_policy.md`](docs/advisor_policy.md)
-- [`docs/context_economy.md`](docs/context_economy.md)
-- [`docs/workflow_examples.md`](docs/workflow_examples.md)
+- [`docs/README.md`](docs/README.md)
+- [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
+- [`docs/architecture/research_and_design_notes.md`](docs/architecture/research_and_design_notes.md)
+- [`docs/architecture/orchestrator_system_prompt.md`](docs/architecture/orchestrator_system_prompt.md)
+- [`docs/architecture/context_economy.md`](docs/architecture/context_economy.md)
+- [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md)
+- [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)
+- [`docs/protocol/workflow_examples.md`](docs/protocol/workflow_examples.md)
 
 ## Suggested Flow
 
@@ -127,7 +129,9 @@ The workbench uses one React UI for both browser and Electron. Python remains
 the source of DAG behavior through a local FastAPI API.
 
 The detailed workbench roadmap lives in
-[`docs/workbench_tasklist.md`](docs/workbench_tasklist.md).
+[`docs/roadmap/workbench_tasklist.md`](docs/roadmap/workbench_tasklist.md).
+The project-level split between harness/runtime and workbench/UI is described in
+[`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md).
 
 Install dependencies:
 

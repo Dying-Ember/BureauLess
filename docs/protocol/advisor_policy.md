@@ -246,4 +246,3 @@ reason: >
 
 After enough missions, first-run heuristics should be replaced or calibrated by
 project-specific telemetry.
-
