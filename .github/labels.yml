@@ -1,0 +1,39 @@
+- name: runtime
+  color: "0E8A16"
+  description: Harness/runtime execution logic
+
+- name: protocol
+  color: "1D76DB"
+  description: YAML contracts, validators, schemas
+
+- name: workbench
+  color: "6F42C1"
+  description: UI / Electron / browser workbench
+
+- name: budget
+  color: "D93F0B"
+  description: Cost, token, provider pricing, budget oracle
+
+- name: context-economy
+  color: "00A398"
+  description: Context isolation, broadcast, compaction
+
+- name: gatekeeper
+  color: "FBCA04"
+  description: Runnable/blocking logic, approvals, gates
+
+- name: replay
+  color: "5319E7"
+  description: Event history, recovery, derived state
+
+- name: advisor-policy
+  color: "BFDADC"
+  description: Advisor gating, ROI, good/bad call tracking
+
+- name: workflow-selection
+  color: "C5DEF5"
+  description: Mode routing, anti-over-orchestration policy
+
+- name: artifact-integrity
+  color: "F9D0C4"
+  description: Artifact refs, hashes, provenance, immutability
