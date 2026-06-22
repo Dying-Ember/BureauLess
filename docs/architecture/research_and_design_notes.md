@@ -9,6 +9,11 @@ sessions can recover the reasoning without relying on chat history.
 The project is not trying to prove that more agents are always better. The
 system should make orchestration accountable before making it powerful.
 
+The project is also not trying to replace software engineering agents such as
+Codex, Claude Code, Cline, OpenHands, SWE-agent, Goose, Aider, or OpenCode.
+Those systems should be studied as external runtimes that BureauLess can
+constrain, audit, and replay.
+
 The default path is `single_agent`. More complex modes, such as DAG workflows,
 parallel swarms, advisor review, human gates, and commit gates, must justify
 their added coordination cost.
@@ -25,6 +30,54 @@ their added coordination cost.
 - Advisors are lazy, bounded, and budget-gated.
 - Tokens are scarce; coordination overhead is a first-class design constraint.
 - Long-running work must be replayable from durable events.
+
+## Originality Position
+
+BureauLess does not invent workflow graphs, event sourcing, sandboxed agent
+runtimes, provenance, or budget accounting from scratch. Its useful novelty is
+the combination and default posture:
+
+- Do not orchestrate unless orchestration has a budget and risk reason.
+- Do not trust worker claims unless they become accepted events with provenance.
+- Do not broadcast full context when a filtered delta is sufficient.
+- Do not escalate models, agents, or advisors without an explicit gate.
+- Do not let an agent own mission truth, ledger writes, or completion decisions.
+
+This is engineering governance rather than demo-driven autonomy. Its value
+becomes visible when tasks are long-running, providers vary, context is costly,
+and one uncontrolled worker action could pollute shared state.
+
+## Runtime Field Notes Template
+
+When studying external agent products or frameworks, record boundary behavior
+rather than personality or marketing claims:
+
+```yaml
+agent: openhands
+type: software_engineering_runtime
+strengths:
+  - sandboxed execution
+  - lifecycle control
+  - runtime abstraction
+risks:
+  - heavy runtime dependency
+  - may duplicate BureauLess orchestration
+adapter_takeaways:
+  - useful as managed external executor
+  - should not own ledger or workflow selection
+bureauless_boundary:
+  allowed:
+    - execute assignment
+    - produce artifacts
+    - report result
+  forbidden:
+    - update canonical ledger
+    - spawn uncontrolled agents
+    - decide mission completion
+```
+
+For each runtime, ask: what does it teach BureauLess about controlling agents,
+and which capabilities must be kept behind harness rules?
 
 ## Blackboard Architecture
 

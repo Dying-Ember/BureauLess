@@ -2,6 +2,10 @@
 
 A small, local orchestration layer for DAG-shaped agent workflows.
 
+BureauLess is not an agent. It is a token-aware harness for deciding when
+agents are worth using, constraining what they may do, and recording what can
+be trusted.
+
 This project keeps model routing, task dependencies, review gates, and run
 records in YAML files outside of any single chat session. Codex, Claude, or another model can
 act as the orchestrator, while smaller models execute clearly bounded task

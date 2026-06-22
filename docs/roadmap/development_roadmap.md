@@ -33,6 +33,21 @@ Build a YAML-only orchestration harness where:
 
 This is the main line. It makes orchestration safe, auditable, and recoverable.
 
+### Landing Strategy
+
+The project should land in three stages:
+
+1. Manual Harness: generate assignments, export prompts, import result YAML and
+   artifacts, validate provenance, append ledger events, and review in the
+   workbench. No automatic agent dispatch.
+2. Semi-Automatic Runtime: launch one external agent in an isolated worktree,
+   collect results, and keep commit/push/deploy behind gates.
+3. Policy-Driven Automation: add runtime/model selection, retries, fallback, and
+   compaction only after gates, replay, and budget checks are stable.
+
+The first milestone is not "automatic completion". It is making agent work
+bounded, auditable, and unable to damage canonical state.
+
 ### A1: Mission, Ledger, Workflow Foundation
 
 Status: started.

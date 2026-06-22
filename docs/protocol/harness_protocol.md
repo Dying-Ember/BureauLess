@@ -332,6 +332,24 @@ Supported gate combinators:
 - `orchestrator_approved`
 - `budget_approved`
 
+## Permission Levels
+
+Human approval should be reserved for irreversible or externally visible
+boundaries. The harness should prefer deterministic gates and isolated
+workspaces for lower-risk work.
+
+| Level | Capability | Default Gate |
+| --- | --- | --- |
+| L0 | Read, inventory, summarize, inspect repository state | No human gate |
+| L1 | Write inside an isolated worktree or scratch artifact area | Harness isolation |
+| L2 | Run tests or validation inside the isolated workspace | Harness policy |
+| L3 | Produce `patch_ready` or comparable reviewable artifacts | Reviewer or orchestrator gate |
+| L4 | Commit, merge, push, deploy, delete, or affect external systems | Human gate |
+
+This model prevents the system from choosing between two bad extremes:
+prompting a human for every tool call or allowing full autonomous mutation of
+canonical state.
+
 ## Failure Lifecycle
 
 The runtime must model unhappy paths as first-class events. A mission that can
