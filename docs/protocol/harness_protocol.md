@@ -29,6 +29,26 @@ as implementation catches up:
 The orchestrator may approve ledger updates, but the harness validates and
 writes canonical ledger state.
 
+## Runtime Boundary
+
+The v1 harness wraps external agent runtimes. It does not implement the
+internal coding-agent loop for model turns, tool calls, context compaction, or
+token-segment tracing.
+
+The v1 control grain is:
+
+- Assignment.
+- Agent runtime session.
+- Result proposal.
+- Artifact integrity.
+- Review and gate decision.
+- Ledger event.
+- Session-level outcome metrics.
+
+Native agent logs may be preserved as artifacts, but they are not the canonical
+runtime state. The harness uses deterministic evidence such as result proposals,
+artifacts, diffs, verification results, approvals, and ledger events.
+
 ## Mission
 
 A mission captures the user's goal, constraints, budget, and allowed execution
@@ -245,6 +265,12 @@ turn_report_policy:
   max_report_tokens: 600
 ```
 
+Assignments must be interpreted under the
+[Protocol Invariants](#protocol-invariants). Expanding scope, requesting
+broader context without rationale, creating new agents, choosing a larger
+model without approval, or bypassing forbidden actions should be treated as
+validation failures or review blockers rather than as harmless worker freedom.
+
 ## Turn Report
 
 Workers submit turn reports after tool calls or bounded work intervals.
@@ -288,6 +314,114 @@ verification:
 notes: >
   Implementation is ready for review.
 ```
+
+Task results are proposals. They do not become public ledger facts until the
+harness validates role permissions, expected events, artifact integrity,
+forbidden actions, and any required review gates.
+
+Task result validation must also enforce the
+[Protocol Invariants](#protocol-invariants). A result that reflects scope
+expansion, unapproved model escalation, unsupported public findings, or other
+invariant violations should be rejected or held for explicit review.
+
+## Agent Runtime
+
+An agent runtime is an external executor such as Codex CLI, Claude Code, or
+opencode. The harness treats it as a bounded worker process, not as a trusted
+source of canonical mission truth.
+
+Agent adapters must declare and, where possible, verify their control surface:
+
+```yaml
+agent_id: codex-cli
+kind: local_agent_cli
+non_interactive: true
+model_override: cli_arg
+provider_override: runtime_config
+auth_isolation: env_secret
+config_isolation: runtime_override
+working_directory: explicit
+session_persistence: disabled
+output_stream: jsonl
+cancellation: process_kill
+metrics_capability:
+  wall_time: required
+  final_status: required
+  changed_files: required
+  token_usage: optional
+  cost_usage: optional
+```
+
+Model provider configuration is a property of an agent session. It is not the
+top-level execution interface for coding tasks.
+
+## Agent Doctor
+
+Before automatic dispatch, the runtime should run an agent doctor check.
+
+```yaml
+agent_id: codex-cli
+status: usable
+control_level: high
+model_override: verified
+provider_override: verified
+config_isolation: runtime_override
+auth_isolation: env_secret
+session_persistence: disabled
+warnings: []
+```
+
+Agents with failed doctor checks must not receive automatic assignments. Agents
+with partial control may still be used manually or behind stricter review gates.
+
+## Agent Session
+
+An agent session binds one assignment to one external runtime attempt.
+
+```yaml
+session_id: session-001
+assignment_id: assign-001
+agent_id: codex-cli
+target_model: gpt-5-mini
+target_provider: bureauless-proxy
+workdir: .bureauless/worktrees/assign-001
+started_at: "2026-06-20T00:00:00Z"
+finished_at: "2026-06-20T00:03:04Z"
+status: completed
+exit:
+  code: 0
+  reason: completed
+native_log_refs:
+  - artifact_id: artifact-native-001
+    path: artifacts/native/codex-session.jsonl
+    sha256: "8d8d0a..."
+```
+
+Session records may produce result proposals, but sessions must not write the
+canonical ledger directly.
+
+## Outcome Metrics
+
+The v1 metrics target is assignment/session-level accounting, not root-cause
+analysis of every internal tool call.
+
+```yaml
+outcome_metrics:
+  wall_time_ms: 184000
+  input_tokens: 123456
+  output_tokens: 7890
+  total_tokens: 131346
+  cost_usd: 0.42
+  usage_source: adapter_reported
+  usage_confidence: medium
+  changed_files_count: 4
+  patch_bytes: 18231
+  verification_status: passed
+  review_status: approved
+```
+
+If token or cost data is unavailable, the runtime should record the missing data
+explicitly with `usage_confidence: none` rather than inventing a precise value.
 
 ## Event
 
@@ -402,6 +536,17 @@ runtime_action: require_replan_before_new_assignments
 
 Soft limits may allow current assignments to finish. Hard limits block new
 assignments and advisor calls until human approval or budget revision.
+
+Assignment terminality must be explicit in replay:
+
+- `patch_ready`, `review_approved`, `commit_created`, and other accepted
+  workflow-completion events terminate the producing assignment as completed.
+- `assignment_cancelled`, `assignment_superseded`, `worker_timeout`, and
+  `budget_hard_limit_reached` terminate the affected assignment as non-completed.
+- `assignment_retry_requested`, `budget_soft_limit_reached`,
+  `tool_call_failed`, and `partial_result_submitted` are non-terminal on their
+  own; they require a later completion, cancellation, timeout, or supersession
+  event to close the assignment.
 
 ## Broadcast View
 

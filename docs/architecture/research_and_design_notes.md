@@ -14,6 +14,22 @@ Codex, Claude Code, Cline, OpenHands, SWE-agent, Goose, Aider, or OpenCode.
 Those systems should be studied as external runtimes that BureauLess can
 constrain, audit, and replay.
 
+For v1, BureauLess wraps those agent runtimes from the outside. It does not
+enter their internal loops to control every model request, tool call, context
+compaction, or token segment. The first useful boundary is assignment to
+session to result proposal to ledger decision.
+
+This avoids turning BureauLess into another coding agent. Existing coding
+agents already provide filesystem tools, shell execution, patch generation,
+context handling, and provider-specific loops. BureauLess should govern their
+contracts, workspace boundaries, verification evidence, review gates, and
+outcome accounting.
+
+That is also why v1 should not try to normalize every native tool-call format
+into one canonical trace schema. Different agents expose different request,
+tool, and response shapes; forcing a fake universal trace too early would add
+adapter complexity without improving the first useful control boundary.
+
 The default path is `single_agent`. More complex modes, such as DAG workflows,
 parallel swarms, advisor review, human gates, and commit gates, must justify
 their added coordination cost.
@@ -42,10 +58,23 @@ the combination and default posture:
 - Do not broadcast full context when a filtered delta is sufficient.
 - Do not escalate models, agents, or advisors without an explicit gate.
 - Do not let an agent own mission truth, ledger writes, or completion decisions.
+- Do not rebuild agent internals unless a narrow, test-only internal worker is
+  explicitly justified later.
 
 This is engineering governance rather than demo-driven autonomy. Its value
 becomes visible when tasks are long-running, providers vary, context is costly,
 and one uncontrolled worker action could pollute shared state.
+
+## Outcome-First Measurement
+
+The first metrics layer should record whether a bounded assignment was accepted,
+which agent/model/provider ran it, how much wall time it used, how many tokens
+or dollars were reported, and what artifacts or verification results it
+produced.
+
+It should not initially explain why an agent wasted tokens or which internal
+tool call caused failure. Native logs can be stored as immutable artifacts for
+later analysis, while the canonical metrics stay at session granularity.
 
 ## Runtime Field Notes Template
 

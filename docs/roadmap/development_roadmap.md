@@ -32,6 +32,8 @@ Build a YAML-only orchestration harness where:
 ## Line A: Harness Runtime
 
 This is the main line. It makes orchestration safe, auditable, and recoverable.
+Detailed task cards live in
+[`../tasks/runtime_harness_tasklist.md`](../tasks/runtime_harness_tasklist.md).
 
 ### Landing Strategy
 
@@ -42,11 +44,16 @@ The project should land in three stages:
    workbench. No automatic agent dispatch.
 2. Semi-Automatic Runtime: launch one external agent in an isolated worktree,
    collect results, and keep commit/push/deploy behind gates.
-3. Policy-Driven Automation: add runtime/model selection, retries, fallback, and
-   compaction only after gates, replay, and budget checks are stable.
+3. Policy-Driven Automation: add agent/runtime selection, retries, fallback,
+   and budget-aware dispatch only after gates, replay, and budget checks are
+   stable.
 
 The first milestone is not "automatic completion". It is making agent work
 bounded, auditable, and unable to damage canonical state.
+
+The first runtime does not implement an internal coding-agent harness. It wraps
+external agent runtimes at assignment/session/result boundaries and records
+session-level outcome metrics.
 
 ### A1: Mission, Ledger, Workflow Foundation
 
@@ -155,7 +162,8 @@ Acceptance:
 This is the product surface line. It should expose current runtime state before
 it edits or dispatches work.
 
-Detailed task cards live in `docs/roadmap/workbench_tasklist.md`.
+Detailed task cards live in
+[`../tasks/workbench_tasklist.md`](../tasks/workbench_tasklist.md).
 
 ### B1: Operational DAG Viewer
 
@@ -210,8 +218,8 @@ Source tasks:
 Reason for deferral:
 
 - Prompt export remains useful.
-- Actual model dispatch waits until harness gates, ledger, and advisor policy are
-  in place.
+- Actual agent dispatch waits until harness gates, result import, ledger replay,
+  and doctor checks are in place.
 
 ### B5: Graph Editing
 
@@ -246,25 +254,30 @@ runtime remains the source of truth.
 
 1. A2 Event Ledger And Provenance.
 2. A3 Gatekeeper.
-3. B1 Operational DAG Viewer.
-4. A4 Advisor Policy And Budget Estimator.
-5. B2 File And Workspace Ergonomics.
-6. A5 Orchestrator Decision Artifacts.
-7. B3 Safe DAG Metadata Editing.
-8. B4 Dispatch Preparation.
-9. B5 Graph Editing.
+3. Runtime assignment export and result import.
+4. Agent registry and doctor checks.
+5. Session-level outcome metrics.
+6. B1 Operational DAG Viewer.
+7. A4 Advisor Policy And Budget Estimator.
+8. B2 File And Workspace Ergonomics.
+9. A5 Orchestrator Decision Artifacts.
+10. B3 Safe DAG Metadata Editing.
+11. B4 Dispatch Preparation.
+12. B5 Graph Editing.
 
 ## Decision Rules
 
 - If a task improves runtime correctness, it usually belongs to Line A.
 - If a task improves human inspection or local operation, it belongs to Line B.
 - If a task adds write capability, ensure the corresponding runtime validation exists first.
-- If a task adds model dispatch, defer it until workflow gates and ledger replay exist.
+- If a task adds agent dispatch, defer it until workflow gates, result import,
+  ledger replay, and doctor checks exist.
 - If a task is only visually useful but not operationally necessary, keep it behind runtime safety work.
 
 ## Non-Goals For The Next Phase
 
-- No real model provider dispatch.
+- No internal coding-agent harness.
+- No automatic agent dispatch before doctor checks, gates, and replay.
 - No automatic subagent spawning.
 - No visual workflow drag editor.
 - No full-ledger broadcast.

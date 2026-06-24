@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from .core import ProtocolError
+from ..core import ProtocolError
 
 
 VALID_MISSION_MODES = {
@@ -134,14 +134,19 @@ class WorkflowNode:
     role: str
     waits_for: list[str]
     emits: list[str]
+    waits_for_all: list[str]
+    waits_for_any: list[str]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WorkflowNode":
+        waits_for_all, waits_for_any = _event_ref_branches(data.get("waits_for", []))
         return cls(
             id=_as_string(data, "id"),
             role=_as_string(data, "role"),
-            waits_for=_event_refs(data.get("waits_for", [])),
+            waits_for=[*waits_for_all, *waits_for_any],
             emits=_as_string_list(data, "emits", default=[]),
+            waits_for_all=waits_for_all,
+            waits_for_any=waits_for_any,
         )
 
 
@@ -150,13 +155,18 @@ class WorkflowGate:
     id: str
     node_id: str
     requires: list[str]
+    requires_all: list[str]
+    requires_any: list[str]
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WorkflowGate":
+        requires_all, requires_any = _event_ref_branches(data.get("requires", []))
         return cls(
             id=_as_string(data, "id"),
             node_id=_as_string(data, "node_id"),
-            requires=_event_refs(data.get("requires", [])),
+            requires=[*requires_all, *requires_any],
+            requires_all=requires_all,
+            requires_any=requires_any,
         )
 
 
@@ -509,16 +519,25 @@ def _as_mapping_list(
 
 
 def _event_refs(value: Any) -> list[str]:
+    all_of, any_of = _event_ref_branches(value)
+    return [*all_of, *any_of]
+
+
+def _event_ref_branches(value: Any) -> tuple[list[str], list[str]]:
     if value is None:
-        return []
+        return [], []
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return value
+        return value, []
     if isinstance(value, dict):
-        refs: list[str] = []
+        all_of: list[str] = []
+        any_of: list[str] = []
         for key in ("all_of", "any_of"):
             branch = value.get(key, [])
             if not isinstance(branch, list) or not all(isinstance(item, str) for item in branch):
                 raise ProtocolError(f"waits_for/requires field {key!r} must be a list of strings")
-            refs.extend(branch)
-        return refs
+            if key == "all_of":
+                all_of = branch
+            else:
+                any_of = branch
+        return all_of, any_of
     raise ProtocolError("Event references must be a list or an object with all_of/any_of")

@@ -150,7 +150,7 @@ npm install
 运行本地 API：
 
 ```bash
-uv run uvicorn bureauless.server:app --reload
+uv run uvicorn bureauless.api:app --reload
 ```
 
 运行浏览器工作台：
@@ -173,6 +173,20 @@ npm run desktop:dev
 
 UI 默认跟随系统配色，也提供 `system / light / dark` 控制。DAG 文档和运行记录保持
 YAML-only。
+
+## 源码结构
+
+现在 runtime/harness 代码按 ownership boundary 分组，不再平铺在一层模块里：
+
+- `src/bureauless/protocol/`：YAML 协议模型、校验器、assignment/result 处理、
+  artifact 完整性，以及 budget snapshot。
+- `src/bureauless/runtime/`：replay、gatekeeper、session wrapper 和 outcome
+  metrics。
+- `src/bureauless/agents/`：外部 agent registry 和 doctor checks。
+- `src/bureauless/api/`：Workbench 的 FastAPI API 入口。
+- `src/bureauless/cli/`：CLI 入口。
+- `src/bureauless/core.py`：旧版 DAG / run-record 原语，当前作为兼容层保留，
+  新的 mission/workflow runtime 则围绕它逐步长出来。
 
 ## 文档
 

@@ -162,7 +162,7 @@ npm install
 Run the local API:
 
 ```bash
-uv run uvicorn bureauless.server:app --reload
+uv run uvicorn bureauless.api:app --reload
 ```
 
 Run the browser workbench:
@@ -185,6 +185,21 @@ npm run desktop:dev
 
 The UI follows the system color scheme by default and also exposes
 `system / light / dark` controls. DAG documents and run records remain YAML-only.
+
+## Source Layout
+
+The runtime/harness code is now grouped by ownership boundary instead of living
+as one flat module shelf:
+
+- `src/bureauless/protocol/`: YAML-backed protocol models, validators,
+  assignment/result handling, artifact integrity, and budget snapshots.
+- `src/bureauless/runtime/`: replay, gatekeeper, session wrapper, and outcome
+  metrics.
+- `src/bureauless/agents/`: external agent registry and doctor checks.
+- `src/bureauless/api/`: FastAPI workbench API entrypoints.
+- `src/bureauless/cli/`: CLI entrypoints.
+- `src/bureauless/core.py`: legacy DAG/run-record primitives that remain as the
+  compatibility layer while the newer mission/workflow runtime grows around it.
 
 ## Documentation
 

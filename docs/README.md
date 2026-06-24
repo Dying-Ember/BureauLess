@@ -9,7 +9,15 @@ Use this path for implementation order and product/runtime sequencing.
 
 - [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md): project
   roadmap that keeps the harness/runtime line and the workbench/UI line separate.
-- [`roadmap/workbench_tasklist.md`](roadmap/workbench_tasklist.md): concrete
+
+## Tasks
+
+Use this path for concrete implementation task cards and acceptance criteria.
+
+- [`tasks/runtime_harness_tasklist.md`](tasks/runtime_harness_tasklist.md):
+  runtime/harness task cards for ledger, replay, gatekeeper, assignments,
+  external agent sessions, and outcome metrics.
+- [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): concrete
   workbench task cards.
 
 ## Architecture
@@ -43,4 +51,23 @@ For a new implementation session:
 
 1. Read [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md).
 2. Read the relevant protocol file for the runtime feature being changed.
-3. Read the relevant architecture note only when the design rationale matters.
+3. Read the relevant task list in [`tasks/`](tasks/).
+4. Read the relevant architecture note only when the design rationale matters.
+
+## Source Layout
+
+The runtime/harness implementation follows the same boundary split as the
+documentation, but not a literal one-to-one directory mirror:
+
+- `src/bureauless/protocol/`: runtime protocol loaders, validators, artifact
+  integrity, assignment export, result import, and budget snapshot logic.
+- `src/bureauless/runtime/`: replay, gatekeeper, session wrapper, and outcome
+  metrics.
+- `src/bureauless/agents/`: external agent registry and doctor checks.
+- `src/bureauless/api/`: FastAPI workbench API.
+- `src/bureauless/cli/`: CLI entrypoints.
+- `src/bureauless/core.py`: legacy DAG/run-record compatibility layer.
+
+When changing runtime behavior, update both the relevant `docs/protocol/*` file
+and the matching source package so future sessions do not have to reconstruct
+the boundary from chat history.
