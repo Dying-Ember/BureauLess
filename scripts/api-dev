@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_PYTHON="$ROOT_DIR/.venv/bin/python"
+API_URL_FILE="$ROOT_DIR/.bureauless-api-url"
+
+if [[ ! -x "$PROJECT_PYTHON" ]]; then
+  echo "Project virtualenv is missing. Run 'uv sync --dev' from $ROOT_DIR first." >&2
+  exit 1
+fi
+
+# Always prefer the repo-local environment so another active VIRTUAL_ENV does
+# not shadow BureauLess dependencies or entrypoints.
+unset VIRTUAL_ENV
+
+PORT="${BUREAULESS_API_PORT:-8000}"
+HOST="${BUREAULESS_API_HOST:-127.0.0.1}"
+
+SELECTED_PORT=""
+for candidate in $(seq "$PORT" "$((PORT + 49))"); do
+  set +e
+  curl -sS -m 0.2 "http://$HOST:$candidate/" >/dev/null 2>&1
+  status=$?
+  set -e
+  if [[ "$status" -eq 7 ]]; then
+    SELECTED_PORT="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$SELECTED_PORT" ]]; then
+  echo "Could not find a free local port in the range $PORT-$((PORT + 49))." >&2
+  exit 1
+fi
+
+if [[ "$SELECTED_PORT" != "$PORT" ]]; then
+  echo "Port $PORT is busy, using $SELECTED_PORT instead." >&2
+fi
+
+printf 'http://%s:%s\n' "$HOST" "$SELECTED_PORT" >"$API_URL_FILE"
+echo "BureauLess API URL: $(cat "$API_URL_FILE")" >&2
+
+cd "$ROOT_DIR"
+exec "$PROJECT_PYTHON" -m uvicorn bureauless.api:app --reload --host "$HOST" --port "$SELECTED_PORT" "$@"

@@ -150,8 +150,11 @@ npm install
 运行本地 API：
 
 ```bash
-uv run uvicorn bureauless.api:app --reload
+npm run api:dev
 ```
+
+这个启动器会强制使用仓库自己的 `.venv`，所以即使你当前 shell 还挂着别的项目
+的虚拟环境，也不会把 BureauLess 带偏。
 
 运行浏览器工作台：
 

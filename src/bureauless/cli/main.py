@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import shutil
 import sys
 
 import yaml
 
-from ..agents import doctor_agent, list_agent_specs
+from ..agents import (
+    assess_agent_compatibility,
+    assess_dispatch_readiness,
+    doctor_agent,
+    list_agent_compatibility,
+    list_agent_specs,
+)
 from ..core import (
     ProtocolError,
     create_run_record,
@@ -28,6 +35,7 @@ from ..protocol import (
     load_result_proposal,
     load_workflow,
     render_assignment_prompt,
+    sha256_file,
     verify_ledger_artifacts,
     write_ledger,
 )
@@ -40,6 +48,7 @@ from ..runtime.sessions import (
     cancel_session_record,
     create_session_spec,
     load_session_record,
+    package_session_result,
     run_session,
 )
 
@@ -56,6 +65,11 @@ def main(argv: list[str] | None = None) -> int:
     mission_subparsers = mission_parser.add_subparsers(dest="mission_command", required=True)
     mission_validate_parser = mission_subparsers.add_parser("validate", help="Validate a mission YAML file")
     mission_validate_parser.add_argument("mission")
+    mission_golden_path_parser = mission_subparsers.add_parser(
+        "golden-path",
+        help="Prepare and print the canonical runtime milestone golden path for the demo mission",
+    )
+    mission_golden_path_parser.add_argument("workspace")
 
     workflow_parser = subparsers.add_parser("workflow", help="Workflow operations")
     workflow_subparsers = workflow_parser.add_subparsers(dest="workflow_command", required=True)
@@ -98,6 +112,14 @@ def main(argv: list[str] | None = None) -> int:
 
     result_parser = subparsers.add_parser("result", help="Result proposal operations")
     result_subparsers = result_parser.add_subparsers(dest="result_command", required=True)
+    result_package_parser = result_subparsers.add_parser(
+        "package",
+        help="Package a completed session record into an import-ready result proposal",
+    )
+    result_package_parser.add_argument("assignment")
+    result_package_parser.add_argument("session_record")
+    result_package_parser.add_argument("--artifact-root")
+    result_package_parser.add_argument("--result-id")
     result_import_parser = result_subparsers.add_parser("import", help="Import a result proposal into the ledger")
     result_import_parser.add_argument("workflow")
     result_import_parser.add_argument("ledger")
@@ -109,6 +131,18 @@ def main(argv: list[str] | None = None) -> int:
     agent_subparsers.add_parser("list", help="List supported agent runtimes")
     agent_doctor_parser = agent_subparsers.add_parser("doctor", help="Inspect an agent runtime control surface")
     agent_doctor_parser.add_argument("agent_id")
+    agent_matrix_parser = agent_subparsers.add_parser(
+        "matrix",
+        help="Summarize agent compatibility for semi-automatic runtime control",
+    )
+    agent_matrix_parser.add_argument("agent_id", nargs="?")
+    agent_readiness_parser = agent_subparsers.add_parser(
+        "readiness",
+        help="Evaluate dispatch readiness for an agent against a workspace and isolation mode",
+    )
+    agent_readiness_parser.add_argument("agent_id")
+    agent_readiness_parser.add_argument("--workdir", default=".")
+    agent_readiness_parser.add_argument("--isolation-mode", choices=["copy", "worktree"], default="copy")
 
     session_parser = subparsers.add_parser("session", help="Session runtime operations")
     session_subparsers = session_parser.add_subparsers(dest="session_command", required=True)
@@ -117,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     session_run_parser.add_argument("--agent", required=True, choices=["fake", "shell-dummy"])
     session_run_parser.add_argument("--workdir", default=".")
     session_run_parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    session_run_parser.add_argument("--isolation-mode", choices=["copy", "worktree"], default="copy")
+    session_run_parser.add_argument("--cleanup-policy", default="retain_session_root")
     session_run_parser.add_argument("--dry-run", action="store_true")
     session_run_parser.add_argument("--shell-command")
     session_run_parser.add_argument("--session-id")
@@ -167,6 +203,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "mission" and args.mission_command == "validate":
             mission = load_mission(Path(args.mission))
             print(f"valid: {mission.mission_id} ({mission.status})")
+            return 0
+
+        if args.command == "mission" and args.mission_command == "golden-path":
+            manifest = build_demo_golden_path(Path(args.workspace))
+            print(yaml.safe_dump(manifest, sort_keys=False))
             return 0
 
         if args.command == "workflow" and args.workflow_command == "compile":
@@ -242,12 +283,42 @@ def main(argv: list[str] | None = None) -> int:
             print(f"imported: {result.result_id}")
             return 0
 
+        if args.command == "result" and args.result_command == "package":
+            assignment = load_assignment(_load_yaml_mapping(Path(args.assignment), "Assignment"))
+            record = load_session_record(_load_yaml_mapping(Path(args.session_record), "Session"))
+            artifact_root = Path(args.artifact_root) if args.artifact_root else None
+            result = package_session_result(
+                record,
+                assignment,
+                artifact_root=artifact_root,
+                result_id=args.result_id,
+            )
+            print(yaml.safe_dump(result.to_dict(), sort_keys=False))
+            return 0
+
         if args.command == "agent" and args.agent_command == "list":
             print(yaml.safe_dump([spec.to_dict() for spec in list_agent_specs()], sort_keys=False))
             return 0
 
         if args.command == "agent" and args.agent_command == "doctor":
             print(yaml.safe_dump(doctor_agent(args.agent_id).to_dict(), sort_keys=False))
+            return 0
+
+        if args.command == "agent" and args.agent_command == "matrix":
+            if args.agent_id:
+                payload = assess_agent_compatibility(args.agent_id).to_dict()
+            else:
+                payload = [entry.to_dict() for entry in list_agent_compatibility()]
+            print(yaml.safe_dump(payload, sort_keys=False))
+            return 0
+
+        if args.command == "agent" and args.agent_command == "readiness":
+            payload = assess_dispatch_readiness(
+                args.agent_id,
+                Path(args.workdir),
+                isolation_mode=args.isolation_mode,
+            ).to_dict()
+            print(yaml.safe_dump(payload, sort_keys=False))
             return 0
 
         if args.command == "session" and args.session_command == "run":
@@ -258,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
                 workdir=Path(args.workdir),
                 timeout_seconds=args.timeout_seconds,
                 dry_run=args.dry_run,
+                isolation_mode=args.isolation_mode,
+                cleanup_policy=args.cleanup_policy,
                 shell_command=args.shell_command,
                 session_id=args.session_id,
             )
@@ -341,6 +414,330 @@ def _load_yaml_mapping(path: Path, label: str) -> dict:
     if not isinstance(data, dict):
         raise ProtocolError(f"{label} document must be an object")
     return data
+
+
+def build_demo_golden_path(workspace: Path) -> dict:
+    paths = prepare_demo_workspace(workspace)
+    mission_path = paths["mission"]
+    workflow_path = paths["workflow"]
+    ledger_path = paths["ledger"]
+    assignments_dir = paths["assignments_dir"]
+    results_dir = paths["results_dir"]
+
+    implement_assignment = assignments_dir / "implement_assignment.yaml"
+    review_assignment = assignments_dir / "review_assignment.yaml"
+    commit_assignment = assignments_dir / "commit_assignment.yaml"
+
+    return {
+        "milestone": "runtime-milestone-2",
+        "flow_id": "demo-manual-harness-golden-path",
+        "workspace": str(workspace.resolve()),
+        "mission_path": str(mission_path),
+        "workflow_path": str(workflow_path),
+        "ledger_path": str(ledger_path),
+        "results": {
+            "implement": str(results_dir / "implement_result.yaml"),
+            "review": str(results_dir / "review_result.yaml"),
+            "commit": str(results_dir / "commit_result.yaml"),
+        },
+        "artifacts_root": str(paths["artifacts_dir"]),
+        "steps": [
+            {
+                "id": "validate_mission",
+                "argv": ["mission", "validate", str(mission_path)],
+                "expects": {"stdout_contains": "valid: demo"},
+            },
+            {
+                "id": "compile_workflow",
+                "argv": ["workflow", "compile", str(workflow_path)],
+                "expects": {"stdout_contains": "compiled: coder-reviewer-committer-001"},
+            },
+            {
+                "id": "replay_initial_state",
+                "argv": ["ledger", "replay", str(workflow_path), str(ledger_path)],
+                "expects": {
+                    "terminal_complete": False,
+                    "node_states": {
+                        "implement": "runnable",
+                        "review": "blocked",
+                        "commit": "blocked",
+                    },
+                    "blocked_refs": {
+                        "review": ["patch_ready"],
+                        "commit": ["patch_ready", "review_approved"],
+                    },
+                },
+            },
+            {
+                "id": "ready_initial",
+                "argv": ["gatekeeper", "ready", str(workflow_path), str(ledger_path)],
+                "expects": {"ready": ["implement"]},
+            },
+            {
+                "id": "export_implement_assignment",
+                "argv": [
+                    "assignment",
+                    "export",
+                    str(workflow_path),
+                    str(ledger_path),
+                    "implement",
+                    "--assignment-id",
+                    "assign-implement",
+                ],
+                "capture_to": str(implement_assignment),
+                "expects": {
+                    "assignment_id": "assign-implement",
+                    "node_id": "implement",
+                    "expected_events": ["patch_ready"],
+                },
+            },
+            {
+                "id": "import_implement_result",
+                "argv": [
+                    "result",
+                    "import",
+                    str(workflow_path),
+                    str(ledger_path),
+                    str(implement_assignment),
+                    str(results_dir / "implement_result.yaml"),
+                ],
+                "expects": {"stdout_contains": "imported: result-implement"},
+            },
+            {
+                "id": "ready_after_implement",
+                "argv": ["gatekeeper", "ready", str(workflow_path), str(ledger_path)],
+                "expects": {"ready": ["review"]},
+            },
+            {
+                "id": "export_review_assignment",
+                "argv": [
+                    "assignment",
+                    "export",
+                    str(workflow_path),
+                    str(ledger_path),
+                    "review",
+                    "--assignment-id",
+                    "assign-review",
+                ],
+                "capture_to": str(review_assignment),
+                "expects": {
+                    "assignment_id": "assign-review",
+                    "node_id": "review",
+                    "expected_events": ["review_approved"],
+                },
+            },
+            {
+                "id": "import_review_result",
+                "argv": [
+                    "result",
+                    "import",
+                    str(workflow_path),
+                    str(ledger_path),
+                    str(review_assignment),
+                    str(results_dir / "review_result.yaml"),
+                ],
+                "expects": {"stdout_contains": "imported: result-review"},
+            },
+            {
+                "id": "ready_after_review",
+                "argv": ["gatekeeper", "ready", str(workflow_path), str(ledger_path)],
+                "expects": {"ready": ["commit"]},
+            },
+            {
+                "id": "export_commit_assignment",
+                "argv": [
+                    "assignment",
+                    "export",
+                    str(workflow_path),
+                    str(ledger_path),
+                    "commit",
+                    "--assignment-id",
+                    "assign-commit",
+                ],
+                "capture_to": str(commit_assignment),
+                "expects": {
+                    "assignment_id": "assign-commit",
+                    "node_id": "commit",
+                    "expected_events": ["commit_created"],
+                },
+            },
+            {
+                "id": "import_commit_result",
+                "argv": [
+                    "result",
+                    "import",
+                    str(workflow_path),
+                    str(ledger_path),
+                    str(commit_assignment),
+                    str(results_dir / "commit_result.yaml"),
+                ],
+                "expects": {"stdout_contains": "imported: result-commit"},
+            },
+            {
+                "id": "replay_final_state",
+                "argv": ["ledger", "replay", str(workflow_path), str(ledger_path)],
+                "expects": {
+                    "terminal_complete": True,
+                    "node_states": {
+                        "implement": "completed",
+                        "review": "completed",
+                        "commit": "completed",
+                    },
+                },
+            },
+        ],
+    }
+
+
+def prepare_demo_workspace(workspace: Path) -> dict[str, Path]:
+    source_root = _repo_root() / "examples" / "missions" / "demo"
+    if not source_root.exists():
+        raise ProtocolError(f"Demo mission fixture root does not exist: {source_root}")
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    workflows_dir = workspace / "workflows"
+    results_dir = workspace / "results"
+    artifacts_dir = workspace / "artifacts"
+    assignments_dir = workspace / "generated" / "assignments"
+    sessions_dir = workspace / "generated" / "sessions"
+    packaged_results_dir = workspace / "generated" / "results"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    assignments_dir.mkdir(parents=True, exist_ok=True)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    packaged_results_dir.mkdir(parents=True, exist_ok=True)
+
+    mission_path = workspace / "mission.yaml"
+    workflow_path = workflows_dir / "coder_reviewer_committer.yaml"
+    ledger_path = workspace / "ledger.yaml"
+    shutil.copy2(source_root / "mission.yaml", mission_path)
+    shutil.copy2(source_root / "workflows" / "coder_reviewer_committer.yaml", workflow_path)
+    shutil.copy2(source_root / "ledger.yaml", ledger_path)
+
+    _write_demo_artifact(
+        artifacts_dir / "implement_patch.diff",
+        "--- a/src/demo.py\n+++ b/src/demo.py\n@@\n-print('old')\n+print('new')\n",
+    )
+    _write_demo_artifact(
+        artifacts_dir / "review_report.md",
+        "# Review Report\n\nPatch reviewed and approved.\n",
+    )
+    _write_demo_artifact(
+        artifacts_dir / "commit_note.md",
+        "# Commit Note\n\nCommit created after review approval.\n",
+    )
+
+    _write_demo_result(
+        results_dir / "implement_result.yaml",
+        result_id="result-implement",
+        assignment_id="assign-implement",
+        emitted_events=["patch_ready"],
+        changed_files_count=1,
+        artifacts=[
+            _demo_artifact_payload(
+                artifacts_dir / "implement_patch.diff",
+                artifact_id="artifact-implement-patch",
+                created_by="coder",
+                source_event="event-result-implement",
+            )
+        ],
+    )
+    _write_demo_result(
+        results_dir / "review_result.yaml",
+        result_id="result-review",
+        assignment_id="assign-review",
+        emitted_events=["review_approved"],
+        changed_files_count=0,
+        artifacts=[
+            _demo_artifact_payload(
+                artifacts_dir / "review_report.md",
+                artifact_id="artifact-review-report",
+                created_by="reviewer",
+                source_event="event-result-review",
+            )
+        ],
+    )
+    _write_demo_result(
+        results_dir / "commit_result.yaml",
+        result_id="result-commit",
+        assignment_id="assign-commit",
+        emitted_events=["commit_created"],
+        changed_files_count=1,
+        artifacts=[
+            _demo_artifact_payload(
+                artifacts_dir / "commit_note.md",
+                artifact_id="artifact-commit-note",
+                created_by="committer",
+                source_event="event-result-commit",
+            )
+        ],
+    )
+
+    return {
+        "mission": mission_path,
+        "workflow": workflow_path,
+        "ledger": ledger_path,
+        "results_dir": results_dir,
+        "artifacts_dir": artifacts_dir,
+        "assignments_dir": assignments_dir,
+        "sessions_dir": sessions_dir,
+        "packaged_results_dir": packaged_results_dir,
+    }
+
+
+def _write_demo_result(
+    path: Path,
+    *,
+    result_id: str,
+    assignment_id: str,
+    emitted_events: list[str],
+    changed_files_count: int,
+    artifacts: list[dict[str, str]],
+) -> None:
+    payload = {
+        "result_id": result_id,
+        "assignment_id": assignment_id,
+        "agent_id": "manual-demo-worker",
+        "status": "completed",
+        "emitted_events": emitted_events,
+        "artifacts": artifacts,
+        "outcome_metrics": {
+            "wall_time_ms": 1000,
+            "changed_files_count": changed_files_count,
+            "usage_confidence": "none",
+        },
+        "verification": {"status": "passed"},
+        "native_log_refs": [],
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False)
+
+
+def _write_demo_artifact(path: Path, content: str) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def _demo_artifact_payload(
+    path: Path,
+    *,
+    artifact_id: str,
+    created_by: str,
+    source_event: str,
+) -> dict[str, str | bool]:
+    return {
+        "artifact_id": artifact_id,
+        "path": f"artifacts/{path.name}" if path.parent.name == "artifacts" else str(path),
+        "sha256": sha256_file(path),
+        "created_by": created_by,
+        "source_event": source_event,
+        "mutable": False,
+    }
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
 
 
 if __name__ == "__main__":

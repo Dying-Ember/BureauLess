@@ -31,9 +31,9 @@ Within this document, `milestone` names the user-visible delivery target and
 
 Goal: make the current runtime foundation runnable as a single documented loop.
 
-### [ ] RM2-01: Manual Harness Golden Path
+### [x] RM2-01: Manual Harness Golden Path
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: medium
@@ -54,9 +54,9 @@ Goal: make the current runtime foundation runnable as a single documented loop.
     artifacts.
   - The same path can be used as the baseline acceptance flow for Milestone 2.
 
-### [ ] RM2-02: Demo Mission Fixture Tightening
+### [x] RM2-02: Demo Mission Fixture Tightening
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: low
@@ -80,9 +80,9 @@ Goal: make the current runtime foundation runnable as a single documented loop.
 
 Goal: prove that real agents can be driven predictably enough for the harness.
 
-### [ ] RM2-03: Agent Compatibility Matrix
+### [x] RM2-03: Agent Compatibility Matrix
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: medium
@@ -105,9 +105,9 @@ Goal: prove that real agents can be driven predictably enough for the harness.
     manual-only.
   - Doctor results are stable enough to gate launch policy.
 
-### [ ] RM2-04: Native Result Extraction Contracts
+### [x] RM2-04: Native Result Extraction Contracts
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high
@@ -129,9 +129,9 @@ Goal: prove that real agents can be driven predictably enough for the harness.
 
 Goal: run real agent sessions in bounded execution sandboxes.
 
-### [ ] RM2-05: Session Workspace Isolation
+### [x] RM2-05: Session Workspace Isolation
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: high
@@ -148,9 +148,9 @@ Goal: run real agent sessions in bounded execution sandboxes.
   - A session can run without mutating canonical mission state files in place.
   - Cleanup preserves logs and accepted artifacts needed for audit.
 
-### [ ] RM2-06: Timeout, Cancellation, And Supersession Runtime
+### [x] RM2-06: Timeout, Cancellation, And Supersession Runtime
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high
@@ -174,9 +174,9 @@ Goal: run real agent sessions in bounded execution sandboxes.
 Goal: make semi-automatic execution feed the same approval and replay path as
 manual imports.
 
-### [ ] RM2-07: Session-To-Result Packaging
+### [x] RM2-07: Session-To-Result Packaging
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: high
@@ -197,9 +197,9 @@ manual imports.
     results.
   - Packaging failures are explicit and reviewable.
 
-### [ ] RM2-08: Reviewable Runtime Demo
+### [x] RM2-08: Reviewable Runtime Demo
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -227,9 +227,9 @@ manual imports.
 Goal: activate selection and budget policy only after the real session loop is
 stable.
 
-### [ ] RM2-09: Dispatch Readiness Policy
+### [x] RM2-09: Dispatch Readiness Policy
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4
 - Risk: medium
@@ -248,9 +248,9 @@ stable.
     missing.
   - Readiness output is deterministic and machine-readable.
 
-### [ ] RM2-10: Budget And Workflow Selection Activation
+### [x] RM2-10: Budget And Workflow Selection Activation
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.5
 - Risk: medium

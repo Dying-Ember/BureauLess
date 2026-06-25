@@ -5,6 +5,7 @@ from bureauless.api.server import (
     CreateNodeRequest,
     NodeDependenciesUpdateRequest,
     NodeMetadataUpdateRequest,
+    RuntimeDemoRequest,
     create_app,
     dag_payload,
     protocol_error_payload,
@@ -115,6 +116,42 @@ result_proposal: {}
     response = endpoints["/api/metrics"](path=str(session_path))
 
     assert response["entries"][0]["assignment_id"] == "assign-001"
+
+
+def test_runtime_demo_api_creates_reviewable_workspace(tmp_path: Path) -> None:
+    endpoints = _api_endpoints()
+
+    response = endpoints["/api/runtime-demo"](
+        RuntimeDemoRequest(workspace=str(tmp_path / "runtime-demo"))
+    )
+
+    assert response["assignment_id"] == "assign-implement-demo"
+    assert response["result_id"] == "result-implement-demo"
+    assert response["replay"]["nodes"]["implement"]["state"] == "completed"
+    assert response["gatekeeper"]["ready"] == ["review"]
+
+    mission = endpoints["/api/mission"](path=response["mission_path"])
+    workflow = endpoints["/api/workflow"](path=response["workflow_path"])
+    ledger = endpoints["/api/ledger"](path=response["ledger_path"])
+    replay = endpoints["/api/replay"](
+        workflow_path=response["workflow_path"],
+        ledger_path=response["ledger_path"],
+    )
+    gatekeeper = endpoints["/api/gatekeeper"](
+        workflow_path=response["workflow_path"],
+        ledger_path=response["ledger_path"],
+    )
+    metrics = endpoints["/api/metrics"](path=response["session_path"])
+
+    assert mission["mission_id"] == "demo"
+    assert workflow["workflow_id"] == "coder-reviewer-committer-001"
+    assert ledger["event_log"][0]["event_type"] == "assignment_created"
+    assert ledger["event_log"][1]["event_type"] == "result_submitted"
+    assert ledger["event_log"][2]["event_type"] == "patch_ready"
+    assert replay["nodes"]["implement"]["state"] == "completed"
+    assert replay["nodes"]["review"]["state"] == "runnable"
+    assert gatekeeper["ready"] == ["review"]
+    assert metrics["entries"][0]["assignment_id"] == "assign-implement-demo"
 
 
 def test_validate_api_returns_ok_for_valid_dag() -> None:

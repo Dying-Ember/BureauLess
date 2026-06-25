@@ -6,6 +6,7 @@
     "apps/desktop"
   ],
   "scripts": {
+    "api:dev": "./scripts/api-dev",
     "web:dev": "npm --workspace apps/web run dev",
     "web:build": "npm --workspace apps/web run build",
     "web:smoke": "npm --workspace apps/web run smoke",

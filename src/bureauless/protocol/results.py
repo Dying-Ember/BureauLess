@@ -16,14 +16,17 @@ class ResultProposal:
     assignment_id: str
     agent_id: str
     status: str
+    effective_model: str | None
+    effective_provider: str | None
     emitted_events: list[str]
     artifacts: list[dict[str, Any]]
     outcome_metrics: dict[str, Any]
     verification: dict[str, Any]
     native_log_refs: list[dict[str, Any]]
+    review_status: str | None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "result_id": self.result_id,
             "assignment_id": self.assignment_id,
             "agent_id": self.agent_id,
@@ -34,6 +37,13 @@ class ResultProposal:
             "verification": self.verification,
             "native_log_refs": self.native_log_refs,
         }
+        if self.effective_model is not None:
+            payload["effective_model"] = self.effective_model
+        if self.effective_provider is not None:
+            payload["effective_provider"] = self.effective_provider
+        if self.review_status is not None:
+            payload["review_status"] = self.review_status
+        return payload
 
 
 def load_result_proposal(data: dict[str, Any]) -> ResultProposal:
@@ -42,11 +52,14 @@ def load_result_proposal(data: dict[str, Any]) -> ResultProposal:
         assignment_id=_as_string(data, "assignment_id"),
         agent_id=_as_string(data, "agent_id"),
         status=_as_string(data, "status"),
+        effective_model=_as_optional_string(data.get("effective_model")),
+        effective_provider=_as_optional_string(data.get("effective_provider")),
         emitted_events=_as_string_list(data, "emitted_events", default=[]),
         artifacts=_as_mapping_list(data, "artifacts", default=[]),
         outcome_metrics=_as_mapping(data, "outcome_metrics", default={}),
         verification=_as_mapping(data, "verification", default={}),
         native_log_refs=_as_mapping_list(data, "native_log_refs", default=[]),
+        review_status=_as_optional_string(data.get("review_status")),
     )
 
 
@@ -57,7 +70,7 @@ def import_result_proposal(
     result: ResultProposal,
 ) -> Ledger:
     validate_result_proposal(workflow, assignment, result)
-    event = {
+    result_event = {
         "event_id": f"event-{result.result_id}",
         "event_type": "result_submitted",
         "mission_id": workflow.mission_id,
@@ -69,7 +82,26 @@ def import_result_proposal(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "result": result.to_dict(),
     }
-    return append_ledger_event(ledger, event, workflow)
+    updated = append_ledger_event(ledger, result_event, workflow)
+    for index, event_type in enumerate(result.emitted_events, start=1):
+        updated = append_ledger_event(
+            updated,
+            {
+                "event_id": f"event-{result.result_id}-emit-{index}",
+                "event_type": event_type,
+                "mission_id": workflow.mission_id,
+                "workflow_id": workflow.workflow_id,
+                "assignment_id": assignment.assignment_id,
+                "result_id": result.result_id,
+                "node_id": assignment.node_id,
+                "role": assignment.role,
+                "agent_id": result.agent_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "source_event_id": result_event["event_id"],
+            },
+            workflow,
+        )
+    return updated
 
 
 def validate_result_proposal(
@@ -162,4 +194,12 @@ def _as_mapping_list(
     value = data.get(key, default)
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         raise ProtocolError(f"Result field {key!r} must be a list of objects")
+    return value
+
+
+def _as_optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ProtocolError("Optional result field must be a string when present")
     return value

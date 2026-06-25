@@ -10,6 +10,7 @@ from pydantic import BaseModel
 import yaml
 
 from ..agents import doctor_agent, list_agent_specs
+from ..cli.main import prepare_demo_workspace
 from ..core import (
     Dag,
     ProtocolError,
@@ -22,8 +23,22 @@ from ..core import (
     update_node_metadata,
     update_review_status,
 )
-from ..protocol import load_ledger, load_mission, load_workflow
+from ..protocol import (
+    append_ledger_event,
+    export_assignment,
+    import_result_proposal,
+    load_ledger,
+    load_mission,
+    load_workflow,
+    write_ledger,
+)
 from ..runtime import evaluate_gatekeeper, replay_workflow, summarize_metrics
+from ..runtime.sessions import (
+    build_assignment_created_event,
+    create_session_spec,
+    package_session_result,
+    run_session,
+)
 
 
 NodeState = Literal["ready", "blocked", "completed", "needs_review"]
@@ -52,6 +67,15 @@ class NodeDependenciesUpdateRequest(BaseModel):
 class CreateNodeRequest(BaseModel):
     dag_path: str
     node: dict[str, Any]
+
+
+class RuntimeDemoRequest(BaseModel):
+    workspace: str
+    agent: str = "shell-dummy"
+    shell_command: str | None = None
+    assignment_id: str = "assign-implement-demo"
+    session_id: str = "session-implement-demo"
+    result_id: str = "result-implement-demo"
 
 
 def create_app() -> FastAPI:
@@ -222,6 +246,64 @@ def create_app() -> FastAPI:
         snapshot_path = Path(price_snapshot) if price_snapshot else None
         return summarize_metrics(Path(path), snapshot_path)
 
+    @app.post("/api/runtime-demo")
+    def api_runtime_demo(request: RuntimeDemoRequest) -> dict[str, Any]:
+        paths = prepare_demo_workspace(Path(request.workspace))
+        workflow = load_workflow(paths["workflow"])
+        ledger = load_ledger(paths["ledger"])
+        assignment = export_assignment(
+            workflow,
+            ledger,
+            "implement",
+            assignment_id=request.assignment_id,
+        )
+        assignment_path = paths["assignments_dir"] / "implement_assignment.yaml"
+        _write_yaml(assignment_path, assignment.to_dict())
+
+        created_event = build_assignment_created_event(
+            workflow,
+            assignment,
+            request.session_id,
+            request.agent,
+        )
+        ledger = append_ledger_event(ledger, created_event, workflow)
+        write_ledger(paths["ledger"], ledger)
+
+        spec = create_session_spec(
+            assignment=assignment,
+            agent_id=request.agent,
+            workdir=Path(request.workspace),
+            shell_command=request.shell_command or _runtime_demo_shell_command(request.result_id),
+            session_id=request.session_id,
+        )
+        record = run_session(spec, assignment)
+        session_path = paths["sessions_dir"] / "implement_session.yaml"
+        _write_yaml(session_path, record.to_dict())
+
+        result = package_session_result(record, assignment, result_id=request.result_id)
+        result_path = paths["packaged_results_dir"] / "implement_result.yaml"
+        _write_yaml(result_path, result.to_dict())
+
+        ledger = import_result_proposal(workflow, ledger, assignment, result)
+        write_ledger(paths["ledger"], ledger)
+
+        return {
+            "workspace": str(Path(request.workspace).resolve()),
+            "mission_path": str(paths["mission"]),
+            "workflow_path": str(paths["workflow"]),
+            "ledger_path": str(paths["ledger"]),
+            "assignment_path": str(assignment_path),
+            "session_path": str(session_path),
+            "result_path": str(result_path),
+            "agent": request.agent,
+            "assignment_id": assignment.assignment_id,
+            "session_id": record.session_id,
+            "result_id": result.result_id,
+            "replay": replay_workflow(workflow, ledger).to_dict(),
+            "gatekeeper": evaluate_gatekeeper(workflow, ledger).to_dict(),
+            "result": result.to_dict(),
+        }
+
     return app
 
 
@@ -294,6 +376,41 @@ def workflow_payload(workflow) -> dict[str, Any]:
 
 def protocol_error_payload(exc: Exception) -> dict[str, str]:
     return {"error": str(exc)}
+
+
+def _runtime_demo_shell_command(result_id: str) -> str:
+    payload = yaml.safe_dump(
+        {
+            "status": "completed",
+            "effective_model": "shell-dummy",
+            "effective_provider": "fixture",
+            "emitted_events": ["patch_ready"],
+            "artifacts": [
+                {
+                    "artifact_id": f"artifact-{result_id}-patch",
+                    "path": "artifacts/implement_patch.diff",
+                }
+            ],
+            "verification": {"status": "passed"},
+        },
+        sort_keys=False,
+    ).strip()
+    return (
+        "mkdir -p artifacts\n"
+        "cat <<'EOF' > artifacts/implement_patch.diff\n"
+        "--- a/src/demo.py\n"
+        "+++ b/src/demo.py\n"
+        "@@\n"
+        "-print('old')\n"
+        "+print('new')\n"
+        "EOF\n"
+        f"cat <<'EOF'\n{payload}\nEOF"
+    )
+
+
+def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False)
 
 
 def validation_error_from_yaml(exc: yaml.YAMLError) -> dict[str, Any]:
@@ -406,6 +523,7 @@ __all__ = [
     "CreateNodeRequest",
     "NodeMetadataUpdateRequest",
     "ProtocolError",
+    "RuntimeDemoRequest",
     "app",
     "classify_node_state",
     "create_app",

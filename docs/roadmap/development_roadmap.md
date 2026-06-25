@@ -55,6 +55,16 @@ The first runtime does not implement an internal coding-agent harness. It wraps
 external agent runtimes at assignment/session/result boundaries and records
 session-level outcome metrics.
 
+The next runtime milestone starts by formalizing one explicit manual-harness
+golden path for the demo mission. That path is the acceptance spine for every
+later semi-automatic session feature.
+
+The current runtime line also exposes a reviewable semi-automatic demo through
+the API. That demo prepares a workspace, exports an assignment, runs one
+bounded session, packages a result, imports it into the ledger, and leaves the
+resulting mission state inspectable through the normal mission/workflow/ledger/
+replay/gatekeeper endpoints.
+
 ### A1: Mission, Ledger, Workflow Foundation
 
 Status: started.

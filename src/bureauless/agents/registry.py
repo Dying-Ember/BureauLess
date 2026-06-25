@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import shutil
 import subprocess
 from typing import Callable
 
 from ..core import ProtocolError
+from ..runtime_workspace import WorkspaceReadiness, assess_workspace_isolation
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,62 @@ class DoctorResult:
             "version": self.version,
             "checks": [check.to_dict() for check in self.checks],
             "warnings": self.warnings,
+            "metrics_capability": self.metrics_capability,
+        }
+
+
+@dataclass(frozen=True)
+class AgentCompatibility:
+    agent_id: str
+    compatibility_state: str
+    control_level: str
+    binary_path: str | None
+    version: str | None
+    capabilities: dict[str, str]
+    reasons: list[str]
+    warnings: list[str]
+    metrics_capability: dict[str, str]
+
+    def to_dict(self) -> dict:
+        return {
+            "agent_id": self.agent_id,
+            "compatibility_state": self.compatibility_state,
+            "control_level": self.control_level,
+            "binary_path": self.binary_path,
+            "version": self.version,
+            "capabilities": self.capabilities,
+            "reasons": self.reasons,
+            "warnings": self.warnings,
+            "metrics_capability": self.metrics_capability,
+        }
+
+
+@dataclass(frozen=True)
+class DispatchReadiness:
+    agent_id: str
+    readiness_state: str
+    compatibility_state: str
+    control_level: str
+    binary_path: str | None
+    version: str | None
+    isolation: WorkspaceReadiness
+    reasons: list[str]
+    warnings: list[str]
+    capabilities: dict[str, str]
+    metrics_capability: dict[str, str]
+
+    def to_dict(self) -> dict:
+        return {
+            "agent_id": self.agent_id,
+            "readiness_state": self.readiness_state,
+            "compatibility_state": self.compatibility_state,
+            "control_level": self.control_level,
+            "binary_path": self.binary_path,
+            "version": self.version,
+            "isolation": self.isolation.to_dict(),
+            "reasons": self.reasons,
+            "warnings": self.warnings,
+            "capabilities": self.capabilities,
             "metrics_capability": self.metrics_capability,
         }
 
@@ -250,6 +308,141 @@ def doctor_agent(
     )
 
 
+def assess_agent_compatibility(
+    agent_id: str,
+    which: Callable[[str], str | None] = shutil.which,
+    run_command: Callable[[list[str]], CommandOutput] | None = None,
+) -> AgentCompatibility:
+    spec = get_agent_spec(agent_id)
+    doctor = doctor_agent(agent_id, which=which, run_command=run_command)
+
+    if doctor.status == "unavailable":
+        return AgentCompatibility(
+            agent_id=doctor.agent_id,
+            compatibility_state="manual_only",
+            control_level=doctor.control_level,
+            binary_path=doctor.binary_path,
+            version=doctor.version,
+            capabilities={
+                "non_interactive_execution": "none",
+                "model_override": "none",
+                "provider_override": "none",
+                "config_isolation": "none",
+                "working_directory_control": "none",
+                "output_capture": "none",
+                "timeout_control": "none",
+                "cancellation_control": "none",
+                "metrics_visibility": "none",
+            },
+            reasons=["binary_unavailable"],
+            warnings=doctor.warnings,
+            metrics_capability=doctor.metrics_capability,
+        )
+
+    checks = {check.name: check for check in doctor.checks}
+    capabilities = {
+        "non_interactive_execution": _check_level(checks["non_interactive"]),
+        "model_override": _check_level(checks["model_override"]),
+        "provider_override": _check_level(checks["provider_override"]),
+        "config_isolation": _check_level(checks["config_isolation"]),
+        "working_directory_control": _check_level(checks["working_directory"]),
+        "output_capture": _check_level(checks["output_stream"], fallback="weak"),
+        "timeout_control": "strong" if doctor.binary_path else "none",
+        "cancellation_control": _cancellation_level(spec, doctor),
+        "metrics_visibility": _metrics_visibility_level(spec),
+    }
+
+    core_capabilities = {
+        "non_interactive_execution",
+        "model_override",
+        "provider_override",
+        "config_isolation",
+        "working_directory_control",
+        "output_capture",
+        "timeout_control",
+        "cancellation_control",
+    }
+    reasons = [
+        capability
+        for capability, level in capabilities.items()
+        if level != "strong"
+        and capability in core_capabilities
+    ]
+    hard_failures = {
+        "non_interactive_execution",
+        "model_override",
+        "working_directory_control",
+    }
+    if any(capabilities[name] == "none" for name in hard_failures):
+        compatibility_state = "manual_only"
+    elif any(capabilities[name] != "strong" for name in core_capabilities):
+        compatibility_state = "limited"
+    else:
+        compatibility_state = "dispatchable"
+
+    return AgentCompatibility(
+        agent_id=doctor.agent_id,
+        compatibility_state=compatibility_state,
+        control_level=doctor.control_level,
+        binary_path=doctor.binary_path,
+        version=doctor.version,
+        capabilities=capabilities,
+        reasons=reasons,
+        warnings=doctor.warnings,
+        metrics_capability=doctor.metrics_capability,
+    )
+
+
+def list_agent_compatibility(
+    which: Callable[[str], str | None] = shutil.which,
+    run_command: Callable[[list[str]], CommandOutput] | None = None,
+) -> list[AgentCompatibility]:
+    return [
+        assess_agent_compatibility(spec.agent_id, which=which, run_command=run_command)
+        for spec in list_agent_specs()
+    ]
+
+
+def assess_dispatch_readiness(
+    agent_id: str,
+    workdir: Path,
+    isolation_mode: str = "copy",
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    run_command: Callable[[list[str]], CommandOutput] | None = None,
+) -> DispatchReadiness:
+    compatibility = assess_agent_compatibility(
+        agent_id,
+        which=which,
+        run_command=run_command,
+    )
+    isolation = assess_workspace_isolation(workdir, isolation_mode=isolation_mode)
+    reasons = list(compatibility.reasons)
+    reasons.extend(isolation.reasons)
+    warnings = [*compatibility.warnings, *isolation.warnings]
+
+    if isolation.status != "ready":
+        readiness_state = "blocked"
+    elif compatibility.compatibility_state == "dispatchable":
+        readiness_state = "dispatchable"
+    else:
+        readiness_state = "manual_only"
+
+    return DispatchReadiness(
+        agent_id=compatibility.agent_id,
+        readiness_state=readiness_state,
+        compatibility_state=compatibility.compatibility_state,
+        control_level=compatibility.control_level,
+        binary_path=compatibility.binary_path,
+        version=compatibility.version,
+        isolation=isolation,
+        reasons=reasons,
+        warnings=warnings,
+        capabilities=compatibility.capabilities,
+        metrics_capability=compatibility.metrics_capability,
+    )
+
+
 def _marker_check(name: str, markers: list[str], text: str) -> DoctorCheck:
     missing = [marker for marker in markers if marker not in text]
     return DoctorCheck(
@@ -258,6 +451,36 @@ def _marker_check(name: str, markers: list[str], text: str) -> DoctorCheck:
         markers=markers,
         missing_markers=missing,
     )
+
+
+def _check_level(check: DoctorCheck, fallback: str | None = None) -> str:
+    if not check.markers:
+        return fallback or "none"
+    if not check.missing_markers:
+        return "strong"
+    if len(check.missing_markers) < len(check.markers):
+        return "weak"
+    return fallback or "none"
+
+
+def _cancellation_level(spec: AgentSpec, doctor: DoctorResult) -> str:
+    if doctor.binary_path is None:
+        return "none"
+    if spec.cancellation == "process_kill":
+        return "strong"
+    if spec.cancellation:
+        return "weak"
+    return "none"
+
+
+def _metrics_visibility_level(spec: AgentSpec) -> str:
+    token_support = spec.metrics_capability.get("token_usage")
+    cost_support = spec.metrics_capability.get("cost_usage")
+    if token_support in {"required", "optional"} and cost_support in {"required", "optional"}:
+        return "strong" if token_support == "required" and cost_support == "required" else "weak"
+    if token_support in {"required", "optional"} or cost_support in {"required", "optional"}:
+        return "weak"
+    return "none"
 
 
 def _run_command(command: list[str]) -> CommandOutput:

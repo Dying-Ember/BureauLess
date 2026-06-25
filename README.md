@@ -162,8 +162,11 @@ npm install
 Run the local API:
 
 ```bash
-uv run uvicorn bureauless.api:app --reload
+npm run api:dev
 ```
+
+This launcher always uses the repo-local `.venv`, so it still works even if
+your shell currently has another project's virtual environment activated.
 
 Run the browser workbench:
 

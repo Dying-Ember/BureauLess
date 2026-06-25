@@ -7,7 +7,7 @@ from .artifacts import (
     verify_ledger_artifacts,
 )
 from .assignments import AssignmentPacket, export_assignment, load_assignment, render_assignment_prompt
-from .budget import estimate_cost_from_snapshot, load_price_snapshot
+from .budget import CostEstimate, PreDispatchPolicyDecision, estimate_cost_from_snapshot, evaluate_pre_dispatch_policy, load_price_snapshot
 from .harness import (
     CompileError,
     CompileResult,
@@ -29,11 +29,13 @@ from .results import ResultProposal, import_result_proposal, load_result_proposa
 __all__ = [
     "ArtifactVerification",
     "AssignmentPacket",
+    "CostEstimate",
     "CompileError",
     "CompileResult",
     "EventSpec",
     "Ledger",
     "Mission",
+    "PreDispatchPolicyDecision",
     "ResultProposal",
     "RoleSpec",
     "Workflow",
@@ -42,6 +44,7 @@ __all__ = [
     "append_ledger_event",
     "compile_workflow",
     "estimate_cost_from_snapshot",
+    "evaluate_pre_dispatch_policy",
     "export_assignment",
     "import_result_proposal",
     "load_assignment",

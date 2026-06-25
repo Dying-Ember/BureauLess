@@ -76,6 +76,182 @@ It should not initially explain why an agent wasted tokens or which internal
 tool call caused failure. Native logs can be stored as immutable artifacts for
 later analysis, while the canonical metrics stay at session granularity.
 
+## Agent Compatibility Matrix
+
+Before semi-automatic execution, the runtime needs a compatibility view that is
+more actionable than raw CLI help text and less policy-heavy than final
+dispatch readiness.
+
+The compatibility matrix answers:
+
+- can this agent run non-interactively?
+- can the harness override model and provider settings?
+- can the harness isolate config?
+- can the harness control working directory and capture structured output?
+- can timeout and cancellation be enforced from the outside?
+
+This layer should classify agents as `dispatchable`, `limited`, or
+`manual_only` based on their observed control surface. It is still not the same
+thing as dispatch readiness. Final readiness also depends on workspace
+isolation, session behavior, and later policy gates.
+
+## Native Result Extraction Contracts
+
+Session records should say how runtime metrics were obtained, not just what the
+final numbers were.
+
+That means the runtime must distinguish at least three cases:
+
+- the agent emitted structured result data and the wrapper extracted it
+- the agent completed but did not emit usage or patch metadata
+- the wrapper expected structure but failed to extract it cleanly
+
+This distinction matters because `missing` is not one thing. "The agent never
+reported token usage" is a different operational fact from "the wrapper broke
+while parsing stdout". Those cases should produce different extraction status,
+warnings, and confidence levels even if both end with `total_tokens` missing.
+
+For v1, this contract stays at session granularity:
+
+- preserve native stdout/stderr
+- extract session-level outcome metrics where possible
+- record an explicit extraction contract and status
+- avoid pretending we have a canonical cross-agent internal tool trace
+
+This keeps the first useful accounting boundary honest without dragging the
+project into premature per-tool-call normalization.
+
+## Session Workspace Isolation
+
+Semi-automatic runtime only becomes trustworthy when assignment execution is
+physically separated from canonical mission state.
+
+For v1, the important property is not "perfect sandboxing". It is "a worker
+cannot casually mutate the source root that the orchestrator treats as
+canonical input state".
+
+That is why the session record should capture:
+
+- source root
+- prepared workspace path
+- requested isolation mode
+- actual isolation mode after fallback
+- cleanup policy
+- retained paths for logs and audit artifacts
+
+Copy mode is the baseline because it is portable and easy to reason about.
+Worktree mode is the preferred git-aware optimization where available, because
+it preserves repository structure while still keeping writes off the canonical
+working tree.
+
+The runtime should treat fallback as explicit state, not hidden behavior. If a
+requested worktree launch falls back to copy mode, the session record should
+say so.
+
+## Assignment Lifecycle Replay
+
+Session records alone are not enough for runtime control. The harness also
+needs replayable assignment lifecycle facts in the ledger.
+
+For the current runtime boundary, three points matter:
+
+- `assignment_created` prevents duplicate dispatch of the same runnable node
+- `worker_timeout`, `assignment_cancelled`, and `assignment_superseded` close
+  an attempt as non-completed
+- accepted workflow output events, not raw session success, mark an attempt as
+  completed
+
+This keeps an important distinction intact: a process can exit successfully
+without producing any accepted workflow event. In that case the assignment
+attempt is still auditable, but it should not masquerade as completed.
+
+Replay should therefore expose assignment attempts as separate lifecycle state,
+while preserving the simpler node state used by the gatekeeper:
+
+- completed if accepted workflow events exist
+- blocked if dependencies, gates, or an in-flight assignment block dispatch
+- runnable when waits are satisfied and no active assignment remains
+
+## Session-To-Result Packaging
+
+The runtime should not treat a raw session record as interchangeable with a
+result proposal.
+
+A session record is execution evidence. A result proposal is an importable
+claim. Packaging is the step that turns one into the other.
+
+That boundary matters because packaging is where the runtime can still reject
+bad provenance before canonical ledger state is touched.
+
+For v1, packaging should enforce:
+
+- assignment boundary matches between session and assignment packet
+- completed-only packaging for import-ready results
+- deterministic `result_id` and `source_event` derivation
+- artifact hashes verified against actual files at packaging time
+- native logs converted into immutable artifact-style refs
+
+If a session says an artifact exists but the file is gone, the runtime should
+fail packaging explicitly. It should not silently pass through the stale path
+and hope a later import or replay step notices.
+
+## Dispatch Readiness
+
+Compatibility and dispatch readiness should remain separate concepts.
+
+Compatibility answers: what control surface does this agent expose?
+
+Dispatch readiness answers: given this agent and this workspace policy, may the
+runtime launch it automatically right now?
+
+That distinction matters because an agent can be partially usable in a manual
+path while still being below the bar for automatic launch.
+
+For the current runtime line, the readiness states are:
+
+- `dispatchable`: compatibility is strong enough and the requested workspace
+  isolation mode is currently satisfiable
+- `manual_only`: the workspace is fine, but the agent control surface is below
+  the automatic-launch threshold
+- `blocked`: the requested launch policy cannot be satisfied in the current
+  environment, for example because the workspace root is missing or worktree
+  isolation is unavailable
+
+This keeps "agent weakness" and "environmental launch failure" distinct in a
+machine-readable way. That distinction is useful for both policy code and
+workbench messaging.
+
+## Observed Budget Activation
+
+Budget policy should stop pretending that every decision is first-run
+estimation forever.
+
+Once stable session metrics exist, pre-dispatch policy should use observed
+runtime evidence alongside configured limits:
+
+- cumulative observed token usage
+- cumulative known cost usage
+- missing-usage and missing-cost counts
+- observed coordination ratio across prior workflow modes
+
+This does not replace prediction. It constrains prediction.
+
+The runtime still needs projected tokens, projected cost, and projected
+coordination ratio for the proposed dispatch. But those projections should be
+checked against mission budget in the context of what has already been spent.
+
+Workflow selection should also remain conservative:
+
+- reject or simplify over-orchestrated plans such as unjustified
+  `parallel_swarm`
+- raise the floor when a proposed `single_agent` path violates review/risk
+  requirements
+- stop automatic dispatch entirely when hard budget conditions or human-stop
+  rules trigger
+
+That gives the system a concrete pre-dispatch control point instead of leaving
+budget and workflow policy as passive documentation.
+
 ## Runtime Field Notes Template
 
 When studying external agent products or frameworks, record boundary behavior
