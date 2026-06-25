@@ -183,6 +183,9 @@ Run the Electron shell:
 npm run desktop:dev
 ```
 
+If the local npm Electron binary is incomplete, the launcher automatically falls
+back to a system install such as `electron39`.
+
 The UI follows the system color scheme by default and also exposes
 `system / light / dark` controls. DAG documents and run records remain YAML-only.
 
@@ -207,6 +210,11 @@ Design notes, protocol drafts, and roadmap live here:
 
 - [`docs/README.md`](docs/README.md)
 - [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
+- [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_1_tasklist.md`](docs/tasks/runtime_harness_milestone_1_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_2_tasklist.md`](docs/tasks/runtime_harness_milestone_2_tasklist.md)
+- [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
+- [`docs/tasks/workbench_milestone_1_tasklist.md`](docs/tasks/workbench_milestone_1_tasklist.md)
 - [`docs/architecture/research_and_design_notes.md`](docs/architecture/research_and_design_notes.md)
 - [`docs/architecture/orchestrator_system_prompt.md`](docs/architecture/orchestrator_system_prompt.md)
 - [`docs/architecture/context_economy.md`](docs/architecture/context_economy.md)
@@ -214,3 +222,11 @@ Design notes, protocol drafts, and roadmap live here:
 - [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
 - [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)
 - [`docs/protocol/workflow_examples.md`](docs/protocol/workflow_examples.md)
+
+The docs now use one shared vocabulary:
+
+- `milestone`: a user-visible delivery target
+- `workstream`: an internal implementation grouping inside a milestone
+
+That keeps runtime and workbench planning aligned instead of letting one side
+talk in phases while the other talks in milestones.

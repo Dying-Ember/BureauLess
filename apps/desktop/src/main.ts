@@ -6,22 +6,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function createWindow() {
   const window = new BrowserWindow({
-    height: 980,
-    minHeight: 720,
-    minWidth: 1100,
-    show: false,
-    title: 'BureauLess',
-    width: 1440,
-    webPreferences: {
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
-    },
-  });
+        height: 980,
+        minHeight: 720,
+        minWidth: 1100,
+        show: false,
+        title: 'BureauLess',
+        width: 1440,
+        webPreferences: {
+          contextIsolation: true,
+          preload: path.join(__dirname, 'preload.cjs'),
+        },
+      });
 
   window.once('ready-to-show', () => window.show());
 
   const devUrl = process.env.BUREAULESS_WEB_URL ?? 'http://127.0.0.1:5173';
-  if (process.env.NODE_ENV === 'production') {
+  if (app.isPackaged) {
     await window.loadFile(path.resolve(__dirname, '../../web/dist/index.html'));
   } else {
     await window.loadURL(devUrl);

@@ -274,7 +274,7 @@ runtime remains the source of truth.
   ledger replay, and doctor checks exist.
 - If a task is only visually useful but not operationally necessary, keep it behind runtime safety work.
 
-## Non-Goals For The Next Phase
+## Non-Goals For The Next Milestone
 
 - No internal coding-agent harness.
 - No automatic agent dispatch before doctor checks, gates, and replay.

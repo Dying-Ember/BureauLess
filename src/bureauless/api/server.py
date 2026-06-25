@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import yaml
 
 from ..agents import doctor_agent, list_agent_specs
 from ..core import (
     Dag,
     ProtocolError,
+    create_node,
     load_dag,
     load_run_records,
     ready_nodes,
     render_prompt,
+    update_node_dependencies,
+    update_node_metadata,
     update_review_status,
 )
 from ..protocol import load_ledger, load_mission, load_workflow
@@ -32,6 +37,23 @@ class ReviewRequest(BaseModel):
     run_id: str | None = None
 
 
+class NodeMetadataUpdateRequest(BaseModel):
+    dag_path: str
+    task_id: str
+    updates: dict[str, Any]
+
+
+class NodeDependenciesUpdateRequest(BaseModel):
+    dag_path: str
+    task_id: str
+    dependencies: list[str]
+
+
+class CreateNodeRequest(BaseModel):
+    dag_path: str
+    node: dict[str, Any]
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="BureauLess workbench")
 
@@ -47,6 +69,16 @@ def create_app() -> FastAPI:
     def api_dag(path: str = "examples/optimization_dag.yaml") -> dict[str, Any]:
         dag = load_dag(Path(path))
         return dag_payload(dag)
+
+    @app.get("/api/validate")
+    def api_validate(path: str = "examples/optimization_dag.yaml") -> dict[str, Any]:
+        try:
+            load_dag(Path(path))
+        except yaml.YAMLError as exc:
+            return {"ok": False, "errors": [validation_error_from_yaml(exc)]}
+        except (ProtocolError, OSError) as exc:
+            return {"ok": False, "errors": [validation_error_from_exception(exc)]}
+        return {"ok": True, "errors": []}
 
     @app.get("/api/runs")
     def api_runs(runs_dir: str = "runs") -> dict[str, Any]:
@@ -79,6 +111,49 @@ def create_app() -> FastAPI:
             run_id=request.run_id,
         )
         return {"path": str(path)}
+
+    @app.post("/api/dag/node-metadata")
+    def api_update_node_metadata(request: NodeMetadataUpdateRequest) -> dict[str, Any]:
+        path, backup_path, dag = update_node_metadata(
+            dag_path=Path(request.dag_path),
+            task_id=request.task_id,
+            updates=request.updates,
+        )
+        return {
+            "path": str(path),
+            "backup_path": str(backup_path),
+            "node": dag.nodes[request.task_id].to_dict(),
+        }
+
+    @app.post("/api/dag/node-dependencies")
+    def api_update_node_dependencies(
+        request: NodeDependenciesUpdateRequest,
+    ) -> dict[str, Any]:
+        path, backup_path, dag = update_node_dependencies(
+            dag_path=Path(request.dag_path),
+            task_id=request.task_id,
+            dependencies=request.dependencies,
+        )
+        return {
+            "path": str(path),
+            "backup_path": str(backup_path),
+            "node": dag.nodes[request.task_id].to_dict(),
+        }
+
+    @app.post("/api/dag/nodes")
+    def api_create_node(request: CreateNodeRequest) -> dict[str, Any]:
+        path, backup_path, dag = create_node(
+            dag_path=Path(request.dag_path),
+            node_data=request.node,
+        )
+        node_id = request.node.get("id")
+        if not isinstance(node_id, str):
+            raise ProtocolError("Field 'id' must be a string")
+        return {
+            "path": str(path),
+            "backup_path": str(backup_path),
+            "node": dag.nodes[node_id].to_dict(),
+        }
 
     @app.get("/api/mission")
     def api_mission(path: str = "examples/missions/demo/mission.yaml") -> dict[str, Any]:
@@ -221,6 +296,80 @@ def protocol_error_payload(exc: Exception) -> dict[str, str]:
     return {"error": str(exc)}
 
 
+def validation_error_from_yaml(exc: yaml.YAMLError) -> dict[str, Any]:
+    message = "Invalid YAML syntax"
+    if getattr(exc, "problem", None):
+        message = f"{message}: {exc.problem}"
+
+    error: dict[str, Any] = {
+        "code": "invalid_yaml",
+        "message": message,
+    }
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        error["line"] = mark.line + 1
+        error["column"] = mark.column + 1
+    return error
+
+
+def validation_error_from_exception(exc: Exception) -> dict[str, Any]:
+    message = str(exc)
+
+    missing_fields_match = re.fullmatch(
+        r"Task node is missing required fields: (?P<fields>.+)",
+        message,
+    )
+    if missing_fields_match:
+        fields = [field.strip() for field in missing_fields_match.group("fields").split(",")]
+        return {
+            "code": "missing_required_fields",
+            "message": message,
+            "fields": fields,
+        }
+
+    unknown_dependency_match = re.fullmatch(
+        r"(?P<node_id>[^:]+): unknown dependency (?P<dependency>.+)",
+        message,
+    )
+    if unknown_dependency_match:
+        dependency = unknown_dependency_match.group("dependency").strip("'")
+        return {
+            "code": "unknown_dependency",
+            "message": message,
+            "node_id": unknown_dependency_match.group("node_id"),
+            "dependency": dependency,
+        }
+
+    duplicate_node_match = re.fullmatch(r"Duplicate node id: (?P<node_id>.+)", message)
+    if duplicate_node_match:
+        return {
+            "code": "duplicate_node",
+            "message": message,
+            "node_id": duplicate_node_match.group("node_id"),
+        }
+
+    cycle_match = re.fullmatch(r"Cycle detected at node (?P<node_id>.+)", message)
+    if cycle_match:
+        return {
+            "code": "cycle_detected",
+            "message": message,
+            "node_id": cycle_match.group("node_id"),
+        }
+
+    field_match = re.fullmatch(r"Field '(?P<field>[^']+)' must be a string", message)
+    if field_match:
+        return {
+            "code": "missing_required_fields",
+            "message": message,
+            "fields": [field_match.group("field")],
+        }
+
+    return {
+        "code": "validation_error",
+        "message": message,
+    }
+
+
 def classify_node_state(
     dag: Dag,
     node_id: str,
@@ -254,6 +403,8 @@ app = create_app()
 
 
 __all__ = [
+    "CreateNodeRequest",
+    "NodeMetadataUpdateRequest",
     "ProtocolError",
     "app",
     "classify_node_state",

@@ -171,6 +171,9 @@ npm run web:smoke
 npm run desktop:dev
 ```
 
+如果本地 npm 安装出来的 Electron 二进制不完整，启动器会自动回退到系统里的
+`electron39` 这类可执行文件。
+
 UI 默认跟随系统配色，也提供 `system / light / dark` 控制。DAG 文档和运行记录保持
 YAML-only。
 
@@ -194,6 +197,11 @@ YAML-only。
 
 - [`docs/README.md`](docs/README.md)
 - [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
+- [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_1_tasklist.md`](docs/tasks/runtime_harness_milestone_1_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_2_tasklist.md`](docs/tasks/runtime_harness_milestone_2_tasklist.md)
+- [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
+- [`docs/tasks/workbench_milestone_1_tasklist.md`](docs/tasks/workbench_milestone_1_tasklist.md)
 - [`docs/architecture/research_and_design_notes.md`](docs/architecture/research_and_design_notes.md)
 - [`docs/architecture/orchestrator_system_prompt.md`](docs/architecture/orchestrator_system_prompt.md)
 - [`docs/architecture/context_economy.md`](docs/architecture/context_economy.md)
@@ -201,3 +209,11 @@ YAML-only。
 - [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
 - [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)
 - [`docs/protocol/workflow_examples.md`](docs/protocol/workflow_examples.md)
+
+现在文档统一使用一套术语：
+
+- `milestone`：面向验收的交付目标
+- `workstream`：某个 milestone 内部的实现分组
+
+这样 runtime 和 workbench 的规划语言会保持一致，不会一边讲 phase，
+另一边讲 milestone。

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 from string import Template
 from typing import Any
 from uuid import uuid4
@@ -17,6 +18,13 @@ VALID_FAILURE_POLICIES = {
     "escalate_to_large_model",
     "send_to_human",
     "split_task_further",
+}
+EDITABLE_NODE_METADATA_FIELDS = {
+    "recommended_model",
+    "risk_level",
+    "review_gate",
+    "failure_policy",
+    "tags",
 }
 PASSING_STATUSES = {"passed"}
 SATISFIED_REVIEW = {
@@ -204,13 +212,90 @@ class Dag:
 
 
 def load_dag(path: Path) -> Dag:
-    if path.suffix.lower() not in {".yaml", ".yml"}:
-        raise ProtocolError("DAG documents must use .yaml or .yml")
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle)
-    if not isinstance(data, dict):
-        raise ProtocolError("DAG document must be an object")
-    return Dag.from_dict(data)
+    return Dag.from_dict(_load_dag_document(path))
+
+
+def update_node_metadata(
+    dag_path: Path,
+    task_id: str,
+    updates: dict[str, Any],
+) -> tuple[Path, Path, Dag]:
+    if not updates:
+        raise ProtocolError("Metadata updates cannot be empty")
+
+    unknown_fields = sorted(set(updates) - EDITABLE_NODE_METADATA_FIELDS)
+    if unknown_fields:
+        raise ProtocolError(
+            "Unsupported metadata fields: " + ", ".join(unknown_fields)
+        )
+
+    document = _load_dag_document(dag_path)
+    dag = Dag.from_dict(document)
+    _node_or_error(dag, task_id)
+
+    candidate = _copy_document(document)
+    raw_nodes = candidate["nodes"]
+    assert isinstance(raw_nodes, list)
+
+    for raw_node in raw_nodes:
+        if isinstance(raw_node, dict) and raw_node.get("id") == task_id:
+            for key, value in updates.items():
+                raw_node[key] = list(value) if key == "tags" and isinstance(value, list) else value
+            break
+    else:
+        raise ProtocolError(f"Unknown node id: {task_id}")
+
+    updated_dag = Dag.from_dict(candidate)
+    backup_path = _write_validated_dag_document(dag_path, candidate)
+    return dag_path, backup_path, updated_dag
+
+
+def update_node_dependencies(
+    dag_path: Path,
+    task_id: str,
+    dependencies: list[str],
+) -> tuple[Path, Path, Dag]:
+    document = _load_dag_document(dag_path)
+    dag = Dag.from_dict(document)
+    _node_or_error(dag, task_id)
+
+    candidate = _copy_document(document)
+    raw_nodes = candidate["nodes"]
+    assert isinstance(raw_nodes, list)
+
+    for raw_node in raw_nodes:
+        if isinstance(raw_node, dict) and raw_node.get("id") == task_id:
+            raw_node["dependencies"] = list(dependencies)
+            break
+    else:
+        raise ProtocolError(f"Unknown node id: {task_id}")
+
+    updated_dag = Dag.from_dict(candidate)
+    backup_path = _write_validated_dag_document(dag_path, candidate)
+    return dag_path, backup_path, updated_dag
+
+
+def create_node(
+    dag_path: Path,
+    node_data: dict[str, Any],
+) -> tuple[Path, Path, Dag]:
+    document = _load_dag_document(dag_path)
+    candidate = _copy_document(document)
+    raw_nodes = candidate.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raise ProtocolError("DAG field 'nodes' must be a list")
+
+    if not isinstance(node_data, dict):
+        raise ProtocolError("Node payload must be an object")
+
+    raw_nodes.append(_copy_document(node_data))
+    created_dag = Dag.from_dict(candidate)
+    created_node = TaskNode.from_dict(node_data)
+    if created_node.id not in created_dag.nodes:
+        raise ProtocolError(f"Unknown node id: {created_node.id}")
+
+    backup_path = _write_validated_dag_document(dag_path, candidate)
+    return dag_path, backup_path, created_dag
 
 
 def load_run_records(runs_dir: Path) -> list[dict[str, Any]]:
@@ -413,3 +498,48 @@ def _lines(items: list[str]) -> str:
     if not items:
         return "- None"
     return "\n".join(f"- {item}" for item in items)
+
+
+def _load_dag_document(path: Path) -> dict[str, Any]:
+    if path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ProtocolError("DAG documents must use .yaml or .yml")
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    if not isinstance(data, dict):
+        raise ProtocolError("DAG document must be an object")
+    return data
+
+
+def _copy_document(data: dict[str, Any]) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            copied[key] = _copy_document(value)
+        elif isinstance(value, list):
+            copied[key] = [
+                _copy_document(item) if isinstance(item, dict) else list(item) if isinstance(item, list) else item
+                for item in value
+            ]
+        else:
+            copied[key] = value
+    return copied
+
+
+def _backup_path_for(path: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    return path.with_name(f"{path.name}.{timestamp}.bak")
+
+
+def _write_validated_dag_document(dag_path: Path, document: dict[str, Any]) -> Path:
+    tmp_path = dag_path.with_name(f".{dag_path.stem}.{uuid4().hex}{dag_path.suffix}")
+    backup_path = _backup_path_for(dag_path)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(document, handle, sort_keys=False)
+        load_dag(tmp_path)
+        shutil.copy2(dag_path, backup_path)
+        tmp_path.replace(dag_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return backup_path

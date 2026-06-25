@@ -12,13 +12,19 @@ Use this path for implementation order and product/runtime sequencing.
 
 ## Tasks
 
-Use this path for concrete implementation task cards and acceptance criteria.
+Use this path for concrete implementation task cards, milestone indexes, and
+acceptance criteria.
 
 - [`tasks/runtime_harness_tasklist.md`](tasks/runtime_harness_tasklist.md):
-  runtime/harness task cards for ledger, replay, gatekeeper, assignments,
-  external agent sessions, and outcome metrics.
-- [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): concrete
-  workbench task cards.
+  runtime/harness milestone index.
+- [`tasks/runtime_harness_milestone_1_tasklist.md`](tasks/runtime_harness_milestone_1_tasklist.md):
+  runtime/harness foundation milestone.
+- [`tasks/runtime_harness_milestone_2_tasklist.md`](tasks/runtime_harness_milestone_2_tasklist.md):
+  runtime/harness next milestone for real-agent execution loop hardening.
+- [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
+  milestone index.
+- [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
+  current concrete workbench milestone task list.
 
 ## Architecture
 
@@ -51,7 +57,7 @@ For a new implementation session:
 
 1. Read [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md).
 2. Read the relevant protocol file for the runtime feature being changed.
-3. Read the relevant task list in [`tasks/`](tasks/).
+3. Read the relevant milestone index and task list in [`tasks/`](tasks/).
 4. Read the relevant architecture note only when the design rationale matters.
 
 ## Source Layout
