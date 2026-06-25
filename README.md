@@ -167,12 +167,18 @@ npm run api:dev
 
 This launcher always uses the repo-local `.venv`, so it still works even if
 your shell currently has another project's virtual environment activated.
+If port `8000` is already busy, it automatically picks the next free local
+port and writes the chosen API URL to `.bureauless-api-url`.
 
 Run the browser workbench:
 
 ```bash
 npm run web:dev
 ```
+
+The Vite dev server reads `.bureauless-api-url` when it starts. If the API
+launcher had to move from `8000` to another port, restart `web:dev` once so
+the proxy follows the new API address.
 
 Run the browser smoke test after the API and web server are running:
 

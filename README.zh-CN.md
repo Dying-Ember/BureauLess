@@ -155,12 +155,17 @@ npm run api:dev
 
 这个启动器会强制使用仓库自己的 `.venv`，所以即使你当前 shell 还挂着别的项目
 的虚拟环境，也不会把 BureauLess 带偏。
+如果 `8000` 端口已经被占用，它会自动顺延到下一个可用端口，并把实际 API 地址
+写入 `.bureauless-api-url`。
 
 运行浏览器工作台：
 
 ```bash
 npm run web:dev
 ```
+
+Vite dev server 会在启动时读取 `.bureauless-api-url`。如果 API 启动器从 `8000`
+切到了别的端口，重启一次 `web:dev`，前端代理就会跟上新的 API 地址。
 
 API 和 web server 运行后，可以执行浏览器 smoke test：
 

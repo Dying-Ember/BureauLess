@@ -283,3 +283,14 @@ Runtime milestone 2 is complete when:
 - The workbench can inspect the resulting replay state without custom logic.
 - Dispatch readiness and budget checks can block unsafe automatic execution
   without weakening the Milestone 1 control boundary.
+
+## Implementation Notes
+
+- The local API dev entrypoint is `npm run api:dev`, not a raw `uvicorn`
+  command. It uses the repo-local `.venv` even when another project virtual
+  environment is active.
+- When the default API port is occupied, the launcher selects the next free
+  local port and writes the chosen base URL to `.bureauless-api-url`.
+- `npm run web:dev` reads `.bureauless-api-url` at startup time. If the API
+  port changes, restart the web dev server once so its proxy target stays in
+  sync.

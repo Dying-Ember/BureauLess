@@ -65,6 +65,13 @@ bounded session, packages a result, imports it into the ledger, and leaves the
 resulting mission state inspectable through the normal mission/workflow/ledger/
 replay/gatekeeper endpoints.
 
+The local development entrypoint for that API is `npm run api:dev`. It pins
+execution to the repo-local `.venv`, tolerates another active shell virtual
+environment, and records the selected API URL in `.bureauless-api-url` when it
+has to move off the default port. The browser workbench reads that file at
+startup, so changing API ports requires a `web:dev` restart rather than manual
+proxy edits.
+
 ### A1: Mission, Ledger, Workflow Foundation
 
 Status: started.
