@@ -26,6 +26,14 @@ acceptance criteria.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
   current concrete workbench milestone task list.
 
+## RFCs
+
+Use this path for proposed changes that are mature enough to preserve in the
+repository but not yet accepted as protocol or implementation commitments.
+
+- [`rfcs/workflow_mutation_proposal.md`](rfcs/workflow_mutation_proposal.md):
+  controlled runtime workflow mutation proposal for a possible Milestone 2.5.
+
 ## Architecture
 
 Use this path for design principles, tradeoffs, and long-lived reasoning.
@@ -57,8 +65,10 @@ For a new implementation session:
 
 1. Read [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md).
 2. Read the relevant protocol file for the runtime feature being changed.
-3. Read the relevant milestone index and task list in [`tasks/`](tasks/).
-4. Read the relevant architecture note only when the design rationale matters.
+3. Read any relevant RFC in [`rfcs/`](rfcs/) if the work touches a proposed
+   but not yet accepted design.
+4. Read the relevant milestone index and task list in [`tasks/`](tasks/).
+5. Read the relevant architecture note only when the design rationale matters.
 
 ## Source Layout
 
