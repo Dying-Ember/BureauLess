@@ -72,6 +72,16 @@ has to move off the default port. The browser workbench reads that file at
 startup, so changing API ports requires a `web:dev` restart rather than manual
 proxy edits.
 
+Issue
+[#1](https://github.com/Dying-Ember/BureauLess/issues/1) tracks a proposed
+bridge milestone between the semi-automatic runtime and later policy-driven
+automation: controlled workflow mutation. The goal is to let workers report
+that the current workflow is structurally incomplete without allowing them to
+change workflow or ledger state directly. This work is documented as
+[`../rfcs/workflow_mutation_proposal.md`](../rfcs/workflow_mutation_proposal.md)
+and broken down in
+[`../tasks/runtime_harness_milestone_2_5_tasklist.md`](../tasks/runtime_harness_milestone_2_5_tasklist.md).
+
 ### A1: Mission, Ledger, Workflow Foundation
 
 Status: started.
@@ -174,6 +184,40 @@ Acceptance:
 
 - A complete orchestrator proposal can be compiled before worker dispatch.
 
+### A6: Controlled Workflow Mutation
+
+Status: proposed.
+
+Goal: let agents propose workflow changes discovered during execution without
+letting them mutate canonical workflow state.
+
+Tracking:
+
+- GitHub issue:
+  [#1 RFC: Controlled Workflow Mutation](https://github.com/Dying-Ember/BureauLess/issues/1)
+- RFC:
+  [`../rfcs/workflow_mutation_proposal.md`](../rfcs/workflow_mutation_proposal.md)
+- Task list:
+  [`../tasks/runtime_harness_milestone_2_5_tasklist.md`](../tasks/runtime_harness_milestone_2_5_tasklist.md)
+
+Work:
+
+- Add mutation proposal artifacts and ledger event types.
+- Route proposal acceptance/rejection through orchestrator or human approval.
+- Apply accepted mutations to current workflow only.
+- Supersede affected assignments conservatively.
+- Support current-state replay on the accepted workflow.
+- Defer full temporal replay to a later milestone.
+
+Acceptance:
+
+- Workers can propose structural changes without expanding assignment scope.
+- Accepted mutation events deterministically update current workflow.
+- Superseded assignments no longer satisfy downstream gates.
+- Gatekeeper can explain `mutation_pending`, `needs_review`, and
+  `superseded` states.
+- Temporal workflow replay remains out of scope.
+
 ## Line B: Workbench UI
 
 This is the product surface line. It should expose current runtime state before
@@ -263,6 +307,8 @@ The workbench should gradually become the visual surface for harness runtime:
 - Gatekeeper view: runnable, blocked, completed, and why.
 - Advisor view: invoke/skip decisions and expected ROI.
 - Replay view: event history and derived state.
+- Mutation view: pending proposals, accept/reject decisions, affected
+  assignments, and supersession reasons.
 
 This means the UI should not become a separate source of business rules. Python
 runtime remains the source of truth.
@@ -275,12 +321,13 @@ runtime remains the source of truth.
 4. Agent registry and doctor checks.
 5. Session-level outcome metrics.
 6. B1 Operational DAG Viewer.
-7. A4 Advisor Policy And Budget Estimator.
-8. B2 File And Workspace Ergonomics.
-9. A5 Orchestrator Decision Artifacts.
-10. B3 Safe DAG Metadata Editing.
-11. B4 Dispatch Preparation.
-12. B5 Graph Editing.
+7. A6 Controlled Workflow Mutation.
+8. A4 Advisor Policy And Budget Estimator.
+9. B2 File And Workspace Ergonomics.
+10. A5 Orchestrator Decision Artifacts.
+11. B3 Safe DAG Metadata Editing.
+12. B4 Dispatch Preparation.
+13. B5 Graph Editing.
 
 ## Decision Rules
 
@@ -299,4 +346,6 @@ runtime remains the source of truth.
 - No visual workflow drag editor.
 - No full-ledger broadcast.
 - No worker writes to canonical ledger.
+- No worker applies workflow mutation directly.
+- No full temporal workflow replay in the controlled mutation bridge milestone.
 - No advisor policy auto-tuning by LLM.

@@ -21,6 +21,8 @@ acceptance criteria.
   runtime/harness foundation milestone.
 - [`tasks/runtime_harness_milestone_2_tasklist.md`](tasks/runtime_harness_milestone_2_tasklist.md):
   runtime/harness next milestone for real-agent execution loop hardening.
+- [`tasks/runtime_harness_milestone_2_5_tasklist.md`](tasks/runtime_harness_milestone_2_5_tasklist.md):
+  proposed runtime/harness bridge milestone for controlled workflow mutation.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):

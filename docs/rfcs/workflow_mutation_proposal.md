@@ -4,6 +4,12 @@
 
 **Proposed** - Milestone 2.5 candidate. Open for discussion.
 
+Tracking issue:
+[#1 RFC: Controlled Workflow Mutation](https://github.com/Dying-Ember/BureauLess/issues/1)
+
+Candidate implementation task list:
+[`docs/tasks/runtime_harness_milestone_2_5_tasklist.md`](../tasks/runtime_harness_milestone_2_5_tasklist.md)
+
 ## Problem
 
 BureauLess currently assumes a static DAG: the workflow is defined before

@@ -7,4 +7,5 @@ Use this directory for candidate changes that need review before they move into
 `docs/protocol/`, `docs/tasks/`, or the roadmap.
 
 - [`workflow_mutation_proposal.md`](workflow_mutation_proposal.md): controlled
-  runtime workflow mutation proposal for a possible Milestone 2.5.
+  runtime workflow mutation proposal for a possible Milestone 2.5. Tracked by
+  [GitHub issue #1](https://github.com/Dying-Ember/BureauLess/issues/1).
