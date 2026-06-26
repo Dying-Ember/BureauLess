@@ -239,3 +239,7 @@ The docs now use one shared vocabulary:
 
 That keeps runtime and workbench planning aligned instead of letting one side
 talk in phases while the other talks in milestones.
+
+## License
+
+BureauLess is licensed under the Apache License 2.0. See [LICENSE](LICENSE).

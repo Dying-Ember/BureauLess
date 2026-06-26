@@ -225,3 +225,7 @@ YAML-only。
 
 这样 runtime 和 workbench 的规划语言会保持一致，不会一边讲 phase，
 另一边讲 milestone。
+
+## 许可证
+
+BureauLess 使用 Apache License 2.0。见 [LICENSE](LICENSE)。
