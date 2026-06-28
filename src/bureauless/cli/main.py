@@ -714,6 +714,7 @@ def prepare_mutation_demo_workspace(workspace: Path) -> dict[str, Path]:
     workspace.mkdir(parents=True, exist_ok=True)
     artifacts_dir = workspace / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    mission_path = workspace / "mission.yaml"
     workflow_path = workspace / "workflow.yaml"
     ledger_path = workspace / "ledger.yaml"
     impact_report = artifacts_dir / "impact-report.md"
@@ -722,6 +723,16 @@ def prepare_mutation_demo_workspace(workspace: Path) -> dict[str, Path]:
         impact_report,
         "# Mutation Impact\n\nThe review step needs a focused verification node.\n",
     )
+    mission = {
+        "mission_id": "mutation-e2e-demo",
+        "goal": "Verify controlled workflow mutation end to end.",
+        "status": "active",
+        "default_mode": "small_dag",
+        "allowed_modes": ["small_dag"],
+        "budget": {},
+        "models": {},
+        "human_gate": {},
+    }
     workflow = {
         "workflow_id": "mutation-e2e-demo",
         "mission_id": "mutation-e2e-demo",
@@ -875,12 +886,15 @@ def prepare_mutation_demo_workspace(workspace: Path) -> dict[str, Path]:
             },
         ],
     }
+    with mission_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(mission, handle, sort_keys=False)
     with workflow_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(workflow, handle, sort_keys=False)
     with ledger_path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(ledger, handle, sort_keys=False)
 
     return {
+        "mission": mission_path,
         "workflow": workflow_path,
         "ledger": ledger_path,
         "artifacts_dir": artifacts_dir,

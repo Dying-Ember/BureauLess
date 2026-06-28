@@ -301,11 +301,13 @@ def test_validates_inert_workflow_mutation_proposal() -> None:
 
 def test_prepares_isolated_mutation_e2e_demo(tmp_path) -> None:
     paths = prepare_mutation_demo_workspace(tmp_path / "mutation-demo")
+    mission = load_mission(paths["mission"])
     workflow = load_workflow(paths["workflow"])
     ledger = load_ledger(paths["ledger"])
     replay = replay_workflow(workflow, ledger)
     artifacts = verify_ledger_artifacts(ledger, tmp_path / "mutation-demo")
 
+    assert mission.mission_id == "mutation-e2e-demo"
     assert compile_workflow(workflow).ok
     assert artifacts[0].status == "valid"
     assert replay.mutation_proposals["event-mutation-proposed"].state == "pending"

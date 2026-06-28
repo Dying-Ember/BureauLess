@@ -411,6 +411,7 @@ button {
   border: 1px solid var(--border);
   border-radius: 8px;
   display: grid;
+  grid-template-rows: auto minmax(320px, 1fr);
   gap: 10px;
   min-height: 380px;
   padding: 12px;
@@ -438,7 +439,6 @@ button {
   border: 1px solid var(--border);
   border-radius: 8px;
   min-height: 320px;
-  min-height: 0;
   overflow: hidden;
   position: relative;
 }
@@ -1030,9 +1030,9 @@ button {
   border-radius: 8px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
   display: grid;
-  gap: 5px;
-  min-width: 200px;
-  padding: 10px 12px;
+  gap: 6px;
+  min-width: 220px;
+  padding: 12px 14px;
 }
 
 .runtime-flow-node.terminal {

@@ -152,6 +152,27 @@ type RuntimeFlowLayout = {
   orderedNodes: Array<Node<RuntimeFlowNodeData>>;
 };
 
+type DirectedNodeLayoutSpacing = {
+  originX: number;
+  originY: number;
+  columnGap: number;
+  rowGap: number;
+};
+
+const PLANNING_LAYOUT_SPACING: DirectedNodeLayoutSpacing = {
+  originX: 80,
+  originY: 120,
+  columnGap: 320,
+  rowGap: 170,
+};
+
+const RUNTIME_LAYOUT_SPACING: DirectedNodeLayoutSpacing = {
+  originX: 72,
+  originY: 112,
+  columnGap: 400,
+  rowGap: 220,
+};
+
 type DragPreviewState = {
   id: string;
   data: DagFlowNodeData;
@@ -2119,6 +2140,10 @@ function runtimeWorkflowEdges(workflow: RuntimeWorkflow): Edge<RuntimeFlowEdgeDa
         height: 16,
         color: dependency.branch === 'any' ? 'var(--review)' : 'var(--accent)',
       },
+      pathOptions: {
+        borderRadius: 24,
+        offset: 44,
+      },
       type: 'smoothstep',
     })),
   );
@@ -2162,7 +2187,7 @@ function buildRuntimeFlowLayout(
     id: node.id,
     dependencies: runtimeNodeDependencyIds(workflow, node),
   }));
-  const positions = computeDirectedNodePositions(workflow.nodes, dependencyView);
+  const positions = computeDirectedNodePositions(workflow.nodes, dependencyView, RUNTIME_LAYOUT_SPACING);
   const terminalEvents = new Set(workflow.terminal_events);
   const gateCounts = workflow.gates.reduce<Map<string, number>>((counts, gate) => {
     counts.set(gate.node_id, (counts.get(gate.node_id) ?? 0) + 1);
@@ -3508,12 +3533,13 @@ function computeFlowNodePositions(
   nodes: TaskNode[],
   dependencyView: Array<{ id: string; dependencies: string[] }>,
 ): Map<string, { x: number; y: number }> {
-  return computeDirectedNodePositions(nodes, dependencyView);
+  return computeDirectedNodePositions(nodes, dependencyView, PLANNING_LAYOUT_SPACING);
 }
 
 function computeDirectedNodePositions<T extends { id: string }>(
   nodes: T[],
   dependencyView: Array<{ id: string; dependencies: string[] }>,
+  spacing: DirectedNodeLayoutSpacing,
 ): Map<string, { x: number; y: number }> {
   const positions = new Map<string, { x: number; y: number }>();
   const nodeIds = new Set(nodes.map((node) => node.id));
@@ -3577,18 +3603,46 @@ function computeDirectedNodePositions<T extends { id: string }>(
     nodesByLevel.set(level, bucket);
   }
 
-  for (const [level, bucket] of nodesByLevel.entries()) {
-    bucket
-      .sort((left, right) => (order.get(left.id) ?? 0) - (order.get(right.id) ?? 0))
-      .forEach((node, row) => {
-        positions.set(node.id, {
-          x: 80 + level * 320,
-          y: 120 + row * 170,
-        });
+  const sortedLevels = [...nodesByLevel.keys()].sort((left, right) => left - right);
+  for (const level of sortedLevels) {
+    const bucket = nodesByLevel.get(level) ?? [];
+    const orderedBucket = bucket
+      .slice()
+      .sort((left, right) => {
+        const leftScore = layoutOrderScore(left.id, level, positions, dependenciesById, order);
+        const rightScore = layoutOrderScore(right.id, level, positions, dependenciesById, order);
+        return leftScore - rightScore || (order.get(left.id) ?? 0) - (order.get(right.id) ?? 0);
       });
+    orderedBucket.forEach((node, row) => {
+      positions.set(node.id, {
+        x: spacing.originX + level * spacing.columnGap,
+        y: spacing.originY + row * spacing.rowGap,
+      });
+    });
   }
 
   return positions;
+}
+
+function layoutOrderScore(
+  nodeId: string,
+  level: number,
+  positions: Map<string, { x: number; y: number }>,
+  dependenciesById: Map<string, string[]>,
+  order: Map<string, number>,
+): number {
+  if (level === 0) {
+    return order.get(nodeId) ?? 0;
+  }
+
+  const parentYs = (dependenciesById.get(nodeId) ?? [])
+    .map((dependencyId) => positions.get(dependencyId)?.y)
+    .filter((value): value is number => typeof value === 'number');
+  if (parentYs.length === 0) {
+    return order.get(nodeId) ?? 0;
+  }
+
+  return parentYs.reduce((sum, value) => sum + value, 0) / parentYs.length;
 }
 
 function toggleDependencyDraftItem(draft: DependencyDraft, dependencyId: string): DependencyDraft {
