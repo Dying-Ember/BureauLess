@@ -8,6 +8,7 @@ import yaml
 
 from ..core import ProtocolError
 from .harness import Ledger, Workflow
+from .mutations import load_workflow_mutation_proposal
 
 
 LIFECYCLE_EVENT_TYPES = {
@@ -25,6 +26,14 @@ LIFECYCLE_EVENT_TYPES = {
     "gate_expired",
     "tool_call_failed",
     "partial_result_submitted",
+    "workflow_mutation_proposed",
+    "workflow_mutation_accepted",
+    "workflow_mutation_rejected",
+}
+
+MUTATION_DECISION_EVENT_TYPES = {
+    "workflow_mutation_accepted",
+    "workflow_mutation_rejected",
 }
 
 
@@ -54,6 +63,13 @@ def validate_ledger_event(
     if event_type not in allowed_event_types:
         raise ProtocolError(f"Unknown ledger event type: {event_type}")
 
+    if event_type == "workflow_mutation_proposed":
+        _validate_mutation_proposed_event(ledger, event, workflow)
+    elif event_type in MUTATION_DECISION_EVENT_TYPES:
+        _validate_mutation_decision_event(ledger, event, event_type)
+    elif event_type == "assignment_superseded":
+        _validate_mutation_supersession_event(ledger, event)
+
     mission_id = event.get("mission_id")
     if mission_id is not None and mission_id != ledger.mission_id:
         raise ProtocolError(
@@ -81,6 +97,157 @@ def validate_ledger_event(
                 raise ProtocolError(
                     f"Role {role} is not allowed to produce event {event_type}"
                 )
+
+
+def _validate_mutation_proposed_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+    workflow: Workflow | None,
+) -> None:
+    raw_proposal = event.get("mutation_proposal")
+    if not isinstance(raw_proposal, dict):
+        raise ProtocolError(
+            "workflow_mutation_proposed requires a mutation_proposal object"
+        )
+    proposal = load_workflow_mutation_proposal(raw_proposal)
+    if workflow is not None and proposal.workflow_id != workflow.workflow_id:
+        raise ProtocolError(
+            "Mutation proposal workflow_id does not match the active workflow"
+        )
+    for existing in ledger.event_log:
+        existing_proposal = existing.get("mutation_proposal")
+        if (
+            isinstance(existing_proposal, dict)
+            and existing_proposal.get("proposal_id") == proposal.proposal_id
+        ):
+            raise ProtocolError(
+                f"Duplicate workflow mutation proposal id: {proposal.proposal_id}"
+            )
+
+
+def _validate_mutation_decision_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+    event_type: str,
+) -> None:
+    source_event_id = _required_string(event, "source_event_id")
+    source_event = next(
+        (
+            candidate
+            for candidate in ledger.event_log
+            if candidate.get("event_id") == source_event_id
+        ),
+        None,
+    )
+    if source_event is None or source_event.get("event_type") != "workflow_mutation_proposed":
+        raise ProtocolError(
+            "Mutation decision source_event_id must reference an existing "
+            "workflow_mutation_proposed event"
+        )
+
+    prior_decision = next(
+        (
+            candidate
+            for candidate in ledger.event_log
+            if candidate.get("event_type") in MUTATION_DECISION_EVENT_TYPES
+            and candidate.get("source_event_id") == source_event_id
+        ),
+        None,
+    )
+    if prior_decision is not None:
+        raise ProtocolError(
+            f"Mutation proposal event {source_event_id} already has a decision"
+        )
+
+    actor = _required_string(event, "actor")
+    if actor not in {"orchestrator", "human"}:
+        raise ProtocolError("Mutation decisions require orchestrator or human actor")
+
+    if event_type == "workflow_mutation_rejected":
+        _required_string(event, "reason")
+        return
+
+    applied_changes = event.get("applied_changes")
+    if not isinstance(applied_changes, dict):
+        raise ProtocolError(
+            "workflow_mutation_accepted requires an applied_changes object"
+        )
+    _validate_applied_changes_subset(source_event, applied_changes)
+
+
+def _validate_applied_changes_subset(
+    source_event: dict[str, Any],
+    applied_changes: dict[str, Any],
+) -> None:
+    proposal = source_event.get("mutation_proposal")
+    if not isinstance(proposal, dict):
+        raise ProtocolError("Mutation proposal event is missing mutation_proposal")
+    proposed_changes = proposal.get("proposed_changes")
+    if not isinstance(proposed_changes, dict):
+        raise ProtocolError("Mutation proposal is missing proposed_changes")
+
+    allowed_fields = {
+        "add_nodes",
+        "add_edges",
+        "remove_edges",
+        "supersede_assignments",
+    }
+    unknown = sorted(set(applied_changes) - allowed_fields)
+    if unknown:
+        raise ProtocolError(
+            f"Accepted mutation contains unknown applied_changes: {', '.join(unknown)}"
+        )
+
+    applied_count = 0
+    for field in allowed_fields:
+        applied_items = applied_changes.get(field, [])
+        proposed_items = proposed_changes.get(field, [])
+        if not isinstance(applied_items, list):
+            raise ProtocolError(f"applied_changes.{field} must be a list")
+        if not isinstance(proposed_items, list):
+            raise ProtocolError(f"Proposed mutation field {field} must be a list")
+        applied_count += len(applied_items)
+        for item in applied_items:
+            if item not in proposed_items:
+                raise ProtocolError(
+                    f"applied_changes.{field} contains an operation not present "
+                    "in the source proposal"
+                )
+    if applied_count == 0:
+        raise ProtocolError("Accepted mutation must apply at least one proposed change")
+
+
+def _validate_mutation_supersession_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+) -> None:
+    mutation_event_id = event.get("mutation_event_id")
+    if mutation_event_id is None:
+        return
+    if not isinstance(mutation_event_id, str) or not mutation_event_id:
+        raise ProtocolError("assignment_superseded mutation_event_id must be a string")
+    accepted = next(
+        (
+            candidate
+            for candidate in ledger.event_log
+            if candidate.get("event_id") == mutation_event_id
+            and candidate.get("event_type") == "workflow_mutation_accepted"
+        ),
+        None,
+    )
+    if accepted is None:
+        raise ProtocolError(
+            "Mutation assignment_superseded event must reference an existing "
+            "workflow_mutation_accepted event"
+        )
+    if event.get("source_event_id") != mutation_event_id:
+        raise ProtocolError(
+            "Mutation assignment_superseded source_event_id must match mutation_event_id"
+        )
+    if event.get("superseded_by") != mutation_event_id:
+        raise ProtocolError(
+            "Mutation assignment_superseded superseded_by must match mutation_event_id"
+        )
 
 
 def write_ledger(path: Path, ledger: Ledger) -> None:

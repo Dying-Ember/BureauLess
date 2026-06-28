@@ -90,8 +90,183 @@ export type WorkbenchPaths = {
   runsDir: string;
 };
 
+export type MissionResponse = {
+  mission_id: string;
+  goal: string;
+  status: string;
+  default_mode: string;
+  allowed_modes: string[];
+  budget: Record<string, unknown> | null;
+  models: Record<string, unknown>;
+  human_gate: Record<string, unknown> | null;
+};
+
+export type LedgerResponse = {
+  mission_id: string;
+  ledger_version: string | number;
+  current_goal: string;
+  current_plan_ref: string | null;
+  public_findings: Array<Record<string, unknown>>;
+  decisions: Array<Record<string, unknown>>;
+  risks: Array<Record<string, unknown>>;
+  artifacts: Array<Record<string, unknown>>;
+  broadcasts: Array<Record<string, unknown>>;
+  open_questions: Array<Record<string, unknown>>;
+  event_log: Array<Record<string, unknown>>;
+};
+
+export type MutationProposalInspection = {
+  proposal_id: string;
+  proposal_event_id: string;
+  state: 'pending' | 'accepted' | 'rejected';
+  decision_event_id?: string;
+  affected_node_ids: string[];
+  affected_assignments: string[];
+  superseded_assignments: string[];
+  evidence_refs: string[];
+  proposal: {
+    reason?: string;
+    rationale?: string;
+    proposed_changes?: Record<string, unknown[]>;
+  };
+};
+
+export type RuntimeWorkflowWaitsFor =
+  | string[]
+  | {
+      all_of?: string[];
+      any_of?: string[];
+    };
+
+export type RuntimeWorkflowNode = {
+  id: string;
+  role: string;
+  waits_for: RuntimeWorkflowWaitsFor;
+  emits: string[];
+};
+
+export type RuntimeWorkflowGate = {
+  id: string;
+  node_id: string;
+  requires: string[];
+};
+
+export type RuntimeWorkflow = {
+  workflow_id: string;
+  mission_id?: string;
+  mode?: string;
+  status?: string;
+  reason?: string | null;
+  proposed_by?: string | null;
+  roles: Record<
+    string,
+    {
+      can_emit: string[];
+      can_consume: string[];
+    }
+  >;
+  events: Record<
+    string,
+    {
+      producer_roles: string[];
+    }
+  >;
+  nodes: RuntimeWorkflowNode[];
+  gates: RuntimeWorkflowGate[];
+  terminal_events: string[];
+};
+
+export type MutationInspectionResponse = {
+  workflow_id: string;
+  current_workflow: RuntimeWorkflow;
+  proposals: MutationProposalInspection[];
+};
+
+export type GatekeeperBlockedReason = {
+  code: string;
+  message: string;
+  missing_ref?: string;
+  gate_id?: string;
+  assignment_id?: string;
+  mutation_event_id?: string;
+};
+
+export type GatekeeperDecisionState =
+  | 'runnable'
+  | 'blocked'
+  | 'completed'
+  | 'needs_review'
+  | 'superseded'
+  | 'ready';
+
+export type GatekeeperDecision = {
+  node_id: string;
+  state: GatekeeperDecisionState;
+  blocked_reasons: GatekeeperBlockedReason[];
+};
+
+export type GatekeeperResponse = {
+  workflow_id: string;
+  ready: string[];
+  decisions: Record<string, GatekeeperDecision>;
+};
+
+export type ReplayAssignmentAttempt = {
+  assignment_id: string;
+  node_id: string;
+  state: 'in_flight' | 'completed' | 'timed_out' | 'cancelled' | 'superseded';
+  created_event_id?: string;
+  terminal_event_id?: string;
+  terminal_event_type?: string;
+  retry_of?: string;
+  superseded_by?: string;
+};
+
+export type ReplayBlockedReason = GatekeeperBlockedReason;
+
+export type ReplayNodeState = {
+  node_id: string;
+  state: 'runnable' | 'blocked' | 'completed';
+  emitted_events: string[];
+  blocked_reasons: ReplayBlockedReason[];
+  assignment_attempts: ReplayAssignmentAttempt[];
+};
+
+export type ReplayMutationProposal = {
+  proposal_id: string;
+  proposal_event_id: string;
+  state: 'pending' | 'accepted' | 'rejected';
+  affected_node_ids: string[];
+  decision_event_id?: string;
+};
+
+export type ReplayResponse = {
+  workflow_id: string;
+  terminal_complete: boolean;
+  nodes: Record<string, ReplayNodeState>;
+  mutation_proposals: Record<string, ReplayMutationProposal>;
+};
+
+export type MutationWorkbenchPaths = {
+  missionPath: string;
+  workflowPath: string;
+  ledgerPath: string;
+};
+
+export type MutationDecisionRequest = {
+  workflow_path: string;
+  ledger_path: string;
+  proposal_event_id: string;
+  decision: 'accept' | 'reject';
+  actor?: 'orchestrator' | 'human';
+  reason?: string;
+};
+
 export const DEFAULT_DAG_PATH = 'examples/optimization_dag.yaml';
 export const DEFAULT_RUNS_DIR = 'runs';
+export const DEFAULT_MISSION_PATH = 'examples/missions/demo/mission.yaml';
+export const DEFAULT_WORKFLOW_PATH = 'examples/missions/demo/workflows/coder_reviewer_committer.yaml';
+export const DEFAULT_LEDGER_PATH = 'examples/missions/demo/ledger.yaml';
 
 export async function fetchDag(dagPath: string = DEFAULT_DAG_PATH): Promise<DagResponse> {
   const response = await fetch(`/api/dag?path=${encodeURIComponent(dagPath)}`);
@@ -123,6 +298,16 @@ export async function fetchPrompt(
   const response = await fetch(
     `/api/prompt/${encodeURIComponent(taskId)}?dag_path=${encodeURIComponent(dagPath)}`,
   );
+  return expectOk(response);
+}
+
+export async function fetchMission(path: string = DEFAULT_MISSION_PATH): Promise<MissionResponse> {
+  const response = await fetch(`/api/mission?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchLedger(path: string = DEFAULT_LEDGER_PATH): Promise<LedgerResponse> {
+  const response = await fetch(`/api/ledger?path=${encodeURIComponent(path)}`);
   return expectOk(response);
 }
 
@@ -175,6 +360,47 @@ export async function createNode(request: NodeCreateRequest): Promise<{ path: st
     headers: {
       'Content-Type': 'application/json',
     },
+    body: JSON.stringify(request),
+  });
+  return expectOk(response);
+}
+
+export async function fetchMutations(
+  workflowPath: string = DEFAULT_WORKFLOW_PATH,
+  ledgerPath: string = DEFAULT_LEDGER_PATH,
+): Promise<MutationInspectionResponse> {
+  const response = await fetch(
+    `/api/mutations?workflow_path=${encodeURIComponent(workflowPath)}&ledger_path=${encodeURIComponent(ledgerPath)}`,
+  );
+  return expectOk(response);
+}
+
+export async function fetchGatekeeper(
+  workflowPath: string = DEFAULT_WORKFLOW_PATH,
+  ledgerPath: string = DEFAULT_LEDGER_PATH,
+): Promise<GatekeeperResponse> {
+  const response = await fetch(
+    `/api/gatekeeper?workflow_path=${encodeURIComponent(workflowPath)}&ledger_path=${encodeURIComponent(ledgerPath)}`,
+  );
+  return expectOk(response);
+}
+
+export async function fetchReplay(
+  workflowPath: string = DEFAULT_WORKFLOW_PATH,
+  ledgerPath: string = DEFAULT_LEDGER_PATH,
+): Promise<ReplayResponse> {
+  const response = await fetch(
+    `/api/replay?workflow_path=${encodeURIComponent(workflowPath)}&ledger_path=${encodeURIComponent(ledgerPath)}`,
+  );
+  return expectOk(response);
+}
+
+export async function decideMutation(
+  request: MutationDecisionRequest,
+): Promise<MutationInspectionResponse> {
+  const response = await fetch('/api/mutations/decision', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
   });
   return expectOk(response);

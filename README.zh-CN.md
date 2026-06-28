@@ -173,6 +173,16 @@ API 和 web server 运行后，可以执行浏览器 smoke test：
 npm run web:smoke
 ```
 
+手工测试 Workbench 的 mutation Accept/Reject 链路前，先生成隔离 demo：
+
+```bash
+npm run mutation-demo:prepare
+```
+
+该命令只会重置 `.bureauless/mutation-demo`，不会修改 tracked 示例或真实 ledger，
+并会输出带临时 workflow/ledger 路径的 Workbench URL。启动 `api:dev` 和
+`web:dev` 后打开该地址即可测试。
+
 运行 Electron shell：
 
 ```bash

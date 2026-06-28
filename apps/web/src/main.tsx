@@ -8,16 +8,19 @@ import {
   Controls,
   Handle,
   Panel,
+  MarkerType,
   Position,
   ReactFlow,
   ViewportPortal,
   type Connection,
   type Edge,
+  type EdgeMouseHandler,
   type Node,
   type NodeProps,
   type XYPosition,
 } from '@xyflow/react';
 import {
+  AlertCircle,
   AlertTriangle,
   CheckCircle2,
   CircleDashed,
@@ -42,18 +45,39 @@ import { createRoot } from 'react-dom/client';
 
 import {
   createNode,
+  decideMutation,
   DEFAULT_DAG_PATH,
+  DEFAULT_MISSION_PATH,
+  DEFAULT_LEDGER_PATH,
   DEFAULT_RUNS_DIR,
+  DEFAULT_WORKFLOW_PATH,
   fetchDag,
+  fetchLedger,
+  fetchGatekeeper,
+  fetchMission,
+  fetchMutations,
+  fetchReplay,
   fetchPrompt,
   fetchRuns,
   fetchState,
   fetchValidation,
+  type GatekeeperBlockedReason,
+  type GatekeeperDecision,
   type WorkbenchPaths,
   updateNodeDependencies,
   updateNodeMetadata,
   updateReviewStatus,
   type NodeState,
+  type MutationProposalInspection,
+  type MutationWorkbenchPaths,
+  type MissionResponse,
+  type LedgerResponse,
+  type RuntimeWorkflow,
+  type RuntimeWorkflowNode,
+  type RuntimeWorkflowWaitsFor,
+  type ReplayAssignmentAttempt,
+  type ReplayNodeState,
+  type ReplayResponse,
   type ReviewAction,
   type RunRecord,
   type TaskNode,
@@ -103,6 +127,31 @@ type DagFlowNodeData = {
   riskLevel: TaskNode['risk_level'];
 };
 
+type RuntimeFlowNodeData = {
+  role: string;
+  gatekeeperState: string;
+  gatekeeperStateLabel: string;
+  gatekeeperTone: 'runnable' | 'blocked' | 'completed' | 'needs_review' | 'superseded' | 'unknown';
+  stateSummary: string;
+  primaryReason: string | null;
+  blockedReasons: GatekeeperBlockedReason[];
+  emits: string[];
+  waitsForAll: string[];
+  waitsForAny: string[];
+  isTerminal: boolean;
+  gateCount: number;
+};
+
+type RuntimeFlowEdgeData = {
+  eventRef: string;
+};
+
+type RuntimeFlowLayout = {
+  nodes: Array<Node<RuntimeFlowNodeData>>;
+  edges: Array<Edge<RuntimeFlowEdgeData>>;
+  orderedNodes: Array<Node<RuntimeFlowNodeData>>;
+};
+
 type DragPreviewState = {
   id: string;
   data: DagFlowNodeData;
@@ -130,7 +179,10 @@ type NodeCreationDraft = {
   tags: string;
 };
 
+type WorkbenchViewMode = 'planning' | 'runtime';
+
 const FAILURE_POLICIES = ['retry_same_model', 'escalate_to_large_model', 'send_to_human', 'split_task_further'] as const;
+const WORKBENCH_VIEW_STORAGE_KEY = 'bureauless.workbenchViewMode';
 
 declare global {
   interface Window {
@@ -172,12 +224,37 @@ function DagFlowNode({ data }: NodeProps<Node<DagFlowNodeData>>) {
   );
 }
 
+function RuntimeFlowNode({ id, data }: NodeProps<Node<RuntimeFlowNodeData>>) {
+  return (
+    <div className="flow-node-shell runtime-node-shell">
+      <Handle type="target" position={Position.Left} className="flow-handle target" />
+      <div className={`runtime-flow-node ${data.isTerminal ? 'terminal' : ''} state-${data.gatekeeperTone}`}>
+        <div className="runtime-flow-node-header">
+          <strong>{id}</strong>
+          <span>{data.role}</span>
+        </div>
+        <div className="runtime-flow-node-state-row">
+          <span className={`state-pill runtime-state-pill ${data.gatekeeperTone}`}>{data.gatekeeperStateLabel}</span>
+          {data.gateCount > 0 ? <small>{data.gateCount} gate{data.gateCount === 1 ? '' : 's'}</small> : null}
+        </div>
+        <small>{data.stateSummary}</small>
+        {data.primaryReason ? <small className="runtime-flow-node-reason">{data.primaryReason}</small> : null}
+      </div>
+      <Handle type="source" position={Position.Right} className="flow-handle source" />
+    </div>
+  );
+}
+
 const FLOW_NODE_TYPES = {
   dag: DagFlowNode,
+  runtime: RuntimeFlowNode,
 };
 
 function Workbench() {
   const [paths, setPaths] = useState<WorkbenchPaths>(loadWorkbenchPaths);
+  const [mutationPaths, setMutationPaths] = useState<MutationWorkbenchPaths>(loadMutationWorkbenchPaths);
+  const [mutationPathDraft, setMutationPathDraft] = useState<MutationWorkbenchPaths>(loadMutationWorkbenchPaths);
+  const [viewMode, setViewMode] = useState<WorkbenchViewMode>(() => loadWorkbenchViewMode());
   const [pathDraft, setPathDraft] = useState<WorkbenchPaths>(paths);
   const [manualNodePositions, setManualNodePositions] = useState<FlowNodePositions>(() => loadGraphNodePositions(paths.dagPath));
   const dag = useQuery({ queryKey: ['dag', paths.dagPath], queryFn: () => fetchDag(paths.dagPath) });
@@ -188,6 +265,7 @@ function Workbench() {
   });
   const runs = useQuery({ queryKey: ['runs', paths.runsDir], queryFn: () => fetchRuns(paths.runsDir) });
   const [selectedId, setSelectedId] = useState<string | undefined>();
+  const [selectedRuntimeNodeId, setSelectedRuntimeNodeId] = useState<string | undefined>();
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>();
   const [isCreatingNode, setIsCreatingNode] = useState(false);
   const [inspectorHasUnsavedChanges, setInspectorHasUnsavedChanges] = useState(false);
@@ -197,6 +275,48 @@ function Workbench() {
   const { mode, setMode } = useThemeMode();
   const desktopBridge = getDesktopBridge();
   const graphDependencyMutation = useDependencySave(paths);
+  const mutations = useQuery({
+    queryKey: ['mutations', mutationPaths.workflowPath, mutationPaths.ledgerPath],
+    queryFn: () => fetchMutations(mutationPaths.workflowPath, mutationPaths.ledgerPath),
+  });
+  const runtimeMissionPath = useMemo(
+    () => normalizeMutationWorkbenchPaths(mutationPaths).missionPath,
+    [mutationPaths],
+  );
+  const mission = useQuery({
+    queryKey: ['mission', runtimeMissionPath],
+    queryFn: () => fetchMission(runtimeMissionPath),
+    enabled: viewMode === 'runtime',
+  });
+  const ledger = useQuery({
+    queryKey: ['ledger', mutationPaths.ledgerPath],
+    queryFn: () => fetchLedger(mutationPaths.ledgerPath),
+    enabled: viewMode === 'runtime',
+  });
+  const replay = useQuery({
+    queryKey: ['replay', mutationPaths.workflowPath, mutationPaths.ledgerPath],
+    queryFn: () => fetchReplay(mutationPaths.workflowPath, mutationPaths.ledgerPath),
+  });
+  const gatekeeper = useQuery({
+    queryKey: ['gatekeeper', mutationPaths.workflowPath, mutationPaths.ledgerPath],
+    queryFn: () => fetchGatekeeper(mutationPaths.workflowPath, mutationPaths.ledgerPath),
+  });
+  const mutationDecision = useMutation({
+    mutationFn: decideMutation,
+    onSuccess: async (response) => {
+      queryClient.setQueryData(
+        ['mutations', mutationPaths.workflowPath, mutationPaths.ledgerPath],
+        response,
+      );
+      await queryClient.invalidateQueries({
+        queryKey: ['gatekeeper', mutationPaths.workflowPath, mutationPaths.ledgerPath],
+      });
+    },
+  });
+  const runtimeDecisionSyncing =
+    mutationDecision.isPending ||
+    (mutationDecision.isSuccess &&
+      (mutations.isFetching || gatekeeper.isFetching));
 
   useEffect(() => {
     setPathDraft(paths);
@@ -205,6 +325,18 @@ function Workbench() {
   useEffect(() => {
     setManualNodePositions(loadGraphNodePositions(paths.dagPath));
   }, [paths.dagPath]);
+
+  useEffect(() => {
+    persistWorkbenchViewMode(viewMode);
+  }, [viewMode]);
+
+  useEffect(() => {
+    persistMutationWorkbenchPaths(mutationPaths);
+  }, [mutationPaths]);
+
+  useEffect(() => {
+    setMutationPathDraft(mutationPaths);
+  }, [mutationPaths]);
 
   const validationErrors = useMemo(
     () =>
@@ -376,10 +508,6 @@ function Workbench() {
     }));
   }, [dag.data?.edges, graphDependencyDraft]);
 
-  if (dag.isError) {
-    return <FullPageError error={dag.error} dagPath={paths.dagPath} onRetry={() => void dag.refetch()} />;
-  }
-
   const confirmDiscardInspectorChanges = () => {
     if (!inspectorHasUnsavedChanges) {
       return true;
@@ -474,6 +602,25 @@ function Workbench() {
       setPathDraft((current) => ({ ...current, runsDir: nextRunsDir }));
     }
   };
+
+  const applyMutationPathDraft = () => {
+    const nextPaths = normalizeMutationWorkbenchPaths(mutationPathDraft);
+    setMutationPaths(nextPaths);
+    persistMutationWorkbenchPaths(nextPaths);
+  };
+
+  const mutationPathDraftChanged = useMemo(
+    () => {
+      const committed = normalizeMutationWorkbenchPaths(mutationPaths);
+      const draft = normalizeMutationWorkbenchPaths(mutationPathDraft);
+      return (
+        draft.missionPath !== committed.missionPath ||
+        draft.workflowPath !== committed.workflowPath ||
+        draft.ledgerPath !== committed.ledgerPath
+      );
+    },
+    [mutationPathDraft, mutationPaths],
+  );
 
   const currentGraphDependenciesForTarget = (targetId: string): DependencyDraft => {
     if (graphDependencyDraft?.targetId === targetId) {
@@ -605,15 +752,54 @@ function Workbench() {
     (graphDependencyMutation.error instanceof Error
       ? `Dependency update failed: ${formatDependencyUpdateError(graphDependencyMutation.error.message)}`
       : null);
+  const runtimeWorkflow = mutations.data?.current_workflow ?? null;
+  const runtimeCurrentNodeIds = runtimeWorkflow?.nodes.map((node) => node.id) ?? [];
+  const runtimeFlow = useMemo<RuntimeFlowLayout | null>(() => {
+    if (!runtimeWorkflow) {
+      return null;
+    }
+    return buildRuntimeFlowLayout(runtimeWorkflow, gatekeeper.data?.decisions ?? {}, selectedRuntimeNodeId);
+  }, [gatekeeper.data?.decisions, runtimeWorkflow, selectedRuntimeNodeId]);
+  const planningViewActive = viewMode === 'planning';
+  const firstRuntimeNodeId = runtimeFlow?.orderedNodes[0]?.id ?? runtimeCurrentNodeIds[0];
+
+  useEffect(() => {
+    if (runtimeCurrentNodeIds.length === 0) {
+      if (selectedRuntimeNodeId !== undefined) {
+        setSelectedRuntimeNodeId(undefined);
+      }
+      return;
+    }
+
+    if (!selectedRuntimeNodeId || !runtimeCurrentNodeIds.includes(selectedRuntimeNodeId)) {
+      setSelectedRuntimeNodeId(firstRuntimeNodeId);
+    }
+  }, [firstRuntimeNodeId, runtimeCurrentNodeIds, selectedRuntimeNodeId]);
+
+  if (dag.isError) {
+    return <FullPageError error={dag.error} dagPath={paths.dagPath} onRetry={() => void dag.refetch()} />;
+  }
 
   return (
     <div className="app-shell">
       <Toolbar
         mode={mode}
         setMode={setMode}
-        refetch={() => void Promise.all([dag.refetch(), validation.refetch(), state.refetch(), runs.refetch()])}
+        viewMode={viewMode}
+        setViewMode={setViewMode}
+        refetch={() =>
+          void Promise.all([
+            dag.refetch(),
+            validation.refetch(),
+            state.refetch(),
+            runs.refetch(),
+            mutations.refetch(),
+            replay.refetch(),
+            gatekeeper.refetch(),
+          ])
+        }
       />
-      <main className="workspace">
+      <main className={planningViewActive ? 'workspace planning-view' : 'workspace runtime-view'}>
         <aside className="sidebar">
           <section className="ready-panel">
             <div className="pane-title">
@@ -692,230 +878,372 @@ function Workbench() {
               <p className="diagnostics-text">No validation issues detected.</p>
             )}
           </section>
-          <section className="ready-panel">
-            <div className="pane-title">
-              <LayoutList size={16} />
-              Ready nodes
-              <span className="pane-count">{readyNodes.length}</span>
-            </div>
-            {state.isLoading ? (
-              <p className="empty-state-message">Resolving ready nodes.</p>
-            ) : readyNodes.length === 0 ? (
-              <div className="empty-state-card" role="status" aria-live="polite">
-                <strong>No ready nodes</strong>
-                <p>Every node is either blocked, completed, or waiting on review.</p>
-              </div>
-            ) : (
-              <div className="ready-list">
-                {readyNodes.map((node) => (
-                  <button
-                    key={node.id}
-                    type="button"
-                    className={node.id === selectedNode?.id ? 'ready-item selected' : 'ready-item'}
-                    onClick={() => attemptSelectNode(node.id)}
-                  >
-                    <span>{node.title}</span>
-                    <small>{node.id}</small>
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
-          <section>
-            <div className="pane-title">
-              <Workflow size={16} /> DAG
-              <button type="button" className="metadata-toggle" onClick={beginCreateNode}>
-                <Plus size={14} />
-                Add node
-              </button>
-            </div>
-            <div className="file-pill">{paths.dagPath}</div>
-            <div className="file-pill">{paths.runsDir}</div>
-            <div className="filter-row" aria-label="Node states">
-              <span>ready</span>
-              <span>blocked</span>
-              <span>needs review</span>
-            </div>
-            {dagNodes.length === 0 ? (
-              <div className="empty-state-card" role="status" aria-live="polite">
-                <strong>No DAG nodes</strong>
-                <p>The DAG loaded successfully, but it does not contain any task nodes yet.</p>
-              </div>
-            ) : (
-              <nav className="node-list" aria-label="DAG nodes">
-                {dagNodes.map((node) => (
-                  <button
-                    key={node.id}
-                    type="button"
-                    className={node.id === selectedNode?.id ? 'node-item selected' : 'node-item'}
-                    onClick={() => attemptSelectNode(node.id)}
-                  >
-                    <span>{node.title}</span>
-                    <small className={state.data?.states[node.id] ?? 'blocked'}>{state.data?.states[node.id] ?? 'blocked'}</small>
-                  </button>
-                ))}
-              </nav>
-            )}
-          </section>
-        </aside>
-        <section className="graph-pane">
-          <AssignmentMatrix
-            nodes={dagNodes}
-            states={state.data?.states}
-            readyNodes={readyNodes}
-            selectedNodeId={selectedNode?.id}
-            onSelectNode={attemptSelectNode}
-          />
-          <div className="graph-canvas">
-            {graphDependencyDraft || graphDependencyInlineError ? (
-              <div className="graph-draft-panel">
-                <div className="graph-draft-summary">
-                  <strong>{graphDependencyDraft ? 'Unsaved graph dependency edit' : 'Graph dependency edit rejected'}</strong>
-                  {graphDependencyDraft ? (
-                    <span>
-                      {graphDependencyDraft.targetId} waits for{' '}
-                      {graphDependencyDraft.dependencies.length > 0 ? graphDependencyDraft.dependencies.join(', ') : 'no upstream nodes'}
-                    </span>
-                  ) : null}
-                  {graphDependencyDraft?.undo ? <small>{graphDependencyDraft.undo.label}</small> : null}
-                  {graphDependencyInlineError ? (
-                    <p role="alert" aria-live="polite">
-                      {graphDependencyInlineError}
-                    </p>
-                  ) : null}
+          {planningViewActive ? (
+            <>
+              <section className="ready-panel">
+                <div className="pane-title">
+                  <LayoutList size={16} />
+                  Ready nodes
+                  <span className="pane-count">{readyNodes.length}</span>
                 </div>
-                {graphDependencyDraft ? (
-                  <div className="graph-draft-actions">
-                    <button
-                      type="button"
-                      className="metadata-cancel"
-                      onClick={undoGraphDependencyEdit}
-                      disabled={!graphDependencyDraft.undo || graphDependencyMutation.isPending}
-                    >
-                      <Undo2 size={14} />
-                      Undo
-                    </button>
-                    <button
-                      type="button"
-                      className="metadata-save"
-                      onClick={saveGraphDependencyEdit}
-                      disabled={graphDependencyMutation.isPending || !graphDependencyDraftHasChanges || Boolean(graphDependencyDraftValidation)}
-                    >
-                      <Save size={14} />
-                      Save graph edit
-                    </button>
-                    <button
-                      type="button"
-                      className="metadata-cancel"
-                      onClick={cancelGraphDependencyEdit}
-                      disabled={graphDependencyMutation.isPending}
-                    >
-                      Cancel
-                    </button>
+                {state.isLoading ? (
+                  <p className="empty-state-message">Resolving ready nodes.</p>
+                ) : readyNodes.length === 0 ? (
+                  <div className="empty-state-card" role="status" aria-live="polite">
+                    <strong>No ready nodes</strong>
+                    <p>Every node is either blocked, completed, or waiting on review.</p>
                   </div>
                 ) : (
+                  <div className="ready-list">
+                    {readyNodes.map((node) => (
+                      <button
+                        key={node.id}
+                        type="button"
+                        className={node.id === selectedNode?.id ? 'ready-item selected' : 'ready-item'}
+                        onClick={() => attemptSelectNode(node.id)}
+                      >
+                        <span>{node.title}</span>
+                        <small>{node.id}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+              <section>
+                <div className="pane-title">
+                  <Workflow size={16} /> Planning DAG
+                  <button type="button" className="metadata-toggle" onClick={beginCreateNode}>
+                    <Plus size={14} />
+                    Add node
+                  </button>
+                </div>
+                <div className="file-pill">{paths.dagPath}</div>
+                <div className="file-pill">{paths.runsDir}</div>
+                <div className="filter-row" aria-label="Node states">
+                  <span>ready</span>
+                  <span>blocked</span>
+                  <span>needs review</span>
+                </div>
+                {dagNodes.length === 0 ? (
+                  <div className="empty-state-card" role="status" aria-live="polite">
+                    <strong>No DAG nodes</strong>
+                    <p>The DAG loaded successfully, but it does not contain any task nodes yet.</p>
+                  </div>
+                ) : (
+                  <nav className="node-list" aria-label="DAG nodes">
+                    {dagNodes.map((node) => (
+                      <button
+                        key={node.id}
+                        type="button"
+                        className={node.id === selectedNode?.id ? 'node-item selected' : 'node-item'}
+                        onClick={() => attemptSelectNode(node.id)}
+                      >
+                        <span>{node.title}</span>
+                        <small>{state.data?.states[node.id] ?? 'blocked'}</small>
+                      </button>
+                    ))}
+                  </nav>
+                )}
+              </section>
+            </>
+          ) : (
+            <section className="runtime-source-panel" aria-labelledby="runtime-sources-heading">
+              <div className="pane-title" id="runtime-sources-heading">
+                <GitBranch size={16} />
+                Runtime sources
+              </div>
+              <div className="metadata-form runtime-source-form">
+                <label className="field">
+                  <span>Mission path</span>
+                  <input
+                    type="text"
+                    value={mutationPathDraft.missionPath}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, missionPath: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Workflow path</span>
+                  <input
+                    type="text"
+                    value={mutationPathDraft.workflowPath}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, workflowPath: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Ledger path</span>
+                  <input
+                    type="text"
+                    value={mutationPathDraft.ledgerPath}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, ledgerPath: event.target.value }))
+                    }
+                  />
+                </label>
+                <div className="metadata-actions">
                   <button
                     type="button"
-                    className="icon-button"
-                    onClick={cancelGraphDependencyEdit}
-                    aria-label="Dismiss graph dependency message"
+                    className="metadata-save"
+                    onClick={applyMutationPathDraft}
+                    disabled={!mutationPathDraftChanged}
                   >
-                    <X size={14} />
+                    Apply runtime sources
                   </button>
+                </div>
+              </div>
+              <p className="runtime-source-note">
+                Runtime mode reads the workflow, mission, and ledger directly. Switch back to Planning DAG to edit graph structure.
+              </p>
+            </section>
+          )}
+        </aside>
+        {planningViewActive ? (
+          <>
+            <section className="graph-pane">
+              <AssignmentMatrix
+                nodes={dagNodes}
+                states={state.data?.states}
+                readyNodes={readyNodes}
+                selectedNodeId={selectedNode?.id}
+                onSelectNode={attemptSelectNode}
+              />
+              <div className="graph-canvas">
+                {graphDependencyDraft || graphDependencyInlineError ? (
+                  <div className="graph-draft-panel">
+                    <div className="graph-draft-summary">
+                      <strong>{graphDependencyDraft ? 'Unsaved graph dependency edit' : 'Graph dependency edit rejected'}</strong>
+                      {graphDependencyDraft ? (
+                        <span>
+                          {graphDependencyDraft.targetId} waits for{' '}
+                          {graphDependencyDraft.dependencies.length > 0 ? graphDependencyDraft.dependencies.join(', ') : 'no upstream nodes'}
+                        </span>
+                      ) : null}
+                      {graphDependencyDraft?.undo ? <small>{graphDependencyDraft.undo.label}</small> : null}
+                      {graphDependencyInlineError ? (
+                        <p role="alert" aria-live="polite">
+                          {graphDependencyInlineError}
+                        </p>
+                      ) : null}
+                    </div>
+                    {graphDependencyDraft ? (
+                      <div className="graph-draft-actions">
+                        <button
+                          type="button"
+                          className="metadata-cancel"
+                          onClick={undoGraphDependencyEdit}
+                          disabled={!graphDependencyDraft.undo || graphDependencyMutation.isPending}
+                        >
+                          <Undo2 size={14} />
+                          Undo
+                        </button>
+                        <button
+                          type="button"
+                          className="metadata-save"
+                          onClick={saveGraphDependencyEdit}
+                          disabled={graphDependencyMutation.isPending || !graphDependencyDraftHasChanges || Boolean(graphDependencyDraftValidation)}
+                        >
+                          <Save size={14} />
+                          Save graph edit
+                        </button>
+                        <button
+                          type="button"
+                          className="metadata-cancel"
+                          onClick={cancelGraphDependencyEdit}
+                          disabled={graphDependencyMutation.isPending}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="icon-button"
+                        onClick={cancelGraphDependencyEdit}
+                        aria-label="Dismiss graph dependency message"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+                ) : null}
+                {dagNodes.length === 0 ? (
+                  <div className="graph-empty" role="status" aria-live="polite">
+                    <strong>No workflow graph to display</strong>
+                    <p>The DAG file loaded, but there are no nodes to render.</p>
+                  </div>
+                ) : (
+                  <ReactFlow
+                    nodes={flowNodes}
+                    edges={flowEdges}
+                    fitView
+                    nodeTypes={FLOW_NODE_TYPES}
+                    connectionLineType={ConnectionLineType.SmoothStep}
+                    defaultEdgeOptions={{ type: 'smoothstep' }}
+                    onNodeClick={(_, node) => attemptSelectNode(node.id)}
+                    onNodeDragStart={(_, node) => startDraggedNodePreview(node as Node<DagFlowNodeData>)}
+                    onNodeDrag={(_, node) => updateDraggedNodePreview(node as Node<DagFlowNodeData>)}
+                    onNodeDragStop={(_, node) => stopDraggedNodePreview(node as Node<DagFlowNodeData>)}
+                    onConnect={stageGraphDependencyConnection}
+                    onEdgesDelete={stageGraphDependencyRemoval}
+                    onEdgeDoubleClick={(_, edge) => stageGraphDependencyRemoval([edge])}
+                    deleteKeyCode={['Backspace', 'Delete']}
+                  >
+                    <Background gap={18} />
+                    <Controls showInteractive={false} />
+                    {dragPreview ? (
+                      <ViewportPortal>
+                        <div
+                          className="graph-drag-placeholder"
+                          style={{
+                            transform: `translate(${dragPreview.initialPosition.x}px, ${dragPreview.initialPosition.y}px)`,
+                          }}
+                        >
+                          <FlowNodeCard data={dragPreview.data} className="drag-origin-card" />
+                        </div>
+                        <div
+                          className="graph-drag-preview"
+                          style={{
+                            transform: `translate(${dragPreview.currentPosition.x}px, ${dragPreview.currentPosition.y}px)`,
+                          }}
+                        >
+                          <FlowNodeCard data={dragPreview.data} className="drag-preview-card" />
+                        </div>
+                      </ViewportPortal>
+                    ) : null}
+                    <Panel position="bottom-right">
+                      <button
+                        type="button"
+                        className="graph-reset-button"
+                        onClick={resetGraphLayout}
+                        disabled={!hasManualLayout}
+                      >
+                        <RefreshCcw size={14} />
+                        Reset layout
+                      </button>
+                    </Panel>
+                  </ReactFlow>
                 )}
               </div>
-            ) : null}
-            {dagNodes.length === 0 ? (
-              <div className="graph-empty" role="status" aria-live="polite">
-                <strong>No workflow graph to display</strong>
-                <p>The DAG file loaded, but there are no nodes to render.</p>
-              </div>
-            ) : (
-              <ReactFlow
-                nodes={flowNodes}
-                edges={flowEdges}
-                fitView
-                nodeTypes={FLOW_NODE_TYPES}
-                connectionLineType={ConnectionLineType.SmoothStep}
-                defaultEdgeOptions={{ type: 'smoothstep' }}
-                onNodeClick={(_, node) => attemptSelectNode(node.id)}
-                onNodeDragStart={(_, node) => startDraggedNodePreview(node as Node<DagFlowNodeData>)}
-                onNodeDrag={(_, node) => updateDraggedNodePreview(node as Node<DagFlowNodeData>)}
-                onNodeDragStop={(_, node) => stopDraggedNodePreview(node as Node<DagFlowNodeData>)}
-                onConnect={stageGraphDependencyConnection}
-                onEdgesDelete={stageGraphDependencyRemoval}
-                onEdgeDoubleClick={(_, edge) => stageGraphDependencyRemoval([edge])}
-                deleteKeyCode={['Backspace', 'Delete']}
-              >
-                <Background gap={18} />
-                <Controls showInteractive={false} />
-                {dragPreview ? (
-                  <ViewportPortal>
-                    <div
-                      className="graph-drag-placeholder"
-                      style={{
-                        transform: `translate(${dragPreview.initialPosition.x}px, ${dragPreview.initialPosition.y}px)`,
-                      }}
-                    >
-                      <FlowNodeCard data={dragPreview.data} className="drag-origin-card" />
-                    </div>
-                    <div
-                      className="graph-drag-preview"
-                      style={{
-                        transform: `translate(${dragPreview.currentPosition.x}px, ${dragPreview.currentPosition.y}px)`,
-                      }}
-                    >
-                      <FlowNodeCard data={dragPreview.data} className="drag-preview-card" />
-                    </div>
-                  </ViewportPortal>
-                ) : null}
-                <Panel position="bottom-right">
-                  <button
-                    type="button"
-                    className="graph-reset-button"
-                    onClick={resetGraphLayout}
-                    disabled={!hasManualLayout}
-                  >
-                    <RefreshCcw size={14} />
-                    Reset layout
-                  </button>
-                </Panel>
-              </ReactFlow>
-            )}
-          </div>
-        </section>
-        <Inspector
-          node={selectedNode}
-          dagNodes={dagNodes}
-          readyNodes={readyNodes}
-          createNodeMode={isCreatingNode}
-          dagHasNodes={dagNodes.length > 0}
-          onCancelCreate={() => setIsCreatingNode(false)}
-          onCreateNode={(nodeId) => {
-            setIsCreatingNode(false);
-            setSelectedId(nodeId);
-            setSelectedRunId(undefined);
-          }}
-          state={selectedNode ? state.data?.states[selectedNode.id] : undefined}
-          runs={selectedRuns}
-          runsLoading={runs.isLoading}
-          paths={paths}
-          selectedRun={selectedRun}
-          selectedRunId={selectedRunId}
-          onSelectRun={setSelectedRunId}
-          onUnsavedChange={setInspectorHasUnsavedChanges}
-        />
+            </section>
+            <Inspector
+              node={selectedNode}
+              dagNodes={dagNodes}
+              readyNodes={readyNodes}
+              createNodeMode={isCreatingNode}
+              dagHasNodes={dagNodes.length > 0}
+              onCancelCreate={() => setIsCreatingNode(false)}
+              onCreateNode={(nodeId) => {
+                setIsCreatingNode(false);
+                setSelectedId(nodeId);
+                setSelectedRunId(undefined);
+              }}
+              state={selectedNode ? state.data?.states[selectedNode.id] : undefined}
+              runs={selectedRuns}
+              runsLoading={runs.isLoading}
+              paths={paths}
+              selectedRun={selectedRun}
+              selectedRunId={selectedRunId}
+              onSelectRun={setSelectedRunId}
+              onUnsavedChange={setInspectorHasUnsavedChanges}
+            />
+          </>
+        ) : (
+          <>
+            <RuntimeWorkflowOverview
+              workflowId={mutations.data?.workflow_id ?? 'unavailable'}
+              workflowPath={mutationPaths.workflowPath}
+              ledgerPath={mutationPaths.ledgerPath}
+              missionPath={runtimeMissionPath}
+              workflow={runtimeWorkflow}
+              missionQuery={mission}
+              ledgerQuery={ledger}
+              runtimeFlow={runtimeFlow}
+              replay={replay.data ?? null}
+              gatekeeperReadyCount={gatekeeper.data?.ready.length ?? 0}
+              gatekeeperError={gatekeeper.error instanceof Error ? gatekeeper.error.message : null}
+              proposals={mutations.data?.proposals ?? []}
+              replayLoading={replay.isLoading}
+              replayError={replay.error instanceof Error ? replay.error.message : null}
+              isLoading={mutations.isLoading || gatekeeper.isLoading}
+              isSyncing={runtimeDecisionSyncing}
+              selectedNodeId={selectedRuntimeNodeId}
+              onSelectNode={(nodeId) => setSelectedRuntimeNodeId(nodeId)}
+            />
+            <MutationPanel
+              proposals={mutations.data?.proposals ?? []}
+              currentNodeIds={runtimeCurrentNodeIds}
+              ledgerPath={mutationPaths.ledgerPath}
+              isLoading={mutations.isLoading}
+              error={mutations.error instanceof Error ? mutations.error.message : null}
+              decisionError={
+                mutationDecision.error instanceof Error
+                  ? mutationDecision.error.message
+                  : null
+              }
+              isDeciding={mutationDecision.isPending}
+              selectedNodeId={selectedRuntimeNodeId}
+              onSelectNode={(nodeId) => setSelectedRuntimeNodeId(nodeId)}
+              onDecision={(proposalEventId, decision, reason) =>
+                mutationDecision.mutate({
+                  workflow_path: mutationPaths.workflowPath,
+                  ledger_path: mutationPaths.ledgerPath,
+                  proposal_event_id: proposalEventId,
+                  decision,
+                  actor: 'human',
+                  reason,
+                })
+              }
+            />
+          </>
+        )}
       </main>
       <RunTimeline runs={runs.data?.runs ?? []} isLoading={runs.isLoading} />
     </div>
   );
 }
 
-function Toolbar({ mode, setMode, refetch }: { mode: ThemeMode; setMode: (mode: ThemeMode) => void; refetch: () => void }) {
+function Toolbar({
+  mode,
+  setMode,
+  viewMode,
+  setViewMode,
+  refetch,
+}: {
+  mode: ThemeMode;
+  setMode: (mode: ThemeMode) => void;
+  viewMode: WorkbenchViewMode;
+  setViewMode: (mode: WorkbenchViewMode) => void;
+  refetch: () => void;
+}) {
   return (
     <header className="toolbar">
       <div className="brand"><GitBranch size={18} /> BureauLess</div>
       <div className="toolbar-center">automation-inspection-optimization</div>
+      <div className="view-toggle" aria-label="Workbench view">
+        <button
+          type="button"
+          aria-pressed={viewMode === 'planning'}
+          aria-selected={viewMode === 'planning'}
+          className={viewMode === 'planning' ? 'active' : ''}
+          onClick={() => setViewMode('planning')}
+        >
+          <Workflow size={14} />
+          Planning DAG
+        </button>
+        <button
+          type="button"
+          aria-pressed={viewMode === 'runtime'}
+          aria-selected={viewMode === 'runtime'}
+          className={viewMode === 'runtime' ? 'active' : ''}
+          onClick={() => setViewMode('runtime')}
+        >
+          <GitBranch size={14} />
+          Runtime workflow
+        </button>
+      </div>
       <button className="icon-button" onClick={refetch} title="Refresh"><RefreshCcw size={16} /></button>
       <div className="theme-toggle" aria-label="Theme">
         {(['system', 'light', 'dark'] as const).map((item) => (
@@ -927,6 +1255,1096 @@ function Toolbar({ mode, setMode, refetch }: { mode: ThemeMode; setMode: (mode: 
       </div>
     </header>
   );
+}
+
+function RuntimeWorkflowOverview({
+  workflowId,
+  workflowPath,
+  ledgerPath,
+  missionPath,
+  workflow,
+  missionQuery,
+  ledgerQuery,
+  runtimeFlow,
+  replay,
+  gatekeeperReadyCount,
+  gatekeeperError,
+  proposals,
+  replayLoading,
+  replayError,
+  isLoading,
+  isSyncing,
+  selectedNodeId,
+  onSelectNode,
+}: {
+  workflowId: string;
+  workflowPath: string;
+  ledgerPath: string;
+  missionPath: string;
+  workflow: RuntimeWorkflow | null;
+  missionQuery: {
+    data?: MissionResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  ledgerQuery: {
+    data?: LedgerResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  runtimeFlow: RuntimeFlowLayout | null;
+  replay: ReplayResponse | null;
+  gatekeeperReadyCount: number;
+  gatekeeperError: string | null;
+  proposals: MutationProposalInspection[];
+  replayLoading: boolean;
+  replayError: string | null;
+  isLoading: boolean;
+  isSyncing: boolean;
+  selectedNodeId?: string;
+  onSelectNode: (nodeId: string) => void;
+}) {
+  const pendingCount = proposals.filter((proposal) => proposal.state === 'pending').length;
+  const currentNodeIds = workflow?.nodes.map((node) => node.id) ?? [];
+  const eventCount = workflow ? Object.keys(workflow.events).length : 0;
+  const gateCount = workflow?.gates.length ?? 0;
+  const terminalCount = workflow?.terminal_events.length ?? 0;
+  const selectedNode = runtimeFlow?.nodes.find((node) => node.id === selectedNodeId);
+  const replayNode = selectedNodeId && replay?.nodes ? replay.nodes[selectedNodeId] ?? null : null;
+  const replayProposalLinks = useMemo(
+    () =>
+      replay
+        ? Object.values(replay.mutation_proposals).filter((proposal) =>
+            proposal.affected_node_ids.includes(selectedNodeId ?? ''),
+          )
+        : [],
+    [replay, selectedNodeId],
+  );
+  const blockedCount = runtimeFlow?.nodes.filter((node) => node.data.gatekeeperTone === 'blocked').length ?? 0;
+  const needsReviewCount = runtimeFlow?.nodes.filter((node) => node.data.gatekeeperTone === 'needs_review').length ?? 0;
+  const completedCount = runtimeFlow?.nodes.filter((node) => node.data.gatekeeperTone === 'completed').length ?? 0;
+  const supersededCount = runtimeFlow?.nodes.filter((node) => node.data.gatekeeperTone === 'superseded').length ?? 0;
+  const [selectedEdge, setSelectedEdge] = useState<{ source: string; target: string; eventRef: string } | null>(null);
+  const artifactCount = ledgerQuery.data?.artifacts.length ?? 0;
+  const riskCount = ledgerQuery.data?.risks.length ?? 0;
+  const decisionCount = ledgerQuery.data?.decisions.length ?? 0;
+  const missionGoal = missionQuery.data?.goal ?? ledgerQuery.data?.current_goal ?? 'unavailable';
+  const missionStatus = missionQuery.data?.status ?? 'unavailable';
+
+  return (
+    <section className="runtime-pane" aria-labelledby="runtime-workflow-summary-heading">
+      <div className="runtime-pane-header">
+        <div className="pane-title" id="runtime-workflow-summary-heading">
+          <GitBranch size={16} />
+          Runtime workflow summary
+          <span className="pane-count">{pendingCount}</span>
+        </div>
+        <div className="runtime-source-inline">
+          <code title={workflowPath}>{workflowPath}</code>
+          <code title={ledgerPath}>{ledgerPath}</code>
+        </div>
+      </div>
+      {isSyncing ? (
+        <p className="runtime-sync-note" role="status" aria-live="polite">
+          Applying decision and refreshing runtime state.
+        </p>
+      ) : null}
+      <div className="runtime-summary-grid">
+        <div className="runtime-summary-card">
+          <span>Workflow id</span>
+          <strong>{workflowId}</strong>
+        </div>
+        <div className="runtime-summary-card">
+          <span>Current nodes</span>
+          <strong>{currentNodeIds.length}</strong>
+          <small>{currentNodeIds.join(', ') || 'unavailable'}</small>
+        </div>
+        <div className="runtime-summary-card">
+          <span>Runtime shape</span>
+          <strong>{eventCount} events / {gateCount} gates</strong>
+          <small>{terminalCount} terminal event{terminalCount === 1 ? '' : 's'}</small>
+        </div>
+        <div className="runtime-summary-card">
+          <span>Gatekeeper</span>
+          <strong>{gatekeeperReadyCount} runnable</strong>
+          <small>
+            {blockedCount} blocked, {needsReviewCount} needs review, {completedCount} completed
+            {supersededCount > 0 ? `, ${supersededCount} superseded` : ''}
+          </small>
+        </div>
+      </div>
+      <div className="runtime-summary-split">
+        <section className="runtime-mini-panel" aria-labelledby="runtime-mission-summary-heading" aria-busy={missionQuery.isLoading}>
+          <div className="runtime-mini-panel-header">
+            <div className="pane-title" id="runtime-mission-summary-heading">
+              <GitBranch size={16} />
+              Mission summary
+            </div>
+            <code title={missionPath}>{missionPath}</code>
+          </div>
+          {missionQuery.isError ? (
+            <p className="runtime-mini-panel-note" role="alert">
+              {missionQuery.error instanceof Error ? missionQuery.error.message : 'Mission load failed'}
+            </p>
+          ) : (
+            <div className="runtime-mini-panel-body">
+              <dl className="runtime-mini-facts">
+                <div>
+                  <dt>Mission id</dt>
+                  <dd>{missionQuery.data?.mission_id ?? workflow?.mission_id ?? 'unavailable'}</dd>
+                </div>
+                <div>
+                  <dt>Goal</dt>
+                  <dd>{missionGoal}</dd>
+                </div>
+                <div>
+                  <dt>Status</dt>
+                  <dd>{missionStatus}</dd>
+                </div>
+              </dl>
+              {missionQuery.isLoading ? <p className="runtime-mini-panel-note">Loading mission.</p> : null}
+            </div>
+          )}
+        </section>
+        <section className="runtime-mini-panel" aria-labelledby="runtime-ledger-summary-heading" aria-busy={ledgerQuery.isLoading}>
+          <div className="runtime-mini-panel-header">
+            <div className="pane-title" id="runtime-ledger-summary-heading">
+              <GitBranch size={16} />
+              Ledger summary
+            </div>
+            <code title={ledgerPath}>{ledgerPath}</code>
+          </div>
+          {ledgerQuery.isError ? (
+            <p className="runtime-mini-panel-note" role="alert">
+              {ledgerQuery.error instanceof Error ? ledgerQuery.error.message : 'Ledger load failed'}
+            </p>
+          ) : (
+            <div className="runtime-mini-panel-body">
+              <dl className="runtime-mini-facts runtime-mini-facts-wide">
+                <div>
+                  <dt>Artifacts</dt>
+                  <dd>{artifactCount}</dd>
+                </div>
+                <div>
+                  <dt>Risks</dt>
+                  <dd>{riskCount}</dd>
+                </div>
+                <div>
+                  <dt>Decisions</dt>
+                  <dd>{decisionCount}</dd>
+                </div>
+                <div>
+                  <dt>Current goal</dt>
+                  <dd>{ledgerQuery.data?.current_goal ?? missionGoal}</dd>
+                </div>
+              </dl>
+              {ledgerQuery.isLoading ? <p className="runtime-mini-panel-note">Loading ledger.</p> : null}
+            </div>
+          )}
+        </section>
+      </div>
+      {gatekeeperError ? <p className="mutation-error" role="alert">{gatekeeperError}</p> : null}
+      <section className="runtime-graph-panel" aria-label="Runtime workflow canvas">
+        <div className="runtime-graph-header">
+          <div className="pane-title">
+            <GitBranch size={16} />
+            Runtime graph
+          </div>
+          <div className="runtime-graph-legend">
+            <span>{pendingCount} pending proposal{pendingCount === 1 ? '' : 's'}</span>
+            <span>{proposals.length > 0 ? 'Accepted decisions redraw this canvas.' : 'No workflow mutations recorded.'}</span>
+          </div>
+        </div>
+        <div className="runtime-graph-canvas">
+          {!runtimeFlow || runtimeFlow.nodes.length === 0 ? (
+            <div className="empty-state-card" role="status" aria-live="polite">
+              <strong>No runtime nodes</strong>
+              <p>The ledger has not exposed any current workflow nodes yet.</p>
+            </div>
+          ) : (
+            <ReactFlow
+              nodes={runtimeFlow.nodes}
+              edges={runtimeFlow.edges}
+              fitView
+              nodeTypes={FLOW_NODE_TYPES}
+              connectionLineType={ConnectionLineType.SmoothStep}
+              defaultEdgeOptions={{ type: 'smoothstep' }}
+              nodesDraggable={false}
+              nodesConnectable={false}
+              elementsSelectable={false}
+              onNodeClick={(_, node) => onSelectNode(node.id)}
+              onEdgeClick={(_, edge) =>
+                setSelectedEdge({
+                  source: edge.source,
+                  target: edge.target,
+                  eventRef: edge.data?.eventRef ?? 'unavailable',
+                })
+              }
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background gap={18} />
+              <Controls showInteractive={false} />
+            </ReactFlow>
+          )}
+        </div>
+        {selectedEdge ? (
+          <div className="runtime-edge-inspector" aria-label="Selected runtime edge">
+            <div className="runtime-edge-inspector-header">
+              <strong>{selectedEdge.source} &rarr; {selectedEdge.target}</strong>
+              <button type="button" className="icon-button" onClick={() => setSelectedEdge(null)} aria-label="Clear edge selection">
+                <X size={14} />
+              </button>
+            </div>
+            <code>{selectedEdge.eventRef}</code>
+          </div>
+        ) : null}
+      </section>
+      <section className="runtime-replay-panel" aria-labelledby="runtime-replay-heading" aria-busy={replayLoading}>
+        <div className="runtime-graph-header">
+          <div className="pane-title" id="runtime-replay-heading">
+            <GitBranch size={16} />
+            Replay inspector
+            <span className="pane-count">{replay?.terminal_complete ? 'complete' : 'open'}</span>
+          </div>
+          <span className="review-note">Read-only replay evidence from the API</span>
+        </div>
+        <div className="runtime-replay-body">
+          {replayLoading ? (
+            <p className="diagnostics-text">Loading replay evidence.</p>
+          ) : replayError ? (
+            <p className="mutation-error" role="alert">{replayError}</p>
+          ) : !replay ? (
+            <div className="empty-state-card" role="status" aria-live="polite">
+              <strong>No replay data</strong>
+              <p>The replay API did not return evidence for this workflow.</p>
+            </div>
+          ) : !replayNode ? (
+            <div className="empty-state-card" role="status" aria-live="polite">
+              <strong>No replay node selected</strong>
+              <p>Select a runtime node to inspect emitted events, attempts, and links.</p>
+            </div>
+          ) : (
+            <>
+              <div className="runtime-replay-summary">
+                <div className="runtime-summary-card">
+                  <span>Workflow id</span>
+                  <strong>{replay.workflow_id}</strong>
+                </div>
+                <div className="runtime-summary-card">
+                  <span>Selected node</span>
+                  <strong>{replayNode.node_id}</strong>
+                  <small>{replayNode.state}</small>
+                </div>
+                <div className="runtime-summary-card">
+                  <span>Terminal replay</span>
+                  <strong>{replay.terminal_complete ? 'complete' : 'incomplete'}</strong>
+                </div>
+              </div>
+              <div className="runtime-replay-section">
+                <div className="runtime-replay-section-header">
+                  <strong>Emitted events</strong>
+                  <span className="pane-count">{replayNode.emitted_events.length}</span>
+                </div>
+                <div className="runtime-link-list">
+                  {replayNode.emitted_events.length > 0 ? (
+                    replayNode.emitted_events.map((eventId) => (
+                      <code key={eventId} className="runtime-link-chip">{eventId}</code>
+                    ))
+                  ) : (
+                    <span className="runtime-link-empty">none</span>
+                  )}
+                </div>
+              </div>
+              <div className="runtime-replay-section">
+                <div className="runtime-replay-section-header">
+                  <strong>Assignment attempts</strong>
+                  <span className="pane-count">{replayNode.assignment_attempts.length}</span>
+                </div>
+                <div className="runtime-replay-list">
+                  {replayNode.assignment_attempts.length > 0 ? (
+                    replayNode.assignment_attempts.map((attempt) => (
+                      <article className="runtime-replay-card" key={`${replayNode.node_id}:${attempt.assignment_id}`}>
+                        <div className="runtime-replay-card-head">
+                          <strong>{attempt.assignment_id}</strong>
+                          <span className={`state-pill runtime-state-pill ${attempt.state === 'superseded' ? 'superseded' : attempt.state === 'completed' ? 'completed' : 'blocked'}`}>
+                            {attempt.state}
+                          </span>
+                        </div>
+                        <dl className="runtime-link-facts">
+                          <div>
+                            <dt>Created</dt>
+                            <dd>{attempt.created_event_id ?? 'none'}</dd>
+                          </div>
+                          <div>
+                            <dt>Terminal</dt>
+                            <dd>{attempt.terminal_event_type ?? attempt.terminal_event_id ?? 'none'}</dd>
+                          </div>
+                          <div>
+                            <dt>Retry of</dt>
+                            <dd>{attempt.retry_of ?? 'none'}</dd>
+                          </div>
+                          <div>
+                            <dt>Superseded by</dt>
+                            <dd>{attempt.superseded_by ?? 'none'}</dd>
+                          </div>
+                        </dl>
+                      </article>
+                    ))
+                  ) : (
+                    <span className="runtime-link-empty">none</span>
+                  )}
+                </div>
+              </div>
+              <div className="runtime-replay-section">
+                <div className="runtime-replay-section-header">
+                  <strong>Blocked reasons</strong>
+                  <span className="pane-count">{replayNode.blocked_reasons.length}</span>
+                </div>
+                <div className="runtime-replay-list">
+                  {replayNode.blocked_reasons.length > 0 ? (
+                    replayNode.blocked_reasons.map((reason, index) => (
+                      <article className="runtime-replay-card" key={`${replayNode.node_id}:${reason.code}:${index}`}>
+                        <div className="runtime-replay-card-head">
+                          <span className={`state-pill runtime-state-pill ${runtimeReasonTone(reason.code)}`}>
+                            {formatReasonCode(reason.code)}
+                          </span>
+                          <p>{reason.message}</p>
+                        </div>
+                        <div className="runtime-reason-meta">
+                          {reason.missing_ref ? <span>Missing ref: <code>{reason.missing_ref}</code></span> : null}
+                          {reason.assignment_id ? <span>Assignment: <code>{reason.assignment_id}</code></span> : null}
+                          {reason.gate_id ? <span>Gate: <code>{reason.gate_id}</code></span> : null}
+                          {reason.mutation_event_id ? <span>Decision: <code>{reason.mutation_event_id}</code></span> : null}
+                        </div>
+                      </article>
+                    ))
+                  ) : (
+                    <span className="runtime-link-empty">none</span>
+                  )}
+                </div>
+              </div>
+              <div className="runtime-replay-section">
+                <div className="runtime-replay-section-header">
+                  <strong>Supersession / decision links</strong>
+                  <span className="pane-count">{replayProposalLinks.length}</span>
+                </div>
+                <div className="runtime-replay-list">
+                  {replayProposalLinks.length > 0 ? (
+                    replayProposalLinks.map((proposal) => (
+                      <article className="runtime-replay-card" key={proposal.proposal_event_id}>
+                        <div className="runtime-replay-card-head">
+                          <strong>{proposal.proposal_id}</strong>
+                          <span className={`state-pill runtime-state-pill ${proposal.state}`}>
+                            {proposal.state}
+                          </span>
+                        </div>
+                        <dl className="runtime-link-facts">
+                          <div>
+                            <dt>Proposal event</dt>
+                            <dd>{proposal.proposal_event_id}</dd>
+                          </div>
+                          <div>
+                            <dt>Decision event</dt>
+                            <dd>{proposal.decision_event_id ?? 'pending'}</dd>
+                          </div>
+                          <div>
+                            <dt>Affected nodes</dt>
+                            <dd>{proposal.affected_node_ids.join(', ') || 'none'}</dd>
+                          </div>
+                        </dl>
+                      </article>
+                    ))
+                  ) : (
+                    <span className="runtime-link-empty">none</span>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+      <section className="runtime-node-surface" aria-label="Runtime node surface">
+        <section className="runtime-node-list-panel" aria-labelledby="runtime-node-list-heading">
+          <div className="runtime-node-list-header">
+            <div className="pane-title" id="runtime-node-list-heading">
+              <LayoutList size={16} />
+              Runtime nodes
+              <span className="pane-count">{runtimeFlow?.nodes.length ?? 0}</span>
+            </div>
+            <span className="review-note">Sorted to match the graph layout</span>
+          </div>
+          {!runtimeFlow || runtimeFlow.nodes.length === 0 ? (
+            <div className="empty-state-card" role="status" aria-live="polite">
+              <strong>No runtime nodes</strong>
+              <p>The ledger has not exposed any current workflow nodes yet.</p>
+            </div>
+          ) : (
+            <div className="runtime-node-list" aria-label="Runtime workflow nodes">
+              {runtimeFlow.orderedNodes.map((node) => {
+                const isSelected = node.id === selectedNodeId;
+                return (
+                  <button
+                    key={node.id}
+                    type="button"
+                    className={`runtime-node-chip state-${node.data.gatekeeperTone}${isSelected ? ' selected' : ''}`}
+                    onClick={() => onSelectNode(node.id)}
+                  >
+                    <div className="runtime-node-chip-title">
+                      <strong>{node.id}</strong>
+                      <span className={`state-pill runtime-state-pill ${node.data.gatekeeperTone}`}>
+                        {node.data.gatekeeperStateLabel}
+                      </span>
+                    </div>
+                    <span>{node.data.role}</span>
+                    <small>{node.data.stateSummary}</small>
+                    {node.data.primaryReason ? <small className="runtime-node-chip-reason">{node.data.primaryReason}</small> : null}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+        <section className="runtime-node-inspector" aria-labelledby="runtime-node-inspector-heading">
+          <div className="runtime-node-list-header">
+            <div className="pane-title" id="runtime-node-inspector-heading">
+              <GitBranch size={16} />
+              Runtime node inspector
+            </div>
+            {selectedNode ? <span className="pane-count">{selectedNode.data.role}</span> : null}
+          </div>
+          {!selectedNode ? (
+            <div className="empty-state-card" role="status" aria-live="polite">
+              <strong>No runtime node selected</strong>
+              <p>Select a runtime node from the list or graph to inspect its state.</p>
+            </div>
+          ) : (
+            <div className="runtime-node-inspector-card">
+              <div className="runtime-node-inspector-header">
+                <div>
+                  <span className="review-note">Selected node</span>
+                  <strong>{selectedNode.id}</strong>
+                </div>
+                <div className="badge-row runtime-node-inspector-badges">
+                  <span className="badge">{selectedNode.data.role}</span>
+                  <span className={`state-pill runtime-state-pill ${selectedNode.data.gatekeeperTone}`}>
+                    {selectedNode.data.gatekeeperStateLabel}
+                  </span>
+                </div>
+              </div>
+              <div className="runtime-node-inspector-summary">
+                <span>Gatekeeper summary</span>
+                <strong>{selectedNode.data.stateSummary}</strong>
+              </div>
+              {selectedNode.data.blockedReasons.length > 0 ? (
+                <div className="runtime-blocked-reasons" aria-label="Gatekeeper reasons">
+                  <div className="runtime-blocked-reasons-header">
+                    <AlertCircle size={14} />
+                    <strong>Why this node is not runnable</strong>
+                  </div>
+                  <div className="runtime-reason-list">
+                    {selectedNode.data.blockedReasons.map((reason, index) => (
+                      <article
+                        key={`${selectedNode.id}:${reason.code}:${reason.message}:${index}`}
+                        className={`runtime-reason-card reason-${runtimeReasonTone(reason.code)}`}
+                      >
+                        <div className="runtime-reason-heading">
+                          <span className={`state-pill runtime-state-pill ${runtimeReasonTone(reason.code)}`}>
+                            {formatReasonCode(reason.code)}
+                          </span>
+                          <p>{reason.message}</p>
+                        </div>
+                        <div className="runtime-reason-meta">
+                          {reason.missing_ref ? <span>Missing ref: <code>{reason.missing_ref}</code></span> : null}
+                          {reason.gate_id ? <span>Gate: <code>{reason.gate_id}</code></span> : null}
+                          {reason.assignment_id ? <span>Assignment: <code>{reason.assignment_id}</code></span> : null}
+                          {reason.mutation_event_id ? <span>Mutation: <code>{reason.mutation_event_id}</code></span> : null}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              <dl className="runtime-node-inspector-facts">
+                <div>
+                  <dt>Waits for all</dt>
+                  <dd>{selectedNode.data.waitsForAll.length > 0 ? selectedNode.data.waitsForAll.join(', ') : 'none'}</dd>
+                </div>
+                <div>
+                  <dt>Waits for any</dt>
+                  <dd>{selectedNode.data.waitsForAny.length > 0 ? selectedNode.data.waitsForAny.join(', ') : 'none'}</dd>
+                </div>
+                <div>
+                  <dt>Emits</dt>
+                  <dd>{selectedNode.data.emits.length > 0 ? selectedNode.data.emits.join(', ') : 'none'}</dd>
+                </div>
+                <div>
+                  <dt>Gates</dt>
+                  <dd>{selectedNode.data.gateCount}</dd>
+                </div>
+              </dl>
+            </div>
+          )}
+        </section>
+      </section>
+      {isLoading ? <p className="empty-state-message">Loading runtime workflow.</p> : null}
+    </section>
+  );
+}
+
+function MutationPanel({
+  proposals,
+  currentNodeIds,
+  ledgerPath,
+  isLoading,
+  error,
+  decisionError,
+  isDeciding,
+  selectedNodeId,
+  onSelectNode,
+  onDecision,
+}: {
+  proposals: MutationProposalInspection[];
+  currentNodeIds: string[];
+  ledgerPath: string;
+  isLoading: boolean;
+  error: string | null;
+  decisionError: string | null;
+  isDeciding: boolean;
+  selectedNodeId?: string;
+  onSelectNode: (nodeId: string) => void;
+  onDecision: (
+    proposalEventId: string,
+    decision: 'accept' | 'reject',
+    reason?: string,
+  ) => void;
+}) {
+  const [rejectionReasons, setRejectionReasons] = useState<Record<string, string>>({});
+
+  return (
+    <section className="mutation-panel" aria-label="Runtime workflow mutations" aria-busy={isDeciding}>
+      <div className="pane-title">
+        <GitBranch size={16} />
+        Runtime workflow mutations
+        <span className="pane-count">
+          {proposals.filter((proposal) => proposal.state === 'pending').length}
+        </span>
+      </div>
+      <code className="mutation-source" title={ledgerPath}>{ledgerPath}</code>
+      <div className="mutation-context">
+        <p className="mutation-current">
+          <span>Runtime workflow now</span>
+          {currentNodeIds.join(', ') || 'unavailable'}
+        </p>
+        <p className="mutation-note">
+          This panel reflects the runtime workflow from the ledger. Switch to Planning DAG to edit graph structure.
+        </p>
+        {isDeciding ? (
+          <p className="mutation-sync-note" role="status" aria-live="polite">
+            Applying decision and refreshing runtime state.
+          </p>
+        ) : null}
+      </div>
+      {isLoading ? <p className="diagnostics-text">Loading mutation proposals.</p> : null}
+      {error ? <p className="mutation-error" role="alert">{error}</p> : null}
+      {!isLoading && !error && proposals.length === 0 ? (
+        <p className="diagnostics-text">No workflow mutations recorded.</p>
+      ) : null}
+      <div className="mutation-list">
+        {proposals.map((proposal) => {
+          const rejectionReason = rejectionReasons[proposal.proposal_event_id] ?? '';
+          const preview = summarizeWorkflowPreview(currentNodeIds, proposal);
+          const clickableNodeIds = proposal.affected_node_ids.filter((nodeId) => currentNodeIds.includes(nodeId));
+          return (
+            <article className="mutation-item" key={proposal.proposal_event_id}>
+              <div className="mutation-heading">
+                <div className="mutation-heading-title">
+                  <strong>{proposal.proposal_id}</strong>
+                  <span className="mutation-heading-subtitle">
+                    {proposal.affected_node_ids.length > 0 ? `${proposal.affected_node_ids.length} affected node${proposal.affected_node_ids.length === 1 ? '' : 's'}` : 'No affected nodes'}
+                  </span>
+                </div>
+                <span className={`mutation-state ${proposal.state}`}>{proposal.state}</span>
+              </div>
+              <p>{proposal.proposal.rationale ?? proposal.proposal.reason ?? 'No rationale recorded.'}</p>
+              <dl className="mutation-facts">
+                <div>
+                  <dt>Affected nodes</dt>
+                  <dd className="mutation-node-list">
+                    {proposal.affected_node_ids.length > 0 ? (
+                      proposal.affected_node_ids.map((nodeId) => {
+                        const isCurrent = currentNodeIds.includes(nodeId);
+                        const isSelected = nodeId === selectedNodeId;
+                        return isCurrent ? (
+                          <button
+                            key={nodeId}
+                            type="button"
+                            className={`mutation-node-chip${isSelected ? ' selected' : ''}`}
+                            onClick={() => onSelectNode(nodeId)}
+                          >
+                            {nodeId}
+                          </button>
+                        ) : (
+                          <code key={nodeId} className="mutation-node-chip disabled" title="Not present in the current runtime">
+                            {nodeId}
+                          </code>
+                        );
+                      })
+                    ) : (
+                      <span>none</span>
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Affected assignments</dt>
+                  <dd>
+                    {proposal.affected_assignments.length > 0 ? (
+                      <div className="mutation-node-links" aria-label={`Affected assignments for ${proposal.proposal_id}`}>
+                        {proposal.affected_assignments.map((assignmentId) => (
+                          <span key={`${proposal.proposal_event_id}:${assignmentId}`} className="mutation-node-chip mutation-node-chip-static">
+                            {assignmentId}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      'none'
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Superseded evidence</dt>
+                  <dd>
+                    {proposal.superseded_assignments.length > 0 ? (
+                      <div className="mutation-node-links" aria-label={`Superseded assignments for ${proposal.proposal_id}`}>
+                        {proposal.superseded_assignments.map((assignmentId) => (
+                          <span key={`${proposal.proposal_event_id}:${assignmentId}`} className="mutation-node-chip mutation-node-chip-static">
+                            {assignmentId}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      'none'
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Evidence</dt>
+                  <dd>{proposal.evidence_refs.join(', ') || 'none'}</dd>
+                </div>
+                <div>
+                  <dt>Changes</dt>
+                  <dd>{summarizeMutationChanges(proposal)}</dd>
+                </div>
+              </dl>
+              {clickableNodeIds.length > 0 ? (
+                <div className="mutation-node-actions" aria-label={`Affected runtime nodes for ${proposal.proposal_id}`}>
+                  {clickableNodeIds.map((nodeId) => (
+                    <button
+                      key={nodeId}
+                      type="button"
+                      className={`mutation-node-link${nodeId === selectedNodeId ? ' selected' : ''}`}
+                      onClick={() => onSelectNode(nodeId)}
+                    >
+                      <LayoutList size={12} />
+                      <span>{nodeId}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="mutation-preview" aria-label={`Workflow preview for ${proposal.proposal_id}`}>
+                <div className="mutation-preview-card">
+                  <span className="mutation-preview-label">Current runtime workflow</span>
+                  <strong>{preview.currentNodes}</strong>
+                </div>
+                <div className="mutation-preview-card">
+                  <span className="mutation-preview-label">
+                    {proposal.state === 'accepted' ? 'Applied workflow' : 'Proposed workflow'}
+                  </span>
+                  <strong>{preview.proposedNodes}</strong>
+                  <small>{preview.edgeSummary}</small>
+                </div>
+              </div>
+              {proposal.state === 'pending' ? (
+                <>
+                  <input
+                    className="mutation-reason"
+                    value={rejectionReason}
+                    onChange={(event) =>
+                      setRejectionReasons((current) => ({
+                        ...current,
+                        [proposal.proposal_event_id]: event.target.value,
+                      }))
+                    }
+                    placeholder="Rejection reason"
+                    aria-label={`Rejection reason for ${proposal.proposal_id}`}
+                  />
+                  <div className="mutation-actions">
+                    <button
+                      type="button"
+                      className="mutation-accept"
+                      onClick={() => onDecision(proposal.proposal_event_id, 'accept')}
+                      disabled={isDeciding}
+                    >
+                      <CheckCircle2 size={14} /> Accept
+                    </button>
+                    <button
+                      type="button"
+                      className="mutation-reject"
+                      onClick={() =>
+                        onDecision(
+                          proposal.proposal_event_id,
+                          'reject',
+                          rejectionReason.trim(),
+                        )
+                      }
+                      disabled={isDeciding || !rejectionReason.trim()}
+                    >
+                      <XCircle size={14} /> Reject
+                    </button>
+                  </div>
+                </>
+              ) : null}
+            </article>
+          );
+        })}
+      </div>
+      {decisionError ? <p className="mutation-error" role="alert">{decisionError}</p> : null}
+    </section>
+  );
+}
+
+function summarizeMutationChanges(proposal: MutationProposalInspection): string {
+  const changes = proposal.proposal.proposed_changes ?? {};
+  const parts = Object.entries(changes)
+    .filter(([, operations]) => Array.isArray(operations) && operations.length > 0)
+    .map(([operation, operations]) => `${operation}: ${operations.length}`);
+  return parts.join(', ') || 'none';
+}
+
+type MutationChangeRecord = Record<string, unknown[]>;
+
+function summarizeWorkflowPreview(
+  currentNodeIds: string[],
+  proposal: MutationProposalInspection,
+): { currentNodes: string; proposedNodes: string; edgeSummary: string } {
+  const changes = proposal.proposal.proposed_changes as MutationChangeRecord | undefined;
+  const addNodes = Array.isArray(changes?.add_nodes) ? changes.add_nodes : [];
+  const addEdges = Array.isArray(changes?.add_edges) ? changes.add_edges : [];
+  const removeEdges = Array.isArray(changes?.remove_edges) ? changes.remove_edges : [];
+  const proposedNodeIds = [
+    ...new Set([
+      ...currentNodeIds,
+      ...addNodes
+        .map((entry) => mutationNodeId(entry))
+        .filter((value): value is string => Boolean(value)),
+    ]),
+  ];
+
+  const edgeParts = [
+    ...removeEdges
+      .map((entry) => mutationEdgeLabel(entry, '-'))
+      .filter((value): value is string => Boolean(value)),
+    ...addEdges
+      .map((entry) => mutationEdgeLabel(entry, '+'))
+      .filter((value): value is string => Boolean(value)),
+  ];
+
+  return {
+    currentNodes: currentNodeIds.join(', ') || 'unavailable',
+    proposedNodes: proposedNodeIds.join(', ') || 'unavailable',
+    edgeSummary: edgeParts.join(' | ') || 'No edge rewiring',
+  };
+}
+
+function mutationNodeId(entry: unknown): string | null {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const id = (entry as { id?: unknown }).id;
+  return typeof id === 'string' && id ? id : null;
+}
+
+function mutationEdgeLabel(entry: unknown, prefix: '+' | '-'): string | null {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const edge = entry as {
+    from_node?: unknown;
+    to_node?: unknown;
+    event?: unknown;
+  };
+  if (
+    typeof edge.from_node !== 'string'
+    || typeof edge.to_node !== 'string'
+    || typeof edge.event !== 'string'
+  ) {
+    return null;
+  }
+  return `${prefix} ${edge.from_node} -> ${edge.to_node} (${edge.event})`;
+}
+
+function splitRuntimeWaitsFor(waitsFor: RuntimeWorkflowWaitsFor): { allOf: string[]; anyOf: string[] } {
+  if (Array.isArray(waitsFor)) {
+    return { allOf: waitsFor.filter((entry): entry is string => typeof entry === 'string'), anyOf: [] };
+  }
+  if (!waitsFor || typeof waitsFor !== 'object') {
+    return { allOf: [], anyOf: [] };
+  }
+  return {
+    allOf: Array.isArray(waitsFor.all_of) ? waitsFor.all_of.filter((entry): entry is string => typeof entry === 'string') : [],
+    anyOf: Array.isArray(waitsFor.any_of) ? waitsFor.any_of.filter((entry): entry is string => typeof entry === 'string') : [],
+  };
+}
+
+function runtimeNodeDependencyIds(workflow: RuntimeWorkflow, node: RuntimeWorkflowNode): string[] {
+  const dependencies = runtimeWorkflowDependencies(workflow, node).map((dependency) => dependency.sourceId);
+  return [...new Set(dependencies)];
+}
+
+function runtimeWorkflowEdges(workflow: RuntimeWorkflow): Edge<RuntimeFlowEdgeData>[] {
+  return workflow.nodes.flatMap((node) =>
+    runtimeWorkflowDependencies(workflow, node).map((dependency) => ({
+      id: `runtime:${dependency.sourceId}:${node.id}:${dependency.eventRef}:${dependency.branch}`,
+      source: dependency.sourceId,
+      target: node.id,
+      ariaLabel: `${dependency.sourceId} triggers ${dependency.eventRef} for ${node.id}`,
+      className: dependency.branch === 'any' ? 'flow-edge runtime any' : 'flow-edge runtime',
+      data: { eventRef: dependency.eventRef },
+      focusable: false,
+      interactionWidth: 20,
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        width: 16,
+        height: 16,
+        color: dependency.branch === 'any' ? 'var(--review)' : 'var(--accent)',
+      },
+      type: 'smoothstep',
+    })),
+  );
+}
+
+function runtimeWorkflowDependencies(
+  workflow: RuntimeWorkflow,
+  node: RuntimeWorkflowNode,
+): Array<{ sourceId: string; eventRef: string; branch: 'all' | 'any' }> {
+  const waitsFor = splitRuntimeWaitsFor(node.waits_for);
+  const eventSources = workflow.nodes.reduce<Map<string, string[]>>((sources, candidate) => {
+    for (const eventName of candidate.emits) {
+      const current = sources.get(eventName) ?? [];
+      current.push(candidate.id);
+      sources.set(eventName, current);
+    }
+    return sources;
+  }, new Map());
+
+  const resolveRefs = (refs: string[], branch: 'all' | 'any') =>
+    refs.flatMap((eventRef) => {
+      const explicitSource = runtimeEventRefSourceId(eventRef);
+      if (explicitSource) {
+        return workflow.nodes.some((candidate) => candidate.id === explicitSource)
+          ? [{ sourceId: explicitSource, eventRef, branch }]
+          : [];
+      }
+      const eventName = runtimeEventRefName(eventRef);
+      return (eventSources.get(eventName) ?? []).map((sourceId) => ({ sourceId, eventRef, branch }));
+    });
+
+  return [...resolveRefs(waitsFor.allOf, 'all'), ...resolveRefs(waitsFor.anyOf, 'any')];
+}
+
+function buildRuntimeFlowLayout(
+  workflow: RuntimeWorkflow,
+  decisions: Record<string, GatekeeperDecision>,
+  selectedNodeId?: string,
+): RuntimeFlowLayout {
+  const dependencyView = workflow.nodes.map((node) => ({
+    id: node.id,
+    dependencies: runtimeNodeDependencyIds(workflow, node),
+  }));
+  const positions = computeDirectedNodePositions(workflow.nodes, dependencyView);
+  const terminalEvents = new Set(workflow.terminal_events);
+  const gateCounts = workflow.gates.reduce<Map<string, number>>((counts, gate) => {
+    counts.set(gate.node_id, (counts.get(gate.node_id) ?? 0) + 1);
+    return counts;
+  }, new Map());
+
+  const nodes = workflow.nodes.map((node) => {
+    const waitsFor = splitRuntimeWaitsFor(node.waits_for);
+    const decision = decisions[node.id];
+    const stateSummary = summarizeRuntimeNodeState({
+      decision,
+      waitsForAll: waitsFor.allOf,
+      waitsForAny: waitsFor.anyOf,
+      emits: node.emits,
+      isTerminal: node.emits.some((eventName) => terminalEvents.has(eventName)),
+    });
+    const gatekeeperTone = runtimeDecisionTone(decision);
+    const primaryReason = summarizePrimaryReason(decision?.blocked_reasons ?? []);
+
+    return {
+      id: node.id,
+      selected: node.id === selectedNodeId,
+      position: positions.get(node.id) ?? { x: 80, y: 120 },
+      data: {
+        role: node.role,
+        gatekeeperState: decision?.state ?? 'unknown',
+        gatekeeperStateLabel: formatRuntimeStateLabel(decision?.state),
+        gatekeeperTone,
+        stateSummary,
+        primaryReason,
+        blockedReasons: decision?.blocked_reasons ?? [],
+        emits: node.emits,
+        waitsForAll: waitsFor.allOf,
+        waitsForAny: waitsFor.anyOf,
+        isTerminal: node.emits.some((eventName) => terminalEvents.has(eventName)),
+        gateCount: gateCounts.get(node.id) ?? 0,
+      },
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+      type: 'runtime',
+    };
+  });
+
+  const orderedNodes = nodes
+    .slice()
+    .sort((left, right) => compareRuntimeNodePositions(left, right, positions));
+
+  return {
+    nodes,
+    edges: runtimeWorkflowEdges(workflow),
+    orderedNodes,
+  };
+}
+
+function compareRuntimeNodePositions(
+  left: Node<RuntimeFlowNodeData>,
+  right: Node<RuntimeFlowNodeData>,
+  positions: Map<string, { x: number; y: number }>,
+): number {
+  const leftPosition = positions.get(left.id) ?? { x: 0, y: 0 };
+  const rightPosition = positions.get(right.id) ?? { x: 0, y: 0 };
+  return (
+    leftPosition.x - rightPosition.x ||
+    leftPosition.y - rightPosition.y ||
+    left.id.localeCompare(right.id)
+  );
+}
+
+function summarizeRuntimeNodeState(node: {
+  decision?: GatekeeperDecision;
+  waitsForAll: string[];
+  waitsForAny: string[];
+  emits: string[];
+  isTerminal: boolean;
+}): string {
+  const stateLabel = formatRuntimeStateLabel(node.decision?.state);
+  if (node.decision?.state === 'blocked' && node.decision.blocked_reasons.length > 0) {
+    return `${stateLabel} • ${node.decision.blocked_reasons.length} blocker${node.decision.blocked_reasons.length === 1 ? '' : 's'}`;
+  }
+  if (node.decision?.state === 'needs_review' && node.decision.blocked_reasons.length > 0) {
+    return `${stateLabel} • review required`;
+  }
+  if (node.decision?.state === 'completed') {
+    return node.isTerminal ? `${stateLabel} • terminal output emitted` : stateLabel;
+  }
+  if (node.decision?.state === 'runnable' || node.decision?.state === 'ready') {
+    return node.emits.length > 0 ? `${stateLabel} • emits ${node.emits.length}` : stateLabel;
+  }
+  if (node.decision?.state === 'superseded') {
+    return `${stateLabel} • replaced by newer work`;
+  }
+  const waitParts = [
+    node.waitsForAll.length > 0 ? `${node.waitsForAll.length} all` : '',
+    node.waitsForAny.length > 0 ? `${node.waitsForAny.length} any` : '',
+  ].filter(Boolean);
+  const waitSummary = waitParts.length > 0 ? `waits ${waitParts.join(', ')}` : 'ready';
+  const emitSummary = node.emits.length > 0 ? `emits ${node.emits.length}` : 'emits none';
+  return [waitSummary, emitSummary, node.isTerminal ? 'terminal' : null].filter(Boolean).join(' • ');
+}
+
+function formatRuntimeStateLabel(state?: string): string {
+  switch (state) {
+    case 'runnable':
+    case 'ready':
+      return 'Runnable';
+    case 'blocked':
+      return 'Blocked';
+    case 'completed':
+      return 'Completed';
+    case 'needs_review':
+      return 'Needs review';
+    case 'superseded':
+      return 'Superseded';
+    default:
+      return 'Unknown';
+  }
+}
+
+function runtimeDecisionTone(
+  decision?: GatekeeperDecision,
+): 'runnable' | 'blocked' | 'completed' | 'needs_review' | 'superseded' | 'unknown' {
+  if (!decision) {
+    return 'unknown';
+  }
+  if (decision.state === 'ready') {
+    return 'runnable';
+  }
+  if (
+    decision.state === 'blocked'
+    && decision.blocked_reasons.some((reason) => reason.code === 'superseded')
+  ) {
+    return 'superseded';
+  }
+  if (
+    decision.state === 'needs_review'
+    && decision.blocked_reasons.some((reason) => reason.code === 'superseded')
+  ) {
+    return 'superseded';
+  }
+  if (
+    decision.state === 'runnable'
+    || decision.state === 'blocked'
+    || decision.state === 'completed'
+    || decision.state === 'needs_review'
+    || decision.state === 'superseded'
+  ) {
+    return decision.state;
+  }
+  return 'unknown';
+}
+
+function summarizePrimaryReason(reasons: GatekeeperBlockedReason[]): string | null {
+  const reason = reasons[0];
+  if (!reason) {
+    return null;
+  }
+  const detail = reason.missing_ref ?? reason.assignment_id ?? reason.gate_id ?? reason.mutation_event_id;
+  return detail ? `${formatReasonCode(reason.code)}: ${detail}` : formatReasonCode(reason.code);
+}
+
+function formatReasonCode(code: string): string {
+  return code.replaceAll('_', ' ');
+}
+
+function runtimeReasonTone(code: string): 'blocked' | 'needs_review' | 'superseded' {
+  if (code === 'needs_review') {
+    return 'needs_review';
+  }
+  if (code === 'superseded') {
+    return 'superseded';
+  }
+  return 'blocked';
+}
+
+function runtimeEventRefSourceId(eventRef: string): string | null {
+  const separator = eventRef.indexOf('.');
+  return separator > 0 ? eventRef.slice(0, separator) : null;
+}
+
+function runtimeEventRefName(eventRef: string): string {
+  const separator = eventRef.indexOf('.');
+  return separator > 0 ? eventRef.slice(separator + 1) : eventRef;
 }
 
 function useDependencySave(paths: WorkbenchPaths) {
@@ -2090,6 +3508,13 @@ function computeFlowNodePositions(
   nodes: TaskNode[],
   dependencyView: Array<{ id: string; dependencies: string[] }>,
 ): Map<string, { x: number; y: number }> {
+  return computeDirectedNodePositions(nodes, dependencyView);
+}
+
+function computeDirectedNodePositions<T extends { id: string }>(
+  nodes: T[],
+  dependencyView: Array<{ id: string; dependencies: string[] }>,
+): Map<string, { x: number; y: number }> {
   const positions = new Map<string, { x: number; y: number }>();
   const nodeIds = new Set(nodes.map((node) => node.id));
   const order = new Map(nodes.map((node, index) => [node.id, index]));
@@ -2144,7 +3569,7 @@ function computeFlowNodePositions(
     }
   }
 
-  const nodesByLevel = new Map<number, TaskNode[]>();
+  const nodesByLevel = new Map<number, T[]>();
   for (const node of nodes) {
     const level = levels.get(node.id) ?? 0;
     const bucket = nodesByLevel.get(level) ?? [];
@@ -2264,6 +3689,65 @@ function findDependencyCycleNode(nodes: TaskNode[], targetId: string, dependenci
   return null;
 }
 
+function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
+  if (typeof window === 'undefined') {
+    return {
+      missionPath: deriveMissionPath(DEFAULT_LEDGER_PATH),
+      workflowPath: DEFAULT_WORKFLOW_PATH,
+      ledgerPath: DEFAULT_LEDGER_PATH,
+    };
+  }
+  const search = new URLSearchParams(window.location.search);
+  const storedMissionPath = window.localStorage.getItem('bureauless.missionPath');
+  const storedWorkflowPath = window.localStorage.getItem('bureauless.workflowPath');
+  const storedLedgerPath = window.localStorage.getItem('bureauless.ledgerPath');
+  const ledgerPath = search.get('ledger_path')?.trim() || storedLedgerPath?.trim() || DEFAULT_LEDGER_PATH;
+  return {
+    missionPath: search.get('mission_path')?.trim() || storedMissionPath?.trim() || deriveMissionPath(ledgerPath),
+    workflowPath: search.get('workflow_path')?.trim() || storedWorkflowPath?.trim() || DEFAULT_WORKFLOW_PATH,
+    ledgerPath,
+  };
+}
+
+function deriveMissionPath(ledgerPath: string): string {
+  const missionFromLedger = ledgerPath.replace(/\/ledger\.yaml$/, '/mission.yaml');
+  return missionFromLedger === ledgerPath ? DEFAULT_MISSION_PATH : missionFromLedger;
+}
+
+function normalizeMutationWorkbenchPaths(paths: MutationWorkbenchPaths): MutationWorkbenchPaths {
+  const ledgerPath = paths.ledgerPath.trim() || DEFAULT_LEDGER_PATH;
+  return {
+    missionPath: paths.missionPath.trim() || deriveMissionPath(ledgerPath),
+    workflowPath: paths.workflowPath.trim() || DEFAULT_WORKFLOW_PATH,
+    ledgerPath,
+  };
+}
+
+function persistMutationWorkbenchPaths(paths: MutationWorkbenchPaths): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const normalized = normalizeMutationWorkbenchPaths(paths);
+  window.localStorage.setItem('bureauless.missionPath', normalized.missionPath);
+  window.localStorage.setItem('bureauless.workflowPath', normalized.workflowPath);
+  window.localStorage.setItem('bureauless.ledgerPath', normalized.ledgerPath);
+}
+
+function loadWorkbenchViewMode(): WorkbenchViewMode {
+  if (typeof window === 'undefined') {
+    return 'planning';
+  }
+
+  const search = new URLSearchParams(window.location.search);
+  if (search.has('workflow_path') || search.has('ledger_path')) {
+    return 'runtime';
+  }
+
+  const stored = window.localStorage.getItem(WORKBENCH_VIEW_STORAGE_KEY);
+  return stored === 'runtime' ? 'runtime' : 'planning';
+}
+
 function loadWorkbenchPaths(): WorkbenchPaths {
   if (typeof window === 'undefined') {
     return {
@@ -2284,6 +3768,13 @@ function persistWorkbenchPaths(paths: WorkbenchPaths): void {
   }
   window.localStorage.setItem('bureauless.dagPath', paths.dagPath);
   window.localStorage.setItem('bureauless.runsDir', paths.runsDir);
+}
+
+function persistWorkbenchViewMode(mode: WorkbenchViewMode): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.setItem(WORKBENCH_VIEW_STORAGE_KEY, mode);
 }
 
 function loadGraphNodePositions(dagPath: string): FlowNodePositions {

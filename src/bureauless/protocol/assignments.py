@@ -9,6 +9,7 @@ import yaml
 from ..core import ProtocolError
 from ..runtime.gatekeeper import evaluate_gatekeeper
 from .harness import Ledger, Workflow
+from .mutations import materialize_current_workflow
 
 
 DEFAULT_FORBIDDEN_ACTIONS = [
@@ -56,7 +57,8 @@ def export_assignment(
     assignment_id: str | None = None,
     force: bool = False,
 ) -> AssignmentPacket:
-    node = workflow.nodes.get(node_id)
+    current_workflow = materialize_current_workflow(workflow, ledger)
+    node = current_workflow.nodes.get(node_id)
     if node is None:
         raise ProtocolError(f"Unknown workflow node id: {node_id}")
 
@@ -69,14 +71,14 @@ def export_assignment(
 
     return AssignmentPacket(
         assignment_id=assignment_id or f"assign-{uuid4()}",
-        workflow_id=workflow.workflow_id,
+        workflow_id=current_workflow.workflow_id,
         node_id=node.id,
         role=node.role,
         goal=f"Execute workflow node {node.id} as role {node.role}.",
         visible_context={
-            "mission_id": workflow.mission_id,
+            "mission_id": current_workflow.mission_id,
             "mission_goal": ledger.current_goal,
-            "workflow_reason": workflow.reason,
+            "workflow_reason": current_workflow.reason,
         },
         artifact_refs=[],
         allowed_tools=[],

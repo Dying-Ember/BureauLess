@@ -1,8 +1,11 @@
 from pathlib import Path
 
+import yaml
+
 from bureauless.core import ProtocolError, create_run_record, load_dag, write_run_record
 from bureauless.api.server import (
     CreateNodeRequest,
+    MutationDecisionRequest,
     NodeDependenciesUpdateRequest,
     NodeMetadataUpdateRequest,
     RuntimeDemoRequest,
@@ -83,6 +86,112 @@ def test_runtime_api_endpoints() -> None:
     assert gatekeeper["ready"] == ["implement"]
     assert any(agent["agent_id"] == "codex-cli" for agent in agents["agents"])
     assert doctor["agent_id"] == "codex-cli"
+
+
+def test_mutation_inspection_and_acceptance_api(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    ledger_path = tmp_path / "ledger.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow_id": "workflow-mutation-test",
+                "mission_id": "demo",
+                "mode": "small_dag",
+                "roles": {
+                    "producer": {"can_emit": ["ready"], "can_consume": []},
+                    "consumer": {"can_emit": ["done"], "can_consume": ["ready"]},
+                },
+                "events": {
+                    "ready": {"producer_roles": ["producer"]},
+                    "done": {"producer_roles": ["consumer"]},
+                },
+                "nodes": [
+                    {"id": "start", "role": "producer", "waits_for": [], "emits": ["ready"]},
+                    {"id": "finish", "role": "consumer", "waits_for": [], "emits": ["done"]},
+                ],
+                "gates": [],
+                "terminal_events": ["done"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    proposal = {
+        "proposal_id": "mutation-001",
+        "proposal_type": "workflow_mutation",
+        "workflow_id": "workflow-mutation-test",
+        "source": {
+            "assignment_id": "assign-001",
+            "session_id": "session-001",
+            "actor": "worker",
+        },
+        "reason": "discovered_missing_dependency",
+        "rationale": "A verification producer must run before finish.",
+        "proposed_changes": {
+            "add_nodes": [
+                {"id": "verify", "role": "producer", "waits_for": [], "emits": ["ready"]}
+            ],
+            "add_edges": [
+                {"from_node": "verify", "to_node": "finish", "event": "ready"}
+            ],
+            "remove_edges": [],
+            "supersede_assignments": [],
+        },
+        "evidence_refs": ["artifact-impact-report"],
+        "requires_approval": "orchestrator",
+    }
+    ledger_path.write_text(
+        yaml.safe_dump(
+            {
+                "mission_id": "demo",
+                "ledger_version": 1,
+                "current_goal": "Test mutations",
+                "current_plan_ref": "workflow.yaml",
+                "public_findings": [],
+                "decisions": [],
+                "risks": [],
+                "artifacts": [],
+                "broadcasts": [],
+                "open_questions": [],
+                "event_log": [
+                    {
+                        "event_id": "event-mutation-001",
+                        "event_type": "workflow_mutation_proposed",
+                        "mission_id": "demo",
+                        "workflow_id": "workflow-mutation-test",
+                        "mutation_proposal": proposal,
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    endpoints = _api_endpoints()
+
+    pending = endpoints["/api/mutations"](
+        workflow_path=str(workflow_path), ledger_path=str(ledger_path)
+    )
+    accepted = endpoints["/api/mutations/decision"](
+        MutationDecisionRequest(
+            workflow_path=str(workflow_path),
+            ledger_path=str(ledger_path),
+            proposal_event_id="event-mutation-001",
+            decision="accept",
+            actor="human",
+        )
+    )
+
+    assert pending["proposals"][0]["state"] == "pending"
+    assert pending["proposals"][0]["evidence_refs"] == ["artifact-impact-report"]
+    assert accepted["proposals"][0]["state"] == "accepted"
+    assert [node["id"] for node in accepted["current_workflow"]["nodes"]] == [
+        "start",
+        "finish",
+        "verify",
+    ]
+    saved = yaml.safe_load(ledger_path.read_text(encoding="utf-8"))
+    assert saved["event_log"][-1]["event_type"] == "workflow_mutation_accepted"
 
 
 def test_metrics_api_endpoint(tmp_path: Path) -> None:

@@ -24,6 +24,17 @@ from .harness import (
     load_workflow,
 )
 from .ledger import append_ledger_event, write_ledger
+from .mutations import (
+    MutationChanges,
+    MutationEdge,
+    MutationSource,
+    MutationValidationError,
+    MutationValidationResult,
+    WorkflowMutationProposal,
+    load_workflow_mutation_proposal,
+    materialize_current_workflow,
+    validate_workflow_mutation_proposal,
+)
 from .results import ResultProposal, import_result_proposal, load_result_proposal
 
 __all__ = [
@@ -35,12 +46,18 @@ __all__ = [
     "EventSpec",
     "Ledger",
     "Mission",
+    "MutationChanges",
+    "MutationEdge",
+    "MutationSource",
+    "MutationValidationError",
+    "MutationValidationResult",
     "PreDispatchPolicyDecision",
     "ResultProposal",
     "RoleSpec",
     "Workflow",
     "WorkflowGate",
     "WorkflowNode",
+    "WorkflowMutationProposal",
     "append_ledger_event",
     "compile_workflow",
     "estimate_cost_from_snapshot",
@@ -50,12 +67,15 @@ __all__ = [
     "load_assignment",
     "load_ledger",
     "load_mission",
+    "load_workflow_mutation_proposal",
+    "materialize_current_workflow",
     "load_price_snapshot",
     "load_result_proposal",
     "load_workflow",
     "render_assignment_prompt",
     "sha256_file",
     "validate_artifact_record",
+    "validate_workflow_mutation_proposal",
     "verify_ledger_artifacts",
     "write_ledger",
 ]

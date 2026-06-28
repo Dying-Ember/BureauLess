@@ -2,12 +2,14 @@
 
 ## Status
 
-**Proposed** - Milestone 2.5 candidate. Open for discussion.
+**Implemented in Milestone 2.5.** Canonical behavior now lives in
+[`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md). This RFC
+remains as design history. Full temporal replay remains deferred to M3+.
 
 Tracking issue:
 [#1 RFC: Controlled Workflow Mutation](https://github.com/Dying-Ember/BureauLess/issues/1)
 
-Candidate implementation task list:
+Implementation task list:
 [`docs/tasks/runtime_harness_milestone_2_5_tasklist.md`](../tasks/runtime_harness_milestone_2_5_tasklist.md)
 
 ## Problem
@@ -68,40 +70,27 @@ Three new ledger event types are proposed.
 
 ```yaml
 event_type: workflow_mutation_proposed
-event_id: mut-<uuid>
-source:
-  assignment_id: <ref>
-  session_id: <ref>
-  actor: worker
-  evidence_refs:
-    - artifact-impact-report
-proposed_changes:
-  add_nodes:
-    - id: <new-node-id>
-      dependencies: [<ref>, ...]
-      # full node spec
-  add_edges:
-    - from: <ref>
-      to: <ref>
-  remove_edges: []
-  supersede_assignments: []
-reason: discovered_missing_dependency | node_needs_split | stale_result | other
-rationale: <human-readable justification>
-requires_approval: orchestrator
+event_id: event-mutation-001
+mission_id: <ref>
+workflow_id: <ref>
+mutation_proposal:
+  # Valid Workflow Mutation Proposal document from the schema below.
+  proposal_id: mutation-001
+  proposal_type: workflow_mutation
+  ...
 ```
 
 ### `workflow_mutation_accepted`
 
 ```yaml
 event_type: workflow_mutation_accepted
-event_id: acc-<uuid>
-source:
-  mutation_event: mut-<uuid>
-  actor: orchestrator | human
-  notes: <optional>
+event_id: event-mutation-accepted-001
+source_event_id: event-mutation-001
+actor: orchestrator | human
 applied_changes:
   add_nodes: [...]
   add_edges: [...]
+  remove_edges: [...]
   supersede_assignments: [...]
 ```
 
@@ -109,44 +98,45 @@ applied_changes:
 
 ```yaml
 event_type: workflow_mutation_rejected
-event_id: rej-<uuid>
-source:
-  mutation_event: mut-<uuid>
-  actor: orchestrator | human
-  reason: <why it was rejected>
+event_id: event-mutation-rejected-001
+source_event_id: event-mutation-001
+actor: orchestrator | human
+reason: <why it was rejected>
 ```
+
+Accepted and rejected events must reference an earlier
+`workflow_mutation_proposed` event through `source_event_id`. The referenced
+proposal may be decided only once. An acceptance may apply a subset of the
+proposal, but every item in `applied_changes` must exist in that proposal.
 
 ## Mutation Proposal Schema
 
-A session result carries an optional reference to a mutation proposal:
+A session result carries optional immutable artifact references to mutation
+proposals:
 
 ```yaml
 result:
   status: completed_with_proposal
-  artifacts: [...]
-  mutation_proposal:
-    proposal_type: workflow_mutation
-    reason: discovered_missing_dependency
-    proposed_changes:
-      add_nodes:
-        - id: field-resolver-tests
-          dependencies:
-            - field-resolver-skeleton
-          goal: "Write focused tests for the FieldResolver helper."
-          ...
-      add_edges:
-        - from: field-resolver-skeleton
-          to: field-resolver-tests
-    evidence_refs:
-      - artifact-impact-report
-    requires_approval: orchestrator
+  artifacts:
+    - artifact_id: artifact-mutation-001
+      path: artifacts/mutation-001.yaml
+      sha256: "..."
+      created_by: worker-001
+      source_event: event-result-001
+      mutable: false
+  mutation_proposal_refs:
+    - artifact-mutation-001
 ```
+
+The referenced YAML artifact contains the proposal schema below. Keeping the
+result reference as an `artifact_id` makes the immutable artifact record the
+single source of truth for path, hash, provenance, and mutability.
 
 The proposal schema allows:
 
-- `add_nodes`: Create new nodes with full specs, such as goal, dependencies,
-  target files, review gate, and verification commands.
-- `add_edges`: Insert edges between existing or new nodes.
+- `add_nodes`: Create nodes using the canonical workflow node fields: `id`,
+  `role`, `waits_for`, and `emits`.
+- `add_edges`: Insert event dependencies between existing or new nodes.
 - `remove_edges`: Remove edges. This must not orphan completed nodes without
   explicit `supersede_assignments`.
 - `supersede_assignments`: Explicitly mark downstream assignments as
@@ -158,6 +148,22 @@ The schema explicitly prohibits:
   assignments, not deleting structural history.
 - Rewriting ledger events.
 - Creating new assignments for already-completed nodes.
+
+Because BureauLess workflows express dependencies through events rather than
+anonymous graph edges, every edge mutation uses `from_node`, `to_node`, and
+`event`. The edge means that `to_node` waits for the qualified event reference
+`from_node.event`. A bare `from`/`to` pair is invalid because one source node
+may emit more than one event.
+
+Schema validation is strict and inert:
+
+- Unknown fields and forbidden operations are rejected with structured error
+  codes and paths.
+- At least one evidence artifact and one proposed change are required.
+- Duplicate, self-referential, or simultaneously added-and-removed edges are
+  rejected.
+- Validation produces a proposal value only. It does not alter a workflow,
+  create assignments, or append ledger events.
 
 ## Accept / Reject Flow
 
@@ -292,38 +298,37 @@ M2.5 adds one new inspection surface:
 No drag-to-connect editor. No visual DAG construction. These remain deferred
 (B5 in the roadmap).
 
-## Open Questions
+## Milestone 2.5 Decisions
 
 1. **Partial acceptance**: Can the orchestrator accept a subset of proposed
    changes, such as accepting `add_node` but rejecting `remove_edge`?
 
-   Proposal: yes, with explicit `applied_changes` in the acceptance event. This
-   makes the harness more useful without adding complexity.
+   Decision: yes, with explicit `applied_changes` in the acceptance event.
 
 2. **Chained mutations**: What happens when a mutation proposal depends on a
    previously-proposed but not-yet-accepted mutation?
 
-   Proposal: reject with `mutation_dependency_pending`. Keep the dependency
+   Decision: reject with `mutation_dependency_pending`. Keep the dependency
    chain linear until temporal replay can handle branching.
 
 3. **Mutation from orchestrator**: Can the orchestrator itself generate mutation
    proposals, not just approve or deny?
 
-   Proposal: keep the mutability right symmetric. The orchestrator can propose
+   Decision: keep the mutability right symmetric. The orchestrator can propose
    to itself and the same acceptance flow applies. This is useful for
    orchestrator-initiated replanning.
 
 4. **Mutually exclusive mutations**: Two workers propose incompatible structural
    changes simultaneously.
 
-   Proposal: gatekeeper detects conflict, marks both proposals as
+   Decision: gatekeeper detects conflict, marks both proposals as
    `conflict_pending`, and requires the orchestrator to accept one and reject
    the other.
 
 5. **Node versioning**: When a node is superseded and re-executed, does it need
    a separate node identity?
 
-   Proposal: yes. The old assignment retains its original `node_id`; the
+   Decision: yes. The old assignment retains its original `node_id`; the
    superseded assignment gets a new `assignment_id` tied to the same `node_id`
    in the updated workflow.
 

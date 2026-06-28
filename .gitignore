@@ -5,8 +5,11 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 *.tsbuildinfo
+*.bak
 node_modules/
 dist/
 test-results/
 runs/
 .bureauless-api-url
+.bureauless/
+.playwright-cli/

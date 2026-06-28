@@ -20,9 +20,9 @@ acceptance criteria.
 - [`tasks/runtime_harness_milestone_1_tasklist.md`](tasks/runtime_harness_milestone_1_tasklist.md):
   runtime/harness foundation milestone.
 - [`tasks/runtime_harness_milestone_2_tasklist.md`](tasks/runtime_harness_milestone_2_tasklist.md):
-  runtime/harness next milestone for real-agent execution loop hardening.
+  completed runtime/harness milestone for real-agent execution loop hardening.
 - [`tasks/runtime_harness_milestone_2_5_tasklist.md`](tasks/runtime_harness_milestone_2_5_tasklist.md):
-  proposed runtime/harness bridge milestone for controlled workflow mutation.
+  completed runtime/harness bridge milestone for controlled workflow mutation.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
@@ -30,11 +30,11 @@ acceptance criteria.
 
 ## RFCs
 
-Use this path for proposed changes that are mature enough to preserve in the
-repository but not yet accepted as protocol or implementation commitments.
+Use this path for design proposals and their decision history. Implemented
+behavior is promoted into `protocol/`; the RFC remains as provenance.
 
 - [`rfcs/workflow_mutation_proposal.md`](rfcs/workflow_mutation_proposal.md):
-  controlled runtime workflow mutation proposal for a possible Milestone 2.5.
+  implemented Milestone 2.5 design history for controlled workflow mutation.
 
 ## Architecture
 

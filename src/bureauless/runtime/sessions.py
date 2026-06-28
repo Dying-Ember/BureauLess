@@ -167,6 +167,7 @@ def run_session(spec: SessionSpec, assignment: AssignmentPacket) -> SessionRecor
             outcome_metrics=outcome_metrics,
             verification={"status": "not_run"},
             native_log_refs=[],
+            mutation_proposal_refs=[],
             review_status=None,
         )
         finished_at = _now()
@@ -355,6 +356,7 @@ def package_session_result(
         outcome_metrics=dict(base.outcome_metrics),
         verification=dict(base.verification),
         native_log_refs=native_log_refs,
+        mutation_proposal_refs=list(base.mutation_proposal_refs),
         review_status=base.review_status,
     )
 
@@ -458,6 +460,9 @@ def _run_shell_dummy_session(
             outcome_metrics=outcome_metrics,
             verification=_as_mapping(extraction, "verification", default={"status": "not_run"}),
             native_log_refs=_as_mapping_list(extraction, "native_log_refs", default=[]),
+            mutation_proposal_refs=_string_list_value(
+                extraction.get("mutation_proposal_refs")
+            ),
             review_status=_string_or_none(extraction.get("review_status")),
         )
         result_proposal = result.to_dict()
@@ -551,6 +556,13 @@ def _extract_shell_dummy_output(
     if native_log_refs is not None:
         extraction["native_log_refs"] = native_log_refs
         extraction["parsed_fields"].append("native_log_refs")
+
+    mutation_proposal_refs = _string_list_or_none(
+        payload.get("mutation_proposal_refs")
+    )
+    if mutation_proposal_refs is not None:
+        extraction["mutation_proposal_refs"] = mutation_proposal_refs
+        extraction["parsed_fields"].append("mutation_proposal_refs")
 
     diff_refs = _mapping_list_or_none(payload.get("diff_refs"))
     if diff_refs is not None:

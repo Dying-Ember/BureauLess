@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "api:dev": "./scripts/api-dev",
+    "mutation-demo:prepare": "./scripts/mutation-demo-prepare",
     "web:dev": "npm --workspace apps/web run dev",
     "web:build": "npm --workspace apps/web run build",
     "web:smoke": "npm --workspace apps/web run smoke",

@@ -12,13 +12,16 @@ internal implementation grouping inside that milestone.
   gatekeeper, assignment export, result import, agent registry, session
   wrapping, metrics, budget snapshots, and runtime API coverage.
 - [`runtime_harness_milestone_2_tasklist.md`](runtime_harness_milestone_2_tasklist.md):
-  the next runtime milestone focused on turning the current foundation into a
+  the completed runtime milestone that turned the foundation into a
   reliable real-agent execution loop with isolated sessions, compatibility
   checks, and end-to-end milestone smoke coverage.
 - [`runtime_harness_milestone_2_5_tasklist.md`](runtime_harness_milestone_2_5_tasklist.md):
-  the proposed bridge milestone for controlled workflow mutation, where workers
+  the completed bridge milestone for controlled workflow mutation, where workers
   can propose DAG changes but only accepted ledger events can change current
   workflow state.
+- [`runtime_harness_milestone_3_tasklist.md`](runtime_harness_milestone_3_tasklist.md):
+  the next active milestone for advisor outcome learning and orchestrator
+  decision artifacts.
 
 ## Reading Order
 
@@ -29,3 +32,5 @@ internal implementation grouping inside that milestone.
 4. Read Milestone 1 for current baseline behavior.
 5. Read Milestone 2 for the real-agent execution loop.
 6. Read Milestone 2.5 for controlled workflow mutation design.
+7. Read Milestone 3 for the next active runtime planning and implementation
+   target.

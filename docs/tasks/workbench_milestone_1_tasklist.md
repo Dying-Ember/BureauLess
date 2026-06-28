@@ -5,9 +5,10 @@ the full project roadmap. The
 project-level split between harness/runtime work and workbench/UI work lives in
 `../roadmap/development_roadmap.md`.
 
-This task list records the current workbench milestone set. The current UI is
-primarily a DAG viewer and node inspector. The next goal is to turn it into a
-small, safe operations console before adding DAG editing.
+This task list records the completed Workbench Milestone 1 baseline. The UI it
+describes is primarily a DAG viewer and node inspector. The next goal now
+lives in `workbench_milestone_2_tasklist.md`, where the workbench becomes a
+runtime console for mission/workflow/ledger/replay state.
 
 Within this document, `milestone` names the user-visible delivery target and
 `workstream` names an internal implementation grouping inside that milestone.

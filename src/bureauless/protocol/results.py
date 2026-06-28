@@ -8,6 +8,10 @@ from .assignments import AssignmentPacket
 from ..core import ProtocolError
 from .harness import Ledger, Workflow
 from .ledger import append_ledger_event
+from .mutations import materialize_current_workflow
+
+
+RESULT_STATUSES = {"completed", "blocked", "completed_with_proposal"}
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,7 @@ class ResultProposal:
     outcome_metrics: dict[str, Any]
     verification: dict[str, Any]
     native_log_refs: list[dict[str, Any]]
+    mutation_proposal_refs: list[str]
     review_status: str | None
 
     def to_dict(self) -> dict[str, Any]:
@@ -36,6 +41,7 @@ class ResultProposal:
             "outcome_metrics": self.outcome_metrics,
             "verification": self.verification,
             "native_log_refs": self.native_log_refs,
+            "mutation_proposal_refs": self.mutation_proposal_refs,
         }
         if self.effective_model is not None:
             payload["effective_model"] = self.effective_model
@@ -59,6 +65,9 @@ def load_result_proposal(data: dict[str, Any]) -> ResultProposal:
         outcome_metrics=_as_mapping(data, "outcome_metrics", default={}),
         verification=_as_mapping(data, "verification", default={}),
         native_log_refs=_as_mapping_list(data, "native_log_refs", default=[]),
+        mutation_proposal_refs=_as_string_list(
+            data, "mutation_proposal_refs", default=[]
+        ),
         review_status=_as_optional_string(data.get("review_status")),
     )
 
@@ -69,12 +78,13 @@ def import_result_proposal(
     assignment: AssignmentPacket,
     result: ResultProposal,
 ) -> Ledger:
-    validate_result_proposal(workflow, assignment, result)
+    current_workflow = materialize_current_workflow(workflow, ledger)
+    validate_result_proposal(current_workflow, assignment, result)
     result_event = {
         "event_id": f"event-{result.result_id}",
         "event_type": "result_submitted",
-        "mission_id": workflow.mission_id,
-        "workflow_id": workflow.workflow_id,
+        "mission_id": current_workflow.mission_id,
+        "workflow_id": current_workflow.workflow_id,
         "assignment_id": assignment.assignment_id,
         "node_id": assignment.node_id,
         "role": assignment.role,
@@ -82,15 +92,15 @@ def import_result_proposal(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "result": result.to_dict(),
     }
-    updated = append_ledger_event(ledger, result_event, workflow)
+    updated = append_ledger_event(ledger, result_event, current_workflow)
     for index, event_type in enumerate(result.emitted_events, start=1):
         updated = append_ledger_event(
             updated,
             {
                 "event_id": f"event-{result.result_id}-emit-{index}",
                 "event_type": event_type,
-                "mission_id": workflow.mission_id,
-                "workflow_id": workflow.workflow_id,
+                "mission_id": current_workflow.mission_id,
+                "workflow_id": current_workflow.workflow_id,
                 "assignment_id": assignment.assignment_id,
                 "result_id": result.result_id,
                 "node_id": assignment.node_id,
@@ -99,7 +109,7 @@ def import_result_proposal(
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "source_event_id": result_event["event_id"],
             },
-            workflow,
+            current_workflow,
         )
     return updated
 
@@ -127,6 +137,8 @@ def validate_result_proposal(
             f"Result emitted events not allowed for assignment: {', '.join(unauthorized)}"
         )
 
+    _validate_result_status(result)
+
     _validate_outcome_metrics_policy(assignment, result)
 
     for artifact in result.artifacts:
@@ -135,6 +147,46 @@ def validate_result_proposal(
                 raise ProtocolError(f"Result artifact is missing required field: {field}")
         if artifact.get("mutable") is not False:
             raise ProtocolError("Result artifact must have mutable: false")
+
+    _validate_mutation_proposal_refs(result)
+
+
+def _validate_result_status(result: ResultProposal) -> None:
+    if result.status not in RESULT_STATUSES:
+        raise ProtocolError(
+            f"Result status must be one of: {', '.join(sorted(RESULT_STATUSES))}"
+        )
+    if result.status == "completed_with_proposal" and not result.mutation_proposal_refs:
+        raise ProtocolError(
+            "completed_with_proposal result requires mutation_proposal_refs"
+        )
+    if result.status != "completed_with_proposal" and result.mutation_proposal_refs:
+        raise ProtocolError(
+            "mutation_proposal_refs require status completed_with_proposal"
+        )
+    if result.status == "blocked" and result.emitted_events:
+        raise ProtocolError("Blocked result cannot emit workflow completion events")
+
+
+def _validate_mutation_proposal_refs(result: ResultProposal) -> None:
+    if len(result.mutation_proposal_refs) != len(set(result.mutation_proposal_refs)):
+        raise ProtocolError("Result mutation_proposal_refs must not contain duplicates")
+    artifacts_by_id = {
+        artifact.get("artifact_id"): artifact
+        for artifact in result.artifacts
+        if isinstance(artifact.get("artifact_id"), str)
+    }
+    for artifact_id in result.mutation_proposal_refs:
+        artifact = artifacts_by_id.get(artifact_id)
+        if artifact is None:
+            raise ProtocolError(
+                f"Mutation proposal ref does not match a result artifact: {artifact_id}"
+            )
+        path = artifact.get("path")
+        if not isinstance(path, str) or not path.lower().endswith((".yaml", ".yml")):
+            raise ProtocolError(
+                f"Mutation proposal artifact must be YAML: {artifact_id}"
+            )
 
 
 def _validate_outcome_metrics_policy(

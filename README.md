@@ -186,6 +186,17 @@ Run the browser smoke test after the API and web server are running:
 npm run web:smoke
 ```
 
+Prepare an isolated controlled-mutation demo before manually testing the
+Workbench accept/reject flow:
+
+```bash
+npm run mutation-demo:prepare
+```
+
+The command resets only `.bureauless/mutation-demo`, validates no tracked demo
+state, and prints a Workbench URL containing the disposable workflow and ledger
+paths. Open that URL after `api:dev` and `web:dev` are running.
+
 Run the Electron shell:
 
 ```bash

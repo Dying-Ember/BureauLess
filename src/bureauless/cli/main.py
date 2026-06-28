@@ -70,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Prepare and print the canonical runtime milestone golden path for the demo mission",
     )
     mission_golden_path_parser.add_argument("workspace")
+    mission_mutation_demo_parser = mission_subparsers.add_parser(
+        "mutation-demo",
+        help="Prepare an isolated controlled-mutation workbench demo",
+    )
+    mission_mutation_demo_parser.add_argument("workspace")
 
     workflow_parser = subparsers.add_parser("workflow", help="Workflow operations")
     workflow_subparsers = workflow_parser.add_subparsers(dest="workflow_command", required=True)
@@ -208,6 +213,25 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "mission" and args.mission_command == "golden-path":
             manifest = build_demo_golden_path(Path(args.workspace))
             print(yaml.safe_dump(manifest, sort_keys=False))
+            return 0
+
+        if args.command == "mission" and args.mission_command == "mutation-demo":
+            paths = prepare_mutation_demo_workspace(Path(args.workspace))
+            query = (
+                f"workflow_path={paths['workflow']}"
+                f"&ledger_path={paths['ledger']}"
+            )
+            print(
+                yaml.safe_dump(
+                    {
+                        "workspace": str(Path(args.workspace).resolve()),
+                        "workflow": str(paths["workflow"]),
+                        "ledger": str(paths["ledger"]),
+                        "workbench_url": f"http://127.0.0.1:5173/?{query}",
+                    },
+                    sort_keys=False,
+                )
+            )
             return 0
 
         if args.command == "workflow" and args.workflow_command == "compile":
@@ -683,6 +707,183 @@ def prepare_demo_workspace(workspace: Path) -> dict[str, Path]:
         "assignments_dir": assignments_dir,
         "sessions_dir": sessions_dir,
         "packaged_results_dir": packaged_results_dir,
+    }
+
+
+def prepare_mutation_demo_workspace(workspace: Path) -> dict[str, Path]:
+    workspace.mkdir(parents=True, exist_ok=True)
+    artifacts_dir = workspace / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    workflow_path = workspace / "workflow.yaml"
+    ledger_path = workspace / "ledger.yaml"
+    impact_report = artifacts_dir / "impact-report.md"
+
+    _write_demo_artifact(
+        impact_report,
+        "# Mutation Impact\n\nThe review step needs a focused verification node.\n",
+    )
+    workflow = {
+        "workflow_id": "mutation-e2e-demo",
+        "mission_id": "mutation-e2e-demo",
+        "mode": "small_dag",
+        "status": "accepted",
+        "reason": "Exercise controlled workflow mutation end to end.",
+        "proposed_by": "orchestrator",
+        "roles": {
+            "builder": {
+                "can_emit": ["patch_ready", "verification_ready", "side_complete"],
+                "can_consume": ["patch_ready"],
+            },
+            "reviewer": {
+                "can_emit": ["review_complete"],
+                "can_consume": ["patch_ready", "verification_ready"],
+            },
+        },
+        "events": {
+            "patch_ready": {"producer_roles": ["builder"]},
+            "verification_ready": {"producer_roles": ["builder"]},
+            "review_complete": {"producer_roles": ["reviewer"]},
+            "side_complete": {"producer_roles": ["builder"]},
+        },
+        "nodes": [
+            {
+                "id": "prepare",
+                "role": "builder",
+                "waits_for": [],
+                "emits": ["patch_ready"],
+            },
+            {
+                "id": "review",
+                "role": "reviewer",
+                "waits_for": ["prepare.patch_ready"],
+                "emits": ["review_complete"],
+            },
+            {
+                "id": "independent",
+                "role": "builder",
+                "waits_for": [],
+                "emits": ["side_complete"],
+            },
+        ],
+        "gates": [],
+        "terminal_events": ["review_complete", "side_complete"],
+        "broadcast_policy": {"default": "filtered_delta"},
+        "budget_policy": {},
+    }
+    proposal = {
+        "proposal_id": "mutation-demo-001",
+        "proposal_type": "workflow_mutation",
+        "workflow_id": "mutation-e2e-demo",
+        "source": {
+            "assignment_id": "assign-review",
+            "session_id": "session-review",
+            "actor": "worker",
+        },
+        "reason": "discovered_missing_dependency",
+        "rationale": "Review requires a focused verification result.",
+        "proposed_changes": {
+            "add_nodes": [
+                {
+                    "id": "verify",
+                    "role": "builder",
+                    "waits_for": ["prepare.patch_ready"],
+                    "emits": ["verification_ready"],
+                }
+            ],
+            "add_edges": [
+                {
+                    "from_node": "verify",
+                    "to_node": "review",
+                    "event": "verification_ready",
+                }
+            ],
+            "remove_edges": [
+                {
+                    "from_node": "prepare",
+                    "to_node": "review",
+                    "event": "patch_ready",
+                }
+            ],
+            "supersede_assignments": ["assign-review"],
+        },
+        "evidence_refs": ["artifact-mutation-impact"],
+        "requires_approval": "human",
+    }
+    ledger = {
+        "mission_id": "mutation-e2e-demo",
+        "ledger_version": 1,
+        "current_goal": "Verify controlled workflow mutation end to end.",
+        "current_plan_ref": "workflow.yaml",
+        "public_findings": [],
+        "decisions": [],
+        "risks": [],
+        "artifacts": [
+            {
+                "artifact_id": "artifact-mutation-impact",
+                "path": "artifacts/impact-report.md",
+                "sha256": sha256_file(impact_report),
+                "created_by": "review-worker",
+                "source_event": "event-mutation-proposed",
+                "mutable": False,
+            }
+        ],
+        "broadcasts": [],
+        "open_questions": [],
+        "event_log": [
+            {
+                "event_id": "event-prepare-created",
+                "event_type": "assignment_created",
+                "mission_id": "mutation-e2e-demo",
+                "workflow_id": "mutation-e2e-demo",
+                "assignment_id": "assign-prepare",
+                "node_id": "prepare",
+                "role": "builder",
+            },
+            {
+                "event_id": "event-prepare-ready",
+                "event_type": "patch_ready",
+                "mission_id": "mutation-e2e-demo",
+                "workflow_id": "mutation-e2e-demo",
+                "assignment_id": "assign-prepare",
+                "node_id": "prepare",
+                "role": "builder",
+            },
+            {
+                "event_id": "event-review-created",
+                "event_type": "assignment_created",
+                "mission_id": "mutation-e2e-demo",
+                "workflow_id": "mutation-e2e-demo",
+                "assignment_id": "assign-review",
+                "node_id": "review",
+                "role": "reviewer",
+            },
+            {
+                "event_id": "event-review-complete",
+                "event_type": "review_complete",
+                "mission_id": "mutation-e2e-demo",
+                "workflow_id": "mutation-e2e-demo",
+                "assignment_id": "assign-review",
+                "node_id": "review",
+                "role": "reviewer",
+            },
+            {
+                "event_id": "event-mutation-proposed",
+                "event_type": "workflow_mutation_proposed",
+                "mission_id": "mutation-e2e-demo",
+                "workflow_id": "mutation-e2e-demo",
+                "mutation_proposal": proposal,
+            },
+        ],
+    }
+    with workflow_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(workflow, handle, sort_keys=False)
+    with ledger_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(ledger, handle, sort_keys=False)
+
+    return {
+        "workflow": workflow_path,
+        "ledger": ledger_path,
+        "artifacts_dir": artifacts_dir,
     }
 
 

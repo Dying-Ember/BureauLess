@@ -53,6 +53,200 @@ const dagFixture = {
   ],
 } as const;
 
+const mutationFixture = {
+  workflow_id: 'workflow-001',
+  current_workflow: {
+    workflow_id: 'workflow-001',
+    mission_id: 'demo',
+    mode: 'small_dag',
+    status: 'active',
+    reason: null,
+    proposed_by: null,
+    roles: {
+      producer: { can_emit: ['patch_ready', 'verification_ready'], can_consume: [] },
+      reviewer: { can_emit: ['review_complete'], can_consume: ['patch_ready', 'verification_ready'] },
+      observer: { can_emit: ['audit_complete'], can_consume: [] },
+    },
+    events: {
+      patch_ready: { producer_roles: ['producer'] },
+      verification_ready: { producer_roles: ['producer'] },
+      review_complete: { producer_roles: ['reviewer'] },
+      audit_complete: { producer_roles: ['observer'] },
+    },
+    nodes: [
+      { id: 'prepare', role: 'producer', waits_for: [], emits: ['patch_ready'] },
+      { id: 'review', role: 'reviewer', waits_for: ['prepare.patch_ready'], emits: ['review_complete'] },
+      { id: 'independent', role: 'observer', waits_for: [], emits: ['audit_complete'] },
+    ],
+    gates: [{ id: 'gate-review', node_id: 'review', requires: ['prepare.patch_ready'] }],
+    terminal_events: ['review_complete', 'audit_complete'],
+  },
+  proposals: [
+    {
+      proposal_id: 'mutation-001',
+      proposal_event_id: 'event-mutation-001',
+      state: 'pending',
+      affected_node_ids: ['review'],
+      affected_assignments: ['assign-review'],
+      superseded_assignments: [],
+      evidence_refs: ['artifact-impact-report'],
+      proposal: {
+        reason: 'discovered_missing_dependency',
+        rationale: 'A verification step is required before review.',
+        proposed_changes: {
+          add_nodes: [{ id: 'verify', role: 'producer', waits_for: [], emits: ['verification_ready'] }],
+          add_edges: [{ from_node: 'verify', to_node: 'review', event: 'verification_ready' }],
+          remove_edges: [],
+          supersede_assignments: ['assign-review'],
+        },
+      },
+    },
+  ],
+};
+
+const missionFixture = {
+  mission_id: 'demo',
+  goal: 'Keep the runtime workflow healthy.',
+  status: 'active',
+  default_mode: 'small_dag',
+  allowed_modes: ['small_dag'],
+  budget: null,
+  models: {},
+  human_gate: null,
+};
+
+const ledgerFixture = {
+  mission_id: 'demo',
+  ledger_version: '1',
+  current_goal: 'Keep the runtime workflow healthy.',
+  current_plan_ref: 'plans/demo.yaml',
+  public_findings: [],
+  decisions: [{ id: 'decision-001' }],
+  risks: [{ id: 'risk-001' }, { id: 'risk-002' }],
+  artifacts: [{ id: 'artifact-001' }, { id: 'artifact-002' }, { id: 'artifact-003' }],
+  broadcasts: [],
+  open_questions: [],
+  event_log: [],
+};
+
+const gatekeeperFixture = {
+  workflow_id: 'workflow-001',
+  ready: ['prepare', 'independent'],
+  decisions: {
+    prepare: {
+      node_id: 'prepare',
+      state: 'runnable',
+      blocked_reasons: [],
+    },
+    review: {
+      node_id: 'review',
+      state: 'blocked',
+      blocked_reasons: [
+        {
+          code: 'mutation_pending',
+          message: 'Workflow mutation mutation-001 may invalidate node review',
+          mutation_event_id: 'event-mutation-001',
+        },
+        {
+          code: 'gate_waiting',
+          message: 'Gate gate-review is waiting for verification_ready',
+          missing_ref: 'verify.verification_ready',
+          gate_id: 'gate-review',
+        },
+      ],
+    },
+    independent: {
+      node_id: 'independent',
+      state: 'completed',
+      blocked_reasons: [],
+    },
+  },
+} as const;
+
+const replayFixture = {
+  workflow_id: 'workflow-001',
+  terminal_complete: false,
+  nodes: {
+    prepare: {
+      node_id: 'prepare',
+      state: 'completed',
+      emitted_events: ['prepare.patch_ready', 'prepare.verification_ready'],
+      blocked_reasons: [],
+      assignment_attempts: [
+        {
+          assignment_id: 'assign-prepare-1',
+          node_id: 'prepare',
+          state: 'completed',
+          created_event_id: 'event-prepare-assigned-001',
+          terminal_event_id: 'event-prepare-complete-001',
+          terminal_event_type: 'completed',
+        },
+      ],
+    },
+    review: {
+      node_id: 'review',
+      state: 'blocked',
+      emitted_events: ['review.review_complete'],
+      blocked_reasons: [
+        {
+          code: 'mutation_pending',
+          message: 'Workflow mutation mutation-001 may invalidate node review',
+          mutation_event_id: 'event-mutation-001',
+        },
+        {
+          code: 'gate_waiting',
+          message: 'Gate gate-review is waiting for verification_ready',
+          missing_ref: 'verify.verification_ready',
+          gate_id: 'gate-review',
+          assignment_id: 'assign-review-1',
+        },
+      ],
+      assignment_attempts: [
+        {
+          assignment_id: 'assign-review-1',
+          node_id: 'review',
+          state: 'superseded',
+          created_event_id: 'event-review-assigned-001',
+          terminal_event_type: 'superseded',
+          superseded_by: 'assign-review-2',
+        },
+        {
+          assignment_id: 'assign-review-2',
+          node_id: 'review',
+          state: 'completed',
+          created_event_id: 'event-review-assigned-002',
+          terminal_event_id: 'event-review-complete-002',
+          terminal_event_type: 'completed',
+          retry_of: 'assign-review-1',
+        },
+      ],
+    },
+    independent: {
+      node_id: 'independent',
+      state: 'completed',
+      emitted_events: ['audit.audit_complete'],
+      blocked_reasons: [],
+      assignment_attempts: [],
+    },
+  },
+  mutation_proposals: {
+    'event-mutation-001': {
+      proposal_id: 'mutation-001',
+      proposal_event_id: 'event-mutation-001',
+      state: 'pending',
+      affected_node_ids: ['review'],
+      decision_event_id: 'event-mutation-decision-001',
+    },
+    'event-mutation-accepted-001': {
+      proposal_id: 'mutation-002',
+      proposal_event_id: 'event-mutation-accepted-001',
+      state: 'accepted',
+      affected_node_ids: ['prepare'],
+      decision_event_id: 'event-mutation-decision-accepted-001',
+    },
+  },
+} as const;
+
 type MockRunRecord = {
   run_id: string;
   task_id: string;
@@ -84,6 +278,18 @@ async function mockWorkbenchApi(
     nodeDependenciesResponse?: (payload: unknown) => { status?: number; body?: unknown };
     onCreateNode?: (payload: unknown) => void;
     createNodeResponse?: (payload: unknown) => { status?: number; body?: unknown };
+    mutationResponse?: { status?: number; body?: unknown };
+    replayResponse?: { status?: number; body?: unknown };
+    onMutationRequest?: (url: string) => void;
+    onMutationDecision?: (payload: unknown) => void;
+    mutationDecisionDelayMs?: number;
+    mutationDecisionResponse?: (payload: unknown) => { status?: number; body?: unknown };
+    gatekeeperResponse?: { status?: number; body?: unknown };
+    onGatekeeperRequest?: (url: string) => void;
+    missionResponse?: { status?: number; body?: unknown };
+    onMissionRequest?: (url: string) => void;
+    ledgerResponse?: { status?: number; body?: unknown };
+    onLedgerRequest?: (url: string) => void;
     dagResponse?: { status?: number; body?: unknown } | (() => { status?: number; body?: unknown });
     validationResponse?: { status?: number; body?: unknown } | (() => { status?: number; body?: unknown });
   } = {},
@@ -158,6 +364,66 @@ async function mockWorkbenchApi(
           .filter(([, value]) => value === 'ready')
           .map(([nodeId]) => nodeId),
       }),
+    });
+  });
+
+  await page.route('**/api/mutations?**', async (route) => {
+    options.onMutationRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.mutationResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(
+        options.mutationResponse?.body ?? { workflow_id: 'workflow-001', proposals: [] },
+      ),
+    });
+  });
+
+  await page.route('**/api/replay?**', async (route) => {
+    await route.fulfill({
+      status: options.replayResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.replayResponse?.body ?? replayFixture),
+    });
+  });
+
+  await page.route('**/api/mission?**', async (route) => {
+    options.onMissionRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.missionResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.missionResponse?.body ?? missionFixture),
+    });
+  });
+
+  await page.route('**/api/ledger?**', async (route) => {
+    options.onLedgerRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.ledgerResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.ledgerResponse?.body ?? ledgerFixture),
+    });
+  });
+
+  await page.route('**/api/mutations/decision', async (route) => {
+    const payload = route.request().postDataJSON();
+    options.onMutationDecision?.(payload);
+    if (options.mutationDecisionDelayMs) {
+      await new Promise((resolve) => setTimeout(resolve, options.mutationDecisionDelayMs));
+    }
+    const response = options.mutationDecisionResponse?.(payload);
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? { workflow_id: 'workflow-001', proposals: [] }),
+    });
+  });
+
+  await page.route('**/api/gatekeeper?**', async (route) => {
+    options.onGatekeeperRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.gatekeeperResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.gatekeeperResponse?.body ?? gatekeeperFixture),
     });
   });
 
@@ -304,6 +570,7 @@ test('renders DAG workbench and node inspector', async ({ page }) => {
   await mockWorkbenchApi(page);
   await page.goto('/');
 
+  await expect(page.getByRole('button', { name: 'Planning DAG' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('BureauLess')).toBeVisible();
   await expect(page.getByText('Baseline Inventory').first()).toBeVisible();
   await expect(page.getByText('Worker Stop Lifecycle').first()).toBeVisible();
@@ -1196,6 +1463,374 @@ test('shows empty data states when the DAG loads without nodes or runs', async (
   await expect(page.getByText('No run records').first()).toBeVisible();
 });
 
+test('inspects and accepts a pending workflow mutation', async ({ page }) => {
+  let decisionPayload: unknown;
+  let mutationRequestUrl = '';
+  const accepted = {
+    ...mutationFixture,
+    current_workflow: {
+      ...mutationFixture.current_workflow,
+      nodes: [
+        mutationFixture.current_workflow.nodes[0],
+        { id: 'verify', role: 'producer', waits_for: [], emits: ['verification_ready'] },
+        {
+          ...mutationFixture.current_workflow.nodes[1],
+          waits_for: ['prepare.patch_ready', 'verify.verification_ready'],
+        },
+        mutationFixture.current_workflow.nodes[2],
+      ],
+    },
+    proposals: [
+      {
+        ...mutationFixture.proposals[0],
+        state: 'accepted',
+        decision_event_id: 'event-mutation-accepted-001',
+        superseded_assignments: ['assign-review'],
+      },
+    ],
+  };
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    onMutationRequest: (url) => {
+      mutationRequestUrl = url;
+    },
+    onMutationDecision: (payload) => {
+      decisionPayload = payload;
+    },
+    mutationDecisionResponse: () => ({ body: accepted }),
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml',
+  );
+
+  await expect(page.getByRole('button', { name: 'Runtime workflow' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('region', { name: 'Runtime workflow summary' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Mission summary' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Ledger summary' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Mission summary' }).getByText('Mission id')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Mission summary' }).locator('dd').first()).toHaveText('demo');
+  await expect(page.getByRole('region', { name: 'Mission summary' }).getByText('Keep the runtime workflow healthy.')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Mission summary' }).getByText('active')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Ledger summary' }).getByText('3')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Ledger summary' }).getByText('2')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Ledger summary' }).getByText('1')).toBeVisible();
+  const panel = page.getByRole('region', { name: 'Runtime workflow mutations' });
+  await expect(panel.getByText('mutation-001')).toBeVisible();
+  await expect(
+    panel.getByText('.bureauless/mutation-demo/ledger.yaml'),
+  ).toBeVisible();
+  await expect(panel.getByText('artifact-impact-report')).toBeVisible();
+  await expect(panel.getByText('assign-review')).toBeVisible();
+  await expect(panel.getByText(/add_nodes: 1/)).toBeVisible();
+  await expect(panel.getByText('Runtime workflow now')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Runtime sources' }).getByLabel('Mission path')).toHaveValue('.bureauless/mutation-demo/mission.yaml');
+  await expect(
+    panel.getByText('This panel reflects the runtime workflow from the ledger. Switch to Planning DAG to edit graph structure.'),
+  ).toBeVisible();
+  const canvas = page.getByRole('region', { name: 'Runtime workflow canvas' });
+  await expect(page.getByTestId('rf__node-prepare')).toBeVisible();
+  await expect(page.getByTestId('rf__node-review')).toBeVisible();
+  await expect(page.getByTestId('rf__node-independent')).toBeVisible();
+  await expect(page.getByTestId('rf__node-verify')).toHaveCount(0);
+  await expect(panel.getByText('Current runtime workflow')).toBeVisible();
+  await expect(panel.getByText('Proposed workflow')).toBeVisible();
+  await expect(panel.getByText(/^prepare, review, independent$/)).toBeVisible();
+  await expect(panel.getByText('prepare, review, independent, verify')).toBeVisible();
+  await expect(panel.getByText('+ verify -> review')).toBeVisible();
+  await expect.poll(() => new URL(mutationRequestUrl).searchParams.get('workflow_path')).toBe(
+    '.bureauless/mutation-demo/workflow.yaml',
+  );
+  await panel.getByRole('button', { name: 'Accept' }).dispatchEvent('click');
+
+  await expect.poll(() => decisionPayload).toMatchObject({
+    proposal_event_id: 'event-mutation-001',
+    decision: 'accept',
+    actor: 'human',
+  });
+  await expect(panel.getByText('accepted')).toBeVisible();
+  await expect(panel.getByText('Applied workflow')).toBeVisible();
+  await expect(panel.getByText(/^prepare, verify, review, independent$/)).toHaveCount(2);
+  await expect(panel.getByRole('button', { name: 'Accept' })).toHaveCount(0);
+  await expect(panel.getByText('Superseded')).toBeVisible();
+  await expect(panel.getByText('assign-review')).toHaveCount(2);
+  await expect(page.getByTestId('rf__node-verify')).toBeVisible();
+});
+
+test('shows decision sync status while refreshing runtime state', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    gatekeeperResponse: { body: gatekeeperFixture },
+    mutationDecisionDelayMs: 150,
+    mutationDecisionResponse: () => ({
+      body: {
+        ...mutationFixture,
+        proposals: [
+          {
+            ...mutationFixture.proposals[0],
+            state: 'accepted',
+            decision_event_id: 'event-mutation-accepted-001',
+            superseded_assignments: ['assign-review'],
+          },
+        ],
+      },
+    }),
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml',
+  );
+
+  const panel = page.getByRole('region', { name: 'Runtime workflow mutations' });
+  await panel.getByRole('button', { name: 'Accept' }).dispatchEvent('click');
+
+  await expect(panel.getByRole('status')).toContainText('Applying decision and refreshing runtime state.');
+
+  await expect(panel.getByText('accepted')).toBeVisible();
+  await expect(panel.getByRole('status')).toHaveCount(0);
+});
+
+test('renders runtime summary panels and persists runtime source paths', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+  });
+
+  await page.goto('/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml');
+
+  const runtimeSources = page.getByRole('region', { name: 'Runtime sources' });
+  const missionPanel = page.getByRole('region', { name: 'Mission summary' });
+  const ledgerPanel = page.getByRole('region', { name: 'Ledger summary' });
+
+  await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('.bureauless/mutation-demo/mission.yaml');
+  await expect(missionPanel.locator('dd').first()).toHaveText('demo');
+  await expect(missionPanel.getByText('Keep the runtime workflow healthy.')).toBeVisible();
+  await expect(ledgerPanel.getByText('3')).toBeVisible();
+  await expect(ledgerPanel.getByText('2')).toBeVisible();
+  await expect(ledgerPanel.getByText('1')).toBeVisible();
+  await expect(ledgerPanel.getByText('Artifacts')).toBeVisible();
+  await expect(ledgerPanel.getByText('Risks')).toBeVisible();
+  await expect(ledgerPanel.getByText('Decisions')).toBeVisible();
+
+  await runtimeSources.getByLabel('Mission path').fill('examples/missions/custom/mission.yaml');
+  await runtimeSources.getByLabel('Workflow path').fill('examples/missions/custom/workflow.yaml');
+  await runtimeSources.getByLabel('Ledger path').fill('examples/missions/custom/ledger.yaml');
+  await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('examples/missions/custom/mission.yaml');
+  await expect(runtimeSources.getByLabel('Workflow path')).toHaveValue('examples/missions/custom/workflow.yaml');
+  await expect(runtimeSources.getByLabel('Ledger path')).toHaveValue('examples/missions/custom/ledger.yaml');
+  const applyRuntimeSources = runtimeSources.getByRole('button', { name: 'Apply runtime sources' });
+  await applyRuntimeSources.dispatchEvent('click');
+
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('bureauless.missionPath'))).toBe(
+    'examples/missions/custom/mission.yaml',
+  );
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('bureauless.workflowPath'))).toBe(
+    'examples/missions/custom/workflow.yaml',
+  );
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem('bureauless.ledgerPath'))).toBe(
+    'examples/missions/custom/ledger.yaml',
+  );
+});
+
+test('keeps runtime structure unchanged when a mutation decision fails', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    mutationDecisionResponse: () => ({ status: 400, body: { error: 'Mutation decision rejected' } }),
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml',
+  );
+
+  const panel = page.getByRole('region', { name: 'Runtime workflow mutations' });
+  await panel.getByLabel('Rejection reason for mutation-001').fill('Need more evidence.');
+  await panel.getByRole('button', { name: 'Reject' }).dispatchEvent('click');
+
+  await expect(panel.getByRole('alert')).toContainText('Mutation decision rejected');
+  await expect(page.getByTestId('rf__node-verify')).toHaveCount(0);
+  await expect(panel.getByRole('button', { name: 'Reject' })).toHaveCount(1);
+});
+
+test('rejecting a workflow mutation leaves the runtime canvas unchanged', async ({ page }) => {
+  const rejected = {
+    ...mutationFixture,
+    proposals: [
+      {
+        ...mutationFixture.proposals[0],
+        state: 'rejected',
+        decision_event_id: 'event-mutation-rejected-001',
+      },
+    ],
+  };
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    mutationDecisionResponse: () => ({ body: rejected }),
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml',
+  );
+
+  const canvas = page.getByRole('region', { name: 'Runtime workflow canvas' });
+  const panel = page.getByRole('region', { name: 'Runtime workflow mutations' });
+  await expect(page.getByTestId('rf__node-prepare')).toBeVisible();
+  await expect(page.getByTestId('rf__node-review')).toBeVisible();
+  await expect(page.getByTestId('rf__node-verify')).toHaveCount(0);
+
+  await panel.getByLabel('Rejection reason for mutation-001').fill('Evidence does not justify the dependency.');
+  await panel.getByRole('button', { name: 'Reject' }).dispatchEvent('click');
+
+  await expect(panel.getByText('rejected')).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Reject' })).toHaveCount(0);
+  await expect(page.getByTestId('rf__node-prepare')).toBeVisible();
+  await expect(page.getByTestId('rf__node-review')).toBeVisible();
+  await expect(page.getByTestId('rf__node-verify')).toHaveCount(0);
+});
+
+test('keeps runtime node selection separate from planning node selection', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml',
+  );
+
+  const runtimeList = page.getByRole('region', { name: /Runtime nodes/ });
+  const runtimeInspector = page.getByRole('region', { name: 'Runtime node inspector' });
+
+  await expect(runtimeList.getByRole('button', { name: /^review\b/i })).toBeVisible();
+  await runtimeList.getByRole('button', { name: /^review\b/i }).dispatchEvent('click');
+
+  await expect(runtimeInspector.locator('.runtime-node-inspector-header > div strong')).toHaveText('review');
+  await expect(runtimeInspector.getByText(/Gatekeeper summary/)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Planning DAG' }).click();
+  await page.getByRole('button', { name: /worker stop lifecycle/i }).click();
+  await expect(page.getByRole('region', { name: 'Mission summary' })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Ledger summary' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Runtime workflow' }).click();
+  await expect(page.getByRole('region', { name: 'Mission summary' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Ledger summary' })).toBeVisible();
+
+  await expect(runtimeInspector.locator('.runtime-node-inspector-header > div strong')).toHaveText('review');
+  await expect(runtimeList.getByRole('button', { name: /^review\b/i })).toBeVisible();
+});
+
+test('shows replay evidence and follows runtime node selection', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    replayResponse: { body: replayFixture },
+    gatekeeperResponse: { body: gatekeeperFixture },
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml',
+  );
+
+  const runtimeList = page.getByRole('region', { name: /Runtime nodes/ });
+  const replayInspector = page.getByRole('region', { name: 'Replay inspector' });
+  const selectedNodeCard = replayInspector.locator('.runtime-replay-summary .runtime-summary-card').filter({ hasText: 'Selected node' });
+  const assignmentAttemptsSection = replayInspector.locator('.runtime-replay-section').filter({ hasText: 'Assignment attempts' });
+  const blockedReasonsSection = replayInspector.locator('.runtime-replay-section').filter({ hasText: 'Blocked reasons' });
+  const linksSection = replayInspector.locator('.runtime-replay-section').filter({ hasText: 'Supersession / decision links' });
+  const reviewAttemptCards = assignmentAttemptsSection.locator('.runtime-replay-card');
+
+  await expect(replayInspector.getByText('Replay inspector')).toBeVisible();
+  await expect(selectedNodeCard.locator('strong')).toHaveText('prepare');
+  await expect(replayInspector.getByText('assign-prepare-1')).toBeVisible();
+
+  await runtimeList.getByRole('button', { name: /^prepare\b/i }).click();
+  await expect(replayInspector.getByText('prepare.patch_ready')).toBeVisible();
+  await expect(replayInspector.getByText('assign-prepare-1')).toBeVisible();
+
+  await runtimeList.getByRole('button', { name: /^review\b/i }).dispatchEvent('click');
+  await expect(selectedNodeCard.locator('strong')).toHaveText('review');
+  await expect(blockedReasonsSection.getByText('mutation pending')).toBeVisible();
+  await expect(blockedReasonsSection.getByText('Gate gate-review is waiting for verification_ready')).toBeVisible();
+  await expect(linksSection.getByText('event-mutation-001')).toBeVisible();
+  await expect(reviewAttemptCards.nth(0).locator('.runtime-replay-card-head > strong')).toHaveText('assign-review-1');
+  await expect(reviewAttemptCards.nth(1).locator('.runtime-replay-card-head > strong')).toHaveText('assign-review-2');
+  await expect(replayInspector.getByText('verify.verification_ready')).toBeVisible();
+  await expect(replayInspector.getByText('event-mutation-decision-001')).toBeVisible();
+});
+
+test('shows replay evidence for selected runtime nodes', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml',
+  );
+
+  const replayPanel = page.getByRole('region', { name: 'Replay inspector' });
+  const runtimeList = page.getByRole('region', { name: /Runtime nodes/ });
+  const selectedNodeCard = replayPanel.locator('.runtime-replay-summary .runtime-summary-card').filter({ hasText: 'Selected node' });
+  const assignmentAttemptsSection = replayPanel.locator('.runtime-replay-section').filter({ hasText: 'Assignment attempts' });
+  const blockedReasonsSection = replayPanel.locator('.runtime-replay-section').filter({ hasText: 'Blocked reasons' });
+  const linksSection = replayPanel.locator('.runtime-replay-section').filter({ hasText: 'Supersession / decision links' });
+  const reviewAttemptCard = assignmentAttemptsSection.locator('.runtime-replay-card').first();
+  const decisionLinkCard = linksSection.locator('.runtime-replay-card').first();
+
+  await expect(selectedNodeCard.locator('strong')).toHaveText('prepare');
+  await expect(replayPanel.getByText('Emitted events')).toBeVisible();
+  await expect(replayPanel.getByText('Assignment attempts')).toBeVisible();
+  await expect(replayPanel.getByText('Blocked reasons')).toBeVisible();
+  await expect(replayPanel.getByText('Supersession / decision links')).toBeVisible();
+  await expect(replayPanel.getByText('Select a runtime node to inspect replay evidence.')).toHaveCount(0);
+
+  const mutationPanel = page.getByRole('region', { name: 'Runtime workflow mutations' });
+  await mutationPanel.getByRole('button', { name: 'review', exact: true }).first().dispatchEvent('click');
+  await expect(selectedNodeCard.locator('strong')).toHaveText('review');
+  await expect(replayPanel.locator('.runtime-replay-card-head > strong').filter({ hasText: 'assign-review-1' })).toBeVisible();
+
+  await runtimeList.getByRole('button', { name: /^review\b/i }).dispatchEvent('click');
+
+  await expect(selectedNodeCard.locator('strong')).toHaveText('review');
+  await expect(replayPanel.getByText('review.review_complete')).toBeVisible();
+  await expect(reviewAttemptCard.locator('.runtime-replay-card-head > strong')).toHaveText('assign-review-1');
+  await expect(blockedReasonsSection.getByText('mutation pending')).toBeVisible();
+  await expect(decisionLinkCard.locator('.runtime-replay-card-head > strong')).toHaveText('mutation-001');
+});
+
+test('overlays gatekeeper state and blocked reasons on runtime nodes', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    gatekeeperResponse: { body: gatekeeperFixture },
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml',
+  );
+
+  const runtimeList = page.getByRole('region', { name: /Runtime nodes/ });
+  const runtimeInspector = page.getByRole('region', { name: 'Runtime node inspector' });
+  const summary = page.getByRole('region', { name: 'Runtime workflow summary' });
+
+  await expect(summary.getByText('2 runnable')).toBeVisible();
+  await expect(summary.getByText(/1 blocked, 0 needs review, 1 completed/)).toBeVisible();
+
+  const reviewChip = runtimeList.getByRole('button', { name: /^review\b/i });
+  await expect(reviewChip.locator('.runtime-state-pill.blocked')).toContainText('Blocked');
+  await expect(reviewChip.getByText('mutation pending: event-mutation-001')).toBeVisible();
+
+  await reviewChip.dispatchEvent('click');
+
+  await expect(runtimeInspector.locator('.runtime-node-inspector-badges .runtime-state-pill.blocked')).toContainText('Blocked');
+  await expect(runtimeInspector.getByText('Why this node is not runnable')).toBeVisible();
+  await expect(
+    runtimeInspector.getByText('Workflow mutation mutation-001 may invalidate node review'),
+  ).toBeVisible();
+  await expect(runtimeInspector.getByText('Mutation:')).toBeVisible();
+  await expect(runtimeInspector.getByText('event-mutation-001')).toBeVisible();
+  await expect(runtimeInspector.getByText('Gate gate-review is waiting for verification_ready')).toBeVisible();
+  await expect(runtimeInspector.getByText('Missing ref:')).toBeVisible();
+  await expect(runtimeInspector.getByText('verify.verification_ready')).toBeVisible();
+  await expect(runtimeInspector.getByText('Gate:')).toBeVisible();
+  await expect(runtimeInspector.locator('code').filter({ hasText: 'gate-review' })).toBeVisible();
+});
+
 test('shows a clear load failure when the DAG file is missing', async ({ page }) => {
   await mockWorkbenchApi(page, {
     dagResponse: {
@@ -1204,9 +1839,12 @@ test('shows a clear load failure when the DAG file is missing', async ({ page })
     },
   });
 
+  await page.addInitScript(() => {
+    window.localStorage.clear();
+  });
   await page.goto('/');
 
-  await expect(page.getByRole('heading', { name: 'DAG file not found' })).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText(/DAG file not found|Unable to load the DAG/);
   await expect(page.getByText('examples/optimization_dag.yaml')).toBeVisible();
   await expect(page.getByText('Diagnostics')).toHaveCount(0);
 });

@@ -1,6 +1,7 @@
 from pathlib import Path
 import subprocess
 
+import pytest
 import yaml
 
 from bureauless.agents import (
@@ -12,6 +13,7 @@ from bureauless.agents import (
     list_agent_specs,
 )
 from bureauless.cli import main
+from bureauless.cli.main import prepare_mutation_demo_workspace
 from bureauless.core import ProtocolError
 from bureauless.protocol import (
     append_ledger_event,
@@ -22,9 +24,11 @@ from bureauless.protocol import (
     load_assignment,
     load_price_snapshot,
     load_result_proposal,
+    materialize_current_workflow,
     render_assignment_prompt,
     sha256_file,
     validate_artifact_record,
+    validate_workflow_mutation_proposal,
     verify_ledger_artifacts,
 )
 from bureauless.protocol.harness import (
@@ -35,7 +39,13 @@ from bureauless.protocol.harness import (
     load_mission,
     load_workflow,
 )
-from bureauless.runtime import evaluate_gatekeeper, replay_workflow, summarize_metrics
+from bureauless.runtime import (
+    build_mutation_supersession_events,
+    evaluate_assignment_impacts,
+    evaluate_gatekeeper,
+    replay_workflow,
+    summarize_metrics,
+)
 from bureauless.runtime.sessions import (
     assess_workspace_isolation,
     build_assignment_created_event,
@@ -93,6 +103,945 @@ def _workflow(overrides: dict | None = None) -> Workflow:
     if overrides:
         data.update(overrides)
     return Workflow.from_dict(data)
+
+
+def _mutation_proposal(overrides: dict | None = None) -> dict:
+    data = {
+        "proposal_id": "mutation-001",
+        "proposal_type": "workflow_mutation",
+        "workflow_id": "test-workflow",
+        "source": {
+            "assignment_id": "assign-001",
+            "session_id": "session-001",
+            "actor": "worker",
+        },
+        "reason": "discovered_missing_dependency",
+        "rationale": "Review needs a focused verification step before approval.",
+        "proposed_changes": {
+            "add_nodes": [
+                {
+                    "id": "verify",
+                    "role": "reviewer",
+                    "waits_for": {"all_of": ["implement.patch_ready"]},
+                    "emits": ["review_approved"],
+                }
+            ],
+            "add_edges": [
+                {
+                    "from_node": "verify",
+                    "to_node": "commit",
+                    "event": "review_approved",
+                }
+            ],
+            "remove_edges": [],
+            "supersede_assignments": ["assign-review-001"],
+        },
+        "evidence_refs": ["artifact-impact-report"],
+        "requires_approval": "orchestrator",
+    }
+    if overrides:
+        data.update(overrides)
+    return data
+
+
+def _empty_ledger() -> Ledger:
+    return Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Test controlled workflow mutation.",
+            "current_plan_ref": "test-workflow",
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [],
+        }
+    )
+
+
+def _mutation_workflow() -> Workflow:
+    return Workflow.from_dict(
+        {
+            "workflow_id": "test-workflow",
+            "mission_id": "demo",
+            "mode": "small_dag",
+            "roles": {
+                "producer": {
+                    "can_emit": ["ready"],
+                    "can_consume": ["done"],
+                },
+                "consumer": {
+                    "can_emit": ["done"],
+                    "can_consume": ["ready"],
+                },
+            },
+            "events": {
+                "ready": {"producer_roles": ["producer"]},
+                "done": {"producer_roles": ["consumer"]},
+            },
+            "nodes": [
+                {
+                    "id": "start",
+                    "role": "producer",
+                    "waits_for": [],
+                    "emits": ["ready"],
+                },
+                {
+                    "id": "finish",
+                    "role": "consumer",
+                    "waits_for": [],
+                    "emits": ["done"],
+                },
+            ],
+            "gates": [],
+            "terminal_events": ["done"],
+        }
+    )
+
+
+def _impact_workflows() -> tuple[Workflow, Workflow]:
+    base = {
+        "workflow_id": "test-workflow",
+        "mission_id": "demo",
+        "mode": "small_dag",
+        "roles": {
+            "worker": {
+                "can_emit": ["b_done", "c_done", "d_done", "x_done"],
+                "can_consume": ["b_done", "c_done", "d_done", "x_done"],
+            }
+        },
+        "events": {
+            event: {"producer_roles": ["worker"]}
+            for event in ("b_done", "c_done", "d_done", "x_done")
+        },
+        "gates": [],
+        "terminal_events": ["d_done", "x_done"],
+    }
+    before = Workflow.from_dict(
+        {
+            **base,
+            "nodes": [
+                {"id": "B", "role": "worker", "waits_for": [], "emits": ["b_done"]},
+                {
+                    "id": "D",
+                    "role": "worker",
+                    "waits_for": ["B.b_done"],
+                    "emits": ["d_done"],
+                },
+                {
+                    "id": "E",
+                    "role": "worker",
+                    "waits_for": ["D.d_done"],
+                    "emits": ["x_done"],
+                },
+                {"id": "X", "role": "worker", "waits_for": [], "emits": ["x_done"]},
+            ],
+        }
+    )
+    after = Workflow.from_dict(
+        {
+            **base,
+            "nodes": [
+                {"id": "B", "role": "worker", "waits_for": [], "emits": ["b_done"]},
+                {
+                    "id": "C",
+                    "role": "worker",
+                    "waits_for": ["B.b_done"],
+                    "emits": ["c_done"],
+                },
+                {
+                    "id": "D",
+                    "role": "worker",
+                    "waits_for": ["C.c_done"],
+                    "emits": ["d_done"],
+                },
+                {
+                    "id": "E",
+                    "role": "worker",
+                    "waits_for": ["D.d_done"],
+                    "emits": ["x_done"],
+                },
+                {"id": "X", "role": "worker", "waits_for": [], "emits": ["x_done"]},
+            ],
+        }
+    )
+    return before, after
+
+
+def _mutation_proposed_event() -> dict:
+    return {
+        "event_id": "event-mutation-001",
+        "event_type": "workflow_mutation_proposed",
+        "mission_id": "demo",
+        "workflow_id": "test-workflow",
+        "mutation_proposal": _mutation_proposal(),
+    }
+
+
+def test_validates_inert_workflow_mutation_proposal() -> None:
+    workflow = _workflow()
+    original_nodes = list(workflow.nodes)
+
+    result = validate_workflow_mutation_proposal(_mutation_proposal())
+
+    assert result.ok
+    assert result.errors == []
+    assert result.proposal is not None
+    assert result.proposal.proposed_changes.add_edges[0].event_ref == (
+        "verify.review_approved"
+    )
+    assert result.proposal.to_dict()["proposed_changes"]["add_nodes"][0][
+        "waits_for"
+    ] == ["implement.patch_ready"]
+    assert list(workflow.nodes) == original_nodes
+
+
+def test_prepares_isolated_mutation_e2e_demo(tmp_path) -> None:
+    paths = prepare_mutation_demo_workspace(tmp_path / "mutation-demo")
+    workflow = load_workflow(paths["workflow"])
+    ledger = load_ledger(paths["ledger"])
+    replay = replay_workflow(workflow, ledger)
+    artifacts = verify_ledger_artifacts(ledger, tmp_path / "mutation-demo")
+
+    assert compile_workflow(workflow).ok
+    assert artifacts[0].status == "valid"
+    assert replay.mutation_proposals["event-mutation-proposed"].state == "pending"
+    assert replay.mutation_proposals[
+        "event-mutation-proposed"
+    ].affected_node_ids == ["review"]
+    assert replay.nodes["prepare"].state == "completed"
+
+
+def test_rejects_forbidden_workflow_mutation_operations_with_structured_errors() -> None:
+    proposal = _mutation_proposal()
+    proposal["proposed_changes"]["ledger_events"] = [
+        {"event_id": "rewrite-history"}
+    ]
+    proposal["proposed_changes"]["create_assignments"] = [
+        {"assignment_id": "assign-forged"}
+    ]
+
+    result = validate_workflow_mutation_proposal(proposal)
+
+    assert not result.ok
+    assert result.proposal is None
+    assert {
+        error.path for error in result.errors if error.code == "forbidden_mutation_operation"
+    } == {
+        "proposed_changes.create_assignments",
+        "proposed_changes.ledger_events",
+    }
+
+
+def test_rejects_empty_or_ambiguous_workflow_mutation() -> None:
+    empty = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [],
+                "add_edges": [],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    ambiguous = _mutation_proposal()
+    ambiguous["proposed_changes"]["add_edges"] = [
+        {"from_node": "verify", "to_node": "commit"}
+    ]
+
+    empty_result = validate_workflow_mutation_proposal(empty)
+    ambiguous_result = validate_workflow_mutation_proposal(ambiguous)
+
+    assert {error.code for error in empty_result.errors} == {"empty_mutation"}
+    assert {error.code for error in ambiguous_result.errors} == {"invalid_schema"}
+
+
+def test_rejects_conflicting_workflow_mutation_edges() -> None:
+    proposal = _mutation_proposal()
+    proposal["proposed_changes"]["remove_edges"] = [
+        {
+            "from_node": "verify",
+            "to_node": "commit",
+            "event": "review_approved",
+        }
+    ]
+
+    result = validate_workflow_mutation_proposal(proposal)
+
+    assert not result.ok
+    assert {error.code for error in result.errors} == {"conflicting_edge_change"}
+
+
+def test_records_workflow_mutation_proposal_and_partial_acceptance() -> None:
+    workflow = _workflow()
+    proposed = append_ledger_event(
+        _empty_ledger(), _mutation_proposed_event(), workflow
+    )
+
+    accepted = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "mission_id": "demo",
+            "workflow_id": "test-workflow",
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "applied_changes": {
+                "supersede_assignments": ["assign-review-001"],
+            },
+        },
+        workflow,
+    )
+
+    assert [event["event_type"] for event in accepted.event_log] == [
+        "workflow_mutation_proposed",
+        "workflow_mutation_accepted",
+    ]
+    assert replay_workflow(workflow, accepted).mutation_proposals[
+        "event-mutation-001"
+    ].affected_node_ids == []
+
+
+def test_records_workflow_mutation_rejection() -> None:
+    workflow = _workflow()
+    proposed = append_ledger_event(
+        _empty_ledger(), _mutation_proposed_event(), workflow
+    )
+
+    rejected = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-rejected-001",
+            "event_type": "workflow_mutation_rejected",
+            "source_event_id": "event-mutation-001",
+            "actor": "human",
+            "reason": "The evidence does not justify changing the workflow.",
+        },
+        workflow,
+    )
+
+    assert rejected.event_log[-1]["source_event_id"] == "event-mutation-001"
+
+
+def test_rejects_mutation_decision_without_valid_proposal_reference() -> None:
+    with pytest.raises(ProtocolError, match="must reference an existing"):
+        append_ledger_event(
+            _empty_ledger(),
+            {
+                "event_id": "event-mutation-accepted-001",
+                "event_type": "workflow_mutation_accepted",
+                "source_event_id": "missing-proposal-event",
+                "actor": "orchestrator",
+                "applied_changes": {"supersede_assignments": ["assign-001"]},
+            },
+            _workflow(),
+        )
+
+
+def test_rejects_unproposed_mutation_change_and_second_decision() -> None:
+    workflow = _workflow()
+    proposed = append_ledger_event(
+        _empty_ledger(), _mutation_proposed_event(), workflow
+    )
+    with pytest.raises(ProtocolError, match="not present in the source proposal"):
+        append_ledger_event(
+            proposed,
+            {
+                "event_id": "event-mutation-accepted-001",
+                "event_type": "workflow_mutation_accepted",
+                "source_event_id": "event-mutation-001",
+                "actor": "orchestrator",
+                "applied_changes": {
+                    "supersede_assignments": ["assign-not-proposed"]
+                },
+            },
+            workflow,
+        )
+
+    rejected = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-rejected-001",
+            "event_type": "workflow_mutation_rejected",
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "reason": "Rejected once.",
+        },
+        workflow,
+    )
+    with pytest.raises(ProtocolError, match="already has a decision"):
+        append_ledger_event(
+            rejected,
+            {
+                "event_id": "event-mutation-rejected-002",
+                "event_type": "workflow_mutation_rejected",
+                "source_event_id": "event-mutation-001",
+                "actor": "human",
+                "reason": "Cannot decide twice.",
+            },
+            workflow,
+        )
+
+
+def test_imports_completed_result_with_mutation_proposal_ref_without_applying_it() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    result = load_result_proposal(
+        {
+            "result_id": "result-001",
+            "assignment_id": "assign-001",
+            "agent_id": "worker-001",
+            "status": "completed_with_proposal",
+            "emitted_events": [],
+            "artifacts": [
+                {
+                    "artifact_id": "artifact-mutation-001",
+                    "path": "artifacts/mutation-001.yaml",
+                    "sha256": "a" * 64,
+                    "created_by": "worker-001",
+                    "source_event": "event-result-001",
+                    "mutable": False,
+                }
+            ],
+            "mutation_proposal_refs": ["artifact-mutation-001"],
+            "outcome_metrics": {
+                "wall_time_ms": 10,
+                "changed_files_count": 1,
+            },
+            "verification": {"status": "passed"},
+        }
+    )
+
+    updated = import_result_proposal(workflow, ledger, assignment, result)
+
+    assert [event["event_type"] for event in updated.event_log] == [
+        "result_submitted"
+    ]
+    assert updated.event_log[0]["result"]["mutation_proposal_refs"] == [
+        "artifact-mutation-001"
+    ]
+    assert workflow.nodes.keys() == _workflow().nodes.keys()
+
+
+def test_rejects_invalid_result_mutation_proposal_ref_contract() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    result = load_result_proposal(
+        {
+            "result_id": "result-001",
+            "assignment_id": "assign-001",
+            "agent_id": "worker-001",
+            "status": "completed_with_proposal",
+            "emitted_events": [],
+            "artifacts": [],
+            "mutation_proposal_refs": ["artifact-missing"],
+            "outcome_metrics": {
+                "wall_time_ms": 10,
+                "changed_files_count": 0,
+            },
+        }
+    )
+
+    with pytest.raises(ProtocolError, match="does not match a result artifact"):
+        import_result_proposal(workflow, ledger, assignment, result)
+
+
+def test_pending_mutation_blocks_only_affected_workflow_branch() -> None:
+    workflow = _workflow(
+        {
+            "nodes": [
+                {"id": "left", "role": "coder", "waits_for": [], "emits": ["patch_ready"]},
+                {"id": "right", "role": "coder", "waits_for": [], "emits": ["patch_ready"]},
+            ],
+            "gates": [],
+            "terminal_events": ["patch_ready"],
+        }
+    )
+    proposal = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [
+                    {
+                        "id": "verify",
+                        "role": "coder",
+                        "waits_for": [],
+                        "emits": ["patch_ready"],
+                    }
+                ],
+                "add_edges": [
+                    {
+                        "from_node": "verify",
+                        "to_node": "left",
+                        "event": "patch_ready",
+                    }
+                ],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    proposed_event = _mutation_proposed_event()
+    proposed_event["mutation_proposal"] = proposal
+    ledger = append_ledger_event(_empty_ledger(), proposed_event, workflow)
+
+    replay = replay_workflow(workflow, ledger)
+    gatekeeper = evaluate_gatekeeper(workflow, ledger)
+
+    mutation = replay.mutation_proposals["event-mutation-001"]
+    assert mutation.state == "pending"
+    assert mutation.affected_node_ids == ["left"]
+    assert gatekeeper.ready == ["right"]
+    assert gatekeeper.decisions["left"].blocked_reasons[0].code == (
+        "mutation_pending"
+    )
+
+
+def test_rejected_mutation_releases_affected_workflow_branch() -> None:
+    workflow = _workflow(
+        {
+            "nodes": [
+                {"id": "left", "role": "coder", "waits_for": [], "emits": ["patch_ready"]},
+                {"id": "right", "role": "coder", "waits_for": [], "emits": ["patch_ready"]},
+            ],
+            "gates": [],
+            "terminal_events": ["patch_ready"],
+        }
+    )
+    proposal = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [],
+                "add_edges": [
+                    {
+                        "from_node": "right",
+                        "to_node": "left",
+                        "event": "patch_ready",
+                    }
+                ],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    proposed_event = _mutation_proposed_event()
+    proposed_event["mutation_proposal"] = proposal
+    proposed = append_ledger_event(_empty_ledger(), proposed_event, workflow)
+    rejected = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-rejected-001",
+            "event_type": "workflow_mutation_rejected",
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "reason": "Keep the branches independent.",
+        },
+        workflow,
+    )
+
+    replay = replay_workflow(workflow, rejected)
+    gatekeeper = evaluate_gatekeeper(workflow, rejected)
+
+    assert replay.mutation_proposals["event-mutation-001"].state == "rejected"
+    assert gatekeeper.ready == ["left", "right"]
+
+
+def test_materializes_current_workflow_from_accepted_mutation() -> None:
+    initial = _mutation_workflow()
+    proposal = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [
+                    {
+                        "id": "verify",
+                        "role": "producer",
+                        "waits_for": [],
+                        "emits": ["ready"],
+                    }
+                ],
+                "add_edges": [
+                    {
+                        "from_node": "verify",
+                        "to_node": "finish",
+                        "event": "ready",
+                    }
+                ],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    proposed_event = _mutation_proposed_event()
+    proposed_event["mutation_proposal"] = proposal
+    proposed = append_ledger_event(_empty_ledger(), proposed_event, initial)
+    accepted = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "applied_changes": proposal["proposed_changes"],
+        },
+        initial,
+    )
+
+    current = materialize_current_workflow(initial, accepted)
+    current_again = materialize_current_workflow(initial, accepted)
+    replay = replay_workflow(initial, accepted)
+
+    assert list(initial.nodes) == ["start", "finish"]
+    assert list(current.nodes) == ["start", "finish", "verify"]
+    assert current.nodes["finish"].waits_for_all == ["verify.ready"]
+    assert current == current_again
+    assert list(replay.nodes) == ["start", "finish", "verify"]
+    assert replay.nodes["finish"].state == "blocked"
+
+
+def test_rejected_mutation_does_not_change_current_workflow() -> None:
+    initial = _mutation_workflow()
+    proposed_event = _mutation_proposed_event()
+    proposed_event["mutation_proposal"] = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [
+                    {
+                        "id": "verify",
+                        "role": "producer",
+                        "waits_for": [],
+                        "emits": ["ready"],
+                    }
+                ],
+                "add_edges": [],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    proposed = append_ledger_event(_empty_ledger(), proposed_event, initial)
+    rejected = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-rejected-001",
+            "event_type": "workflow_mutation_rejected",
+            "source_event_id": "event-mutation-001",
+            "actor": "human",
+            "reason": "Not needed.",
+        },
+        initial,
+    )
+
+    assert materialize_current_workflow(initial, rejected) == initial
+
+
+def test_exports_and_imports_assignment_for_mutation_added_node() -> None:
+    initial = _mutation_workflow()
+    proposal = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [
+                    {
+                        "id": "verify",
+                        "role": "producer",
+                        "waits_for": [],
+                        "emits": ["ready"],
+                    }
+                ],
+                "add_edges": [],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    proposed_event = _mutation_proposed_event()
+    proposed_event["mutation_proposal"] = proposal
+    ledger = append_ledger_event(_empty_ledger(), proposed_event, initial)
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "applied_changes": proposal["proposed_changes"],
+        },
+        initial,
+    )
+
+    assignment = export_assignment(
+        initial, ledger, "verify", assignment_id="assign-verify"
+    )
+    result = load_result_proposal(
+        {
+            "result_id": "result-verify",
+            "assignment_id": "assign-verify",
+            "agent_id": "worker-verify",
+            "status": "completed",
+            "emitted_events": ["ready"],
+            "artifacts": [],
+            "outcome_metrics": {
+                "wall_time_ms": 5,
+                "changed_files_count": 0,
+            },
+        }
+    )
+    updated = import_result_proposal(initial, ledger, assignment, result)
+
+    assert assignment.node_id == "verify"
+    assert updated.event_log[-1]["node_id"] == "verify"
+    assert replay_workflow(initial, updated).nodes["verify"].state == "completed"
+
+
+def test_rejects_accepted_mutation_that_produces_invalid_workflow() -> None:
+    initial = _mutation_workflow()
+    proposal = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [],
+                "add_edges": [
+                    {
+                        "from_node": "missing",
+                        "to_node": "finish",
+                        "event": "ready",
+                    }
+                ],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    proposed_event = _mutation_proposed_event()
+    proposed_event["mutation_proposal"] = proposal
+    proposed = append_ledger_event(_empty_ledger(), proposed_event, initial)
+    accepted = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "applied_changes": proposal["proposed_changes"],
+        },
+        initial,
+    )
+
+    with pytest.raises(ProtocolError, match="unknown source"):
+        materialize_current_workflow(initial, accepted)
+
+
+def test_classifies_changed_dependency_chain_and_unchanged_sibling() -> None:
+    before, after = _impact_workflows()
+    ledger = append_ledger_event(
+        _empty_ledger(),
+        {
+            "event_id": "event-assign-D",
+            "event_type": "assignment_created",
+            "assignment_id": "assign-D",
+            "node_id": "D",
+        },
+        before,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-assign-X",
+            "event_type": "assignment_created",
+            "assignment_id": "assign-X",
+            "node_id": "X",
+        },
+        before,
+    )
+
+    impacts = evaluate_assignment_impacts(before, after, ledger)
+
+    assert impacts["assign-D"].classification == "affected"
+    assert impacts["assign-D"].reasons == [
+        "node_contract_changed",
+        "dependency_closure_changed",
+    ]
+    assert impacts["assign-X"].classification == "unaffected"
+    assert impacts["assign-X"].reasons == ["execution_context_unchanged"]
+
+
+def test_assignment_impact_honors_explicit_supersession_and_ambiguity() -> None:
+    before, after = _impact_workflows()
+    ledger = append_ledger_event(
+        _empty_ledger(),
+        {
+            "event_id": "event-assign-X",
+            "event_type": "assignment_created",
+            "assignment_id": "assign-X",
+            "node_id": "X",
+        },
+        before,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-assign-unknown",
+            "event_type": "assignment_created",
+            "assignment_id": "assign-unknown",
+        },
+        before,
+    )
+
+    impacts = evaluate_assignment_impacts(
+        before,
+        after,
+        ledger,
+        {"supersede_assignments": ["assign-X"]},
+    )
+
+    assert impacts["assign-X"].classification == "affected"
+    assert impacts["assign-X"].reasons == ["explicitly_superseded"]
+    assert impacts["assign-unknown"].classification == "needs_review"
+    assert impacts["assign-unknown"].reasons == ["assignment_node_missing"]
+
+
+def test_mutation_supersession_preserves_history_but_revokes_old_success() -> None:
+    before, _ = _impact_workflows()
+    ledger = append_ledger_event(
+        _empty_ledger(),
+        {
+            "event_id": "event-assign-D",
+            "event_type": "assignment_created",
+            "assignment_id": "assign-D",
+            "node_id": "D",
+        },
+        before,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-D-done",
+            "event_type": "d_done",
+            "assignment_id": "assign-D",
+            "node_id": "D",
+            "role": "worker",
+        },
+        before,
+    )
+    assert replay_workflow(before, ledger).nodes["D"].state == "completed"
+
+    proposal = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [
+                    {
+                        "id": "C",
+                        "role": "worker",
+                        "waits_for": ["B.b_done"],
+                        "emits": ["c_done"],
+                    }
+                ],
+                "add_edges": [
+                    {"from_node": "C", "to_node": "D", "event": "c_done"}
+                ],
+                "remove_edges": [
+                    {"from_node": "B", "to_node": "D", "event": "b_done"}
+                ],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    proposed_event = _mutation_proposed_event()
+    proposed_event["mutation_proposal"] = proposal
+    ledger = append_ledger_event(ledger, proposed_event, before)
+    accepted_event = {
+        "event_id": "event-mutation-accepted-001",
+        "event_type": "workflow_mutation_accepted",
+        "source_event_id": "event-mutation-001",
+        "actor": "orchestrator",
+        "applied_changes": proposal["proposed_changes"],
+    }
+    ledger = append_ledger_event(ledger, accepted_event, before)
+    current = materialize_current_workflow(before, ledger)
+    impacts = evaluate_assignment_impacts(
+        before, current, ledger, accepted_event["applied_changes"]
+    )
+    supersession_events = build_mutation_supersession_events(
+        current, accepted_event, impacts
+    )
+
+    assert len(supersession_events) == 1
+    assert supersession_events[0]["assignment_id"] == "assign-D"
+    assert supersession_events[0]["mutation_event_id"] == (
+        "event-mutation-accepted-001"
+    )
+    ledger = append_ledger_event(ledger, supersession_events[0], current)
+    replay = replay_workflow(before, ledger)
+
+    assert any(event["event_id"] == "event-D-done" for event in ledger.event_log)
+    assert replay.nodes["D"].state == "blocked"
+    assert replay.nodes["D"].emitted_events == []
+    assert replay.nodes["D"].assignment_attempts[0].state == "superseded"
+    assert replay.nodes["D"].assignment_attempts[0].superseded_by == (
+        "event-mutation-accepted-001"
+    )
+    assert replay.nodes["E"].blocked_reasons[0].code == "superseded"
+    assert replay.nodes["E"].blocked_reasons[0].assignment_id == "assign-D"
+
+
+def test_gatekeeper_blocks_assignment_that_needs_mutation_review() -> None:
+    initial = _mutation_workflow()
+    ledger = append_ledger_event(
+        _empty_ledger(),
+        {
+            "event_id": "event-assign-verify",
+            "event_type": "assignment_created",
+            "assignment_id": "assign-verify",
+            "node_id": "verify",
+        },
+    )
+    proposal = _mutation_proposal(
+        {
+            "proposed_changes": {
+                "add_nodes": [
+                    {
+                        "id": "verify",
+                        "role": "producer",
+                        "waits_for": [],
+                        "emits": ["ready"],
+                    }
+                ],
+                "add_edges": [],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            }
+        }
+    )
+    proposed_event = _mutation_proposed_event()
+    proposed_event["mutation_proposal"] = proposal
+    ledger = append_ledger_event(ledger, proposed_event, initial)
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "applied_changes": proposal["proposed_changes"],
+        },
+        initial,
+    )
+
+    gatekeeper = evaluate_gatekeeper(initial, ledger)
+
+    assert gatekeeper.decisions["verify"].state == "blocked"
+    assert any(
+        reason.code == "needs_review"
+        and reason.assignment_id == "assign-verify"
+        for reason in gatekeeper.decisions["verify"].blocked_reasons
+    )
 
 
 def test_loads_demo_mission_and_ledger() -> None:
@@ -1895,6 +2844,57 @@ def test_package_session_result_normalizes_artifacts_and_native_logs(tmp_path) -
     assert packaged.native_log_refs[0]["path"] == "logs/stdout.log"
     assert packaged.native_log_refs[1]["path"] == "logs/stderr.log"
     assert packaged.native_log_refs[0]["sha256"]
+
+
+def test_session_packages_mutation_proposal_artifact_ref(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    payload = yaml.safe_dump(
+        {
+            "status": "completed_with_proposal",
+            "emitted_events": [],
+            "artifacts": [
+                {
+                    "artifact_id": "artifact-mutation-001",
+                    "path": "artifacts/mutation-001.yaml",
+                }
+            ],
+            "mutation_proposal_refs": ["artifact-mutation-001"],
+            "verification": {"status": "passed"},
+        },
+        sort_keys=False,
+    ).strip()
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="shell-dummy",
+        workdir=source_root,
+        shell_command=(
+            "mkdir -p artifacts\n"
+            "printf 'proposal_type: workflow_mutation\\n' > artifacts/mutation-001.yaml\n"
+            f"cat <<'EOF'\n{payload}\nEOF"
+        ),
+        session_id="session-001",
+    )
+
+    record = run_session(spec, assignment)
+    packaged = package_session_result(record, assignment)
+
+    assert record.extraction["mutation_proposal_refs"] == [
+        "artifact-mutation-001"
+    ]
+    assert packaged.status == "completed_with_proposal"
+    assert packaged.mutation_proposal_refs == ["artifact-mutation-001"]
+    assert packaged.artifacts[0]["artifact_id"] == "artifact-mutation-001"
+    assert packaged.artifacts[0]["path"] == (
+        "workspace/artifacts/mutation-001.yaml"
+    )
+    assert len(packaged.artifacts[0]["sha256"]) == 64
+    assert packaged.artifacts[0]["mutable"] is False
 
 
 def test_package_session_result_rejects_missing_artifact_or_assignment_mismatch(tmp_path) -> None:

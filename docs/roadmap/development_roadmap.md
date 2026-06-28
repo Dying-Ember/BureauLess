@@ -6,17 +6,27 @@ not drift into unrelated details.
 
 ## Current Position
 
-The project currently has two layers:
+The project currently has two runtime layers:
 
-- DAG runtime: YAML DAG loading, ready-node calculation, prompt rendering, YAML
-  run records, review status updates.
-- Harness foundation: YAML mission, ledger, workflow loading, and deterministic
-  workflow compilation for role/event/gate rules.
+- DAG runtime: YAML DAG loading, ready-node calculation, prompt rendering,
+  review status updates, and an operational browser/Electron viewer.
+- Harness runtime: deterministic protocol validation, append-only ledger and
+  replay, gatekeeper decisions, assignment/result boundaries, agent doctor
+  checks, isolated sessions, result packaging, outcome metrics, and dispatch
+  readiness checks.
 
-The project also has one UI surface:
+Milestones 1, 2, and 2.5 are complete. The next runtime priority is completing
+advisor outcome learning and the remaining orchestrator decision artifacts.
+Those tasks form Runtime Harness Milestone 3.
+
+The project has one UI surface:
 
 - Workbench: a browser/Electron DAG viewer and node inspector backed by the
   Python API.
+
+Workbench Milestone 1 is complete. The next UI priority is a runtime console
+milestone that presents mission/workflow/ledger/replay state directly instead
+of only reflecting the planning DAG.
 
 ## North Star
 
@@ -55,9 +65,9 @@ The first runtime does not implement an internal coding-agent harness. It wraps
 external agent runtimes at assignment/session/result boundaries and records
 session-level outcome metrics.
 
-The next runtime milestone starts by formalizing one explicit manual-harness
-golden path for the demo mission. That path is the acceptance spine for every
-later semi-automatic session feature.
+The completed runtime line already includes one explicit manual-harness golden
+path for the demo mission. The next runtime milestone builds on that
+acceptance spine instead of replacing it.
 
 The current runtime line also exposes a reviewable semi-automatic demo through
 the API. That demo prepares a workspace, exports an assignment, runs one
@@ -84,7 +94,7 @@ and broken down in
 
 ### A1: Mission, Ledger, Workflow Foundation
 
-Status: started.
+Status: completed for the M1/M2 baseline.
 
 Implemented:
 
@@ -104,7 +114,7 @@ Next:
 
 ### A2: Event Ledger And Provenance
 
-Status: next.
+Status: completed for the M1/M2 baseline.
 
 Goal: make mission state append-only and replayable.
 
@@ -128,7 +138,7 @@ Acceptance:
 
 ### A3: Gatekeeper
 
-Status: planned.
+Status: completed for the M1/M2 baseline.
 
 Goal: decide what can run now.
 
@@ -147,7 +157,8 @@ Acceptance:
 
 ### A4: Advisor Policy And Budget Estimator
 
-Status: planned.
+Status: started. Budget snapshots and pre-dispatch workflow selection are
+implemented; advisor outcome learning remains planned.
 
 Goal: make advisor usage measurable instead of instinctive.
 
@@ -168,7 +179,8 @@ Acceptance:
 
 ### A5: Orchestrator Decision Artifacts
 
-Status: planned.
+Status: started. Assignment and result artifacts are implemented; broader
+orchestrator routing and review decision artifacts remain planned.
 
 Goal: persist orchestrator decisions as structured YAML.
 
@@ -186,7 +198,7 @@ Acceptance:
 
 ### A6: Controlled Workflow Mutation
 
-Status: proposed.
+Status: completed for the M2.5 current-state replay scope.
 
 Goal: let agents propose workflow changes discovered during execution without
 letting them mutate canonical workflow state.
@@ -228,7 +240,7 @@ Detailed task cards live in
 
 ### B1: Operational DAG Viewer
 
-Status: planned.
+Status: completed for the Workbench M1 baseline.
 
 Source tasks:
 
@@ -243,7 +255,7 @@ Goal: make the current DAG/run-record workflow inspectable and safe to review.
 
 ### B2: File And Workspace Ergonomics
 
-Status: planned.
+Status: completed for the Workbench M1 baseline.
 
 Source tasks:
 
@@ -254,7 +266,7 @@ Goal: let users point the workbench at real local YAML DAGs and run directories.
 
 ### B3: Safe DAG Metadata Editing
 
-Status: deferred.
+Status: completed for the Workbench M1 baseline.
 
 Source tasks:
 
@@ -262,29 +274,28 @@ Source tasks:
 - WB-08 Metadata Edit Form.
 - WB-09 Unsaved Changes Guard.
 
-Reason for deferral:
+Implementation note:
 
-- The project is moving toward mission/workflow/ledger semantics.
-- DAG editing is useful, but it should not outrun harness validation.
+- The current metadata editing surface remains DAG-oriented. It is useful for
+  planning workflows, but it is not yet the primary runtime console.
 
 ### B4: Dispatch Preparation
 
-Status: deferred.
+Status: completed for the Workbench M1 baseline.
 
 Source tasks:
 
 - WB-15 Assignment Matrix View.
 - WB-16 Prompt Export Panel.
 
-Reason for deferral:
+Implementation note:
 
-- Prompt export remains useful.
-- Actual agent dispatch waits until harness gates, result import, ledger replay,
-  and doctor checks are in place.
+- Prompt export and assignment visibility now exist, but they remain bounded to
+  manual and semi-automatic runtime flows.
 
 ### B5: Graph Editing
 
-Status: later.
+Status: completed for the Workbench M1 baseline.
 
 Source tasks:
 
@@ -292,10 +303,24 @@ Source tasks:
 - WB-13 Dependency Editing.
 - WB-14 Drag-To-Connect Dependencies.
 
-Reason for deferral:
+Implementation note:
 
-- Structural editing is high risk.
-- It should reuse validation and compiler semantics from the harness line.
+- Graph editing is available for the planning DAG. It is intentionally separate
+  from runtime workflow mutation and replay semantics.
+
+### B6: Runtime Console
+
+Status: planned as Workbench Milestone 2.
+
+Goal: make the workbench a first-class surface for harness runtime state.
+
+Planned scope:
+
+- Show runtime workflow separately from the planning DAG.
+- Visualize gatekeeper and replay state directly on the runtime graph.
+- Reflect accepted and rejected workflow mutations on the runtime canvas.
+- Expose ledger, assignment, supersession, and blocked-reason inspection
+  without making the frontend invent business rules.
 
 ## Where The Lines Meet
 
@@ -313,21 +338,18 @@ The workbench should gradually become the visual surface for harness runtime:
 This means the UI should not become a separate source of business rules. Python
 runtime remains the source of truth.
 
+The current workbench already proves that runtime APIs are consumable, but it
+does not yet synchronize the canvas and node list with the runtime workflow.
+That synchronization belongs to B6 rather than to the completed M1 viewer work.
+
 ## Current Priority Order
 
-1. A2 Event Ledger And Provenance.
-2. A3 Gatekeeper.
-3. Runtime assignment export and result import.
-4. Agent registry and doctor checks.
-5. Session-level outcome metrics.
-6. B1 Operational DAG Viewer.
-7. A6 Controlled Workflow Mutation.
-8. A4 Advisor Policy And Budget Estimator.
-9. B2 File And Workspace Ergonomics.
-10. A5 Orchestrator Decision Artifacts.
-11. B3 Safe DAG Metadata Editing.
-12. B4 Dispatch Preparation.
-13. B5 Graph Editing.
+1. Complete A4 Advisor Policy outcome learning.
+2. Complete A5 Orchestrator Decision Artifacts.
+3. Open Runtime Harness Milestone 3 and land its acceptance spine.
+4. Build Workbench Milestone 2 Runtime Console.
+5. Return to post-M2.5 replay evolution only after runtime decisions and UI
+   inspection surfaces are stable.
 
 ## Decision Rules
 
@@ -337,6 +359,8 @@ runtime remains the source of truth.
 - If a task adds agent dispatch, defer it until workflow gates, result import,
   ledger replay, and doctor checks exist.
 - If a task is only visually useful but not operationally necessary, keep it behind runtime safety work.
+- If a task couples planning-DAG editing with runtime-workflow state, keep the
+  runtime model authoritative and let the UI reflect it rather than derive it.
 
 ## Non-Goals For The Next Milestone
 
@@ -347,5 +371,7 @@ runtime remains the source of truth.
 - No full-ledger broadcast.
 - No worker writes to canonical ledger.
 - No worker applies workflow mutation directly.
-- No full temporal workflow replay in the controlled mutation bridge milestone.
+- No full temporal workflow replay before the M3+ replay milestone.
 - No advisor policy auto-tuning by LLM.
+- No runtime canvas/list synchronization by ad hoc frontend state outside the
+  dedicated Workbench Milestone 2 runtime console work.

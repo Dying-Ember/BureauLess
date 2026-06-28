@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -30,9 +32,16 @@ from ..protocol import (
     load_ledger,
     load_mission,
     load_workflow,
+    materialize_current_workflow,
     write_ledger,
 )
-from ..runtime import evaluate_gatekeeper, replay_workflow, summarize_metrics
+from ..runtime import (
+    build_mutation_supersession_events,
+    evaluate_assignment_impacts,
+    evaluate_gatekeeper,
+    replay_workflow,
+    summarize_metrics,
+)
 from ..runtime.sessions import (
     build_assignment_created_event,
     create_session_spec,
@@ -76,6 +85,16 @@ class RuntimeDemoRequest(BaseModel):
     assignment_id: str = "assign-implement-demo"
     session_id: str = "session-implement-demo"
     result_id: str = "result-implement-demo"
+
+
+class MutationDecisionRequest(BaseModel):
+    workflow_path: str
+    ledger_path: str
+    proposal_event_id: str
+    decision: Literal["accept", "reject"]
+    actor: Literal["orchestrator", "human"] = "human"
+    reason: str | None = None
+    applied_changes: dict[str, Any] | None = None
 
 
 def create_app() -> FastAPI:
@@ -233,6 +252,76 @@ def create_app() -> FastAPI:
         ledger = load_ledger(Path(ledger_path))
         return evaluate_gatekeeper(workflow, ledger).to_dict()
 
+    @app.get("/api/mutations")
+    def api_mutations(
+        workflow_path: str = "examples/missions/demo/workflows/coder_reviewer_committer.yaml",
+        ledger_path: str = "examples/missions/demo/ledger.yaml",
+    ) -> dict[str, Any]:
+        workflow = load_workflow(Path(workflow_path))
+        ledger = load_ledger(Path(ledger_path))
+        return mutation_inspection_payload(workflow, ledger)
+
+    @app.post("/api/mutations/decision")
+    def api_mutation_decision(request: MutationDecisionRequest) -> dict[str, Any]:
+        workflow = load_workflow(Path(request.workflow_path))
+        ledger_path = Path(request.ledger_path)
+        ledger = load_ledger(ledger_path)
+        proposal_event = next(
+            (
+                event
+                for event in ledger.event_log
+                if event.get("event_id") == request.proposal_event_id
+                and event.get("event_type") == "workflow_mutation_proposed"
+            ),
+            None,
+        )
+        if proposal_event is None:
+            raise ProtocolError("Unknown workflow mutation proposal event")
+
+        event_id = f"event-mutation-{request.decision}-{uuid4()}"
+        decision_event: dict[str, Any] = {
+            "event_id": event_id,
+            "event_type": f"workflow_mutation_{request.decision}ed",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "source_event_id": request.proposal_event_id,
+            "actor": request.actor,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if request.decision == "reject":
+            if not request.reason:
+                raise ProtocolError("Mutation rejection requires a reason")
+            decision_event["reason"] = request.reason
+            updated = append_ledger_event(ledger, decision_event, workflow)
+        else:
+            proposal = proposal_event.get("mutation_proposal")
+            if not isinstance(proposal, dict):
+                raise ProtocolError("Mutation proposal event is missing mutation_proposal")
+            proposed_changes = proposal.get("proposed_changes")
+            if not isinstance(proposed_changes, dict):
+                raise ProtocolError("Mutation proposal is missing proposed_changes")
+            decision_event["applied_changes"] = (
+                request.applied_changes
+                if request.applied_changes is not None
+                else proposed_changes
+            )
+            before = materialize_current_workflow(workflow, ledger)
+            updated = append_ledger_event(ledger, decision_event, workflow)
+            after = materialize_current_workflow(workflow, updated)
+            impacts = evaluate_assignment_impacts(
+                before,
+                after,
+                updated,
+                decision_event["applied_changes"],
+            )
+            for supersession_event in build_mutation_supersession_events(
+                after, decision_event, impacts
+            ):
+                updated = append_ledger_event(updated, supersession_event, after)
+
+        write_ledger(ledger_path, updated)
+        return mutation_inspection_payload(workflow, updated)
+
     @app.get("/api/agents")
     def api_agents() -> dict[str, Any]:
         return {"agents": [spec.to_dict() for spec in list_agent_specs()]}
@@ -371,6 +460,56 @@ def workflow_payload(workflow) -> dict[str, Any]:
         "terminal_events": workflow.terminal_events,
         "broadcast_policy": workflow.broadcast_policy,
         "budget_policy": workflow.budget_policy,
+    }
+
+
+def mutation_inspection_payload(workflow, ledger) -> dict[str, Any]:
+    replay = replay_workflow(workflow, ledger)
+    current = materialize_current_workflow(workflow, ledger)
+    event_by_id = {
+        event.get("event_id"): event
+        for event in ledger.event_log
+        if isinstance(event.get("event_id"), str)
+    }
+    assignment_nodes = {
+        event.get("assignment_id"): event.get("node_id")
+        for event in ledger.event_log
+        if isinstance(event.get("assignment_id"), str)
+        and isinstance(event.get("node_id"), str)
+    }
+    proposals = []
+    for event_id, mutation in replay.mutation_proposals.items():
+        event = event_by_id.get(event_id, {})
+        proposal = event.get("mutation_proposal", {})
+        affected_assignments = sorted(
+            assignment_id
+            for assignment_id, node_id in assignment_nodes.items()
+            if node_id in mutation.affected_node_ids
+        )
+        superseded_assignments = sorted(
+            event.get("assignment_id")
+            for event in ledger.event_log
+            if event.get("event_type") == "assignment_superseded"
+            and event.get("mutation_event_id") == mutation.decision_event_id
+            and isinstance(event.get("assignment_id"), str)
+        )
+        proposals.append(
+            {
+                **mutation.to_dict(),
+                "proposal": proposal,
+                "evidence_refs": (
+                    proposal.get("evidence_refs", [])
+                    if isinstance(proposal, dict)
+                    else []
+                ),
+                "affected_assignments": affected_assignments,
+                "superseded_assignments": superseded_assignments,
+            }
+        )
+    return {
+        "workflow_id": workflow.workflow_id,
+        "current_workflow": workflow_payload(current),
+        "proposals": proposals,
     }
 
 

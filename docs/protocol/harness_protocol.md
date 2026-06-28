@@ -319,10 +319,131 @@ Task results are proposals. They do not become public ledger facts until the
 harness validates role permissions, expected events, artifact integrity,
 forbidden actions, and any required review gates.
 
+A result that discovers a structural workflow gap uses
+`status: completed_with_proposal` and lists proposal artifact IDs in
+`mutation_proposal_refs`. Each reference must resolve to an immutable YAML
+artifact in the same result. `completed` and `blocked` results cannot carry
+mutation proposal refs, and blocked results cannot emit completion events.
+Importing this result records only `result_submitted`; it does not append a
+mutation event or alter the workflow.
+
 Task result validation must also enforce the
 [Protocol Invariants](#protocol-invariants). A result that reflects scope
 expansion, unapproved model escalation, unsupported public findings, or other
 invariant violations should be rejected or held for explicit review.
+
+## Workflow Mutation Proposal
+
+A worker or orchestrator may report that the accepted workflow is structurally
+incomplete by producing a `workflow_mutation` proposal. A proposal is inert: it
+cannot update the workflow, append ledger events, or create assignments.
+
+```yaml
+proposal_id: mutation-001
+proposal_type: workflow_mutation
+workflow_id: workflow-001
+source:
+  assignment_id: assign-001
+  session_id: session-001
+  actor: worker
+reason: discovered_missing_dependency
+rationale: A verification step is required before review.
+proposed_changes:
+  add_nodes:
+    - id: verify
+      role: reviewer
+      waits_for:
+        all_of:
+          - implement.patch_ready
+      emits:
+        - verification_passed
+  add_edges:
+    - from_node: verify
+      to_node: commit
+      event: verification_passed
+  remove_edges: []
+  supersede_assignments:
+    - assign-review-001
+evidence_refs:
+  - artifact-impact-report
+requires_approval: orchestrator
+```
+
+An edge mutation names `from_node`, `to_node`, and `event`; it represents the
+qualified dependency `from_node.event` on the target node. Bare graph edges are
+not valid because workflow nodes may emit multiple events.
+
+The proposal validator returns structured errors and rejects unknown fields,
+empty changes, missing evidence, node removal, ledger rewriting, canonical
+assignment creation, duplicate changes, self-edges, and an edge being both
+added and removed. Applying accepted proposals is defined separately by the
+mutation decision event protocol.
+
+Mutation decisions are append-only ledger events:
+
+```yaml
+event_id: event-mutation-accepted-001
+event_type: workflow_mutation_accepted
+source_event_id: event-mutation-001
+actor: orchestrator
+applied_changes:
+  add_nodes: []
+  add_edges: []
+  remove_edges: []
+  supersede_assignments:
+    - assign-review-001
+```
+
+`workflow_mutation_accepted` and `workflow_mutation_rejected` must reference an
+existing `workflow_mutation_proposed` event. Only an orchestrator or human can
+record the decision, a proposal can be decided only once, and accepted changes
+must be a non-empty subset of the source proposal.
+
+While a proposal is pending, replay derives its explicitly affected nodes from
+edge targets and superseded assignments, then includes their downstream
+closure. Gatekeeper blocks those nodes with `mutation_pending` while leaving
+independent branches runnable. Rejecting the proposal removes the pending
+block; acceptance proceeds through current-workflow materialization.
+
+Current workflow materialization is deterministic and non-mutating:
+
+```text
+initial_workflow + accepted mutation events -> current_workflow
+```
+
+Only each acceptance event's `applied_changes` are used, in ledger order.
+Rejected proposals have no structural effect. Every intermediate workflow must
+compile and remain acyclic; unknown nodes or events, duplicate or missing
+edges, and invalid role/event contracts reject materialization without changing
+the initial workflow.
+
+Assignment impact evaluation compares the node contract and complete upstream
+dependency closure before and after an accepted mutation. A changed contract,
+changed closure, or explicit supersession is `affected`; an unchanged execution
+context is `unaffected`; missing or conflicting assignment-to-node provenance
+is `needs_review`.
+
+Gatekeeper exposes `needs_review` for assignments whose validity cannot be
+established after an accepted mutation. When a required event exists only from
+a superseded assignment, the blocked reason is `superseded` rather than a
+generic missing-event reason. Mutation-added nodes use the materialized current
+workflow for assignment export and result import.
+
+Affected assignments are invalidated by append-only `assignment_superseded`
+events linked to the accepted mutation event. Their original sessions, results,
+and emitted events remain in history, but replay excludes events emitted by a
+superseded assignment when evaluating node completion, gates, and terminal
+conditions.
+
+Current-state replay always accepts the initial workflow and performs:
+
+```text
+initial_workflow + accepted_mutations -> current_workflow
+current_workflow + ledger_events      -> current derived state
+```
+
+This milestone does not expose historical workflow snapshots or arbitrary
+time-based queries.
 
 ## Agent Runtime
 
