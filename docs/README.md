@@ -26,7 +26,10 @@ acceptance criteria.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
-  current concrete workbench milestone task list.
+  completed planning-DAG workbench milestone.
+- [`tasks/workbench_milestone_2_tasklist.md`](tasks/workbench_milestone_2_tasklist.md):
+  completed runtime console milestone for workflow, replay, gatekeeper, and
+  mutation inspection.
 
 ## RFCs
 

@@ -21,12 +21,13 @@ Those tasks form Runtime Harness Milestone 3.
 
 The project has one UI surface:
 
-- Workbench: a browser/Electron DAG viewer and node inspector backed by the
-  Python API.
+- Workbench: a browser/Electron planning-DAG viewer/editor and runtime console
+  backed by the Python API.
 
-Workbench Milestone 1 is complete. The next UI priority is a runtime console
-milestone that presents mission/workflow/ledger/replay state directly instead
-of only reflecting the planning DAG.
+Workbench Milestones 1 and 2 are complete. The UI now separates planning-DAG
+editing from runtime workflow inspection, and can present mission, ledger,
+gatekeeper, replay, and mutation state without reimplementing runtime rules in
+the frontend.
 
 ## North Star
 
@@ -310,17 +311,18 @@ Implementation note:
 
 ### B6: Runtime Console
 
-Status: planned as Workbench Milestone 2.
+Status: completed for Workbench Milestone 2.
 
 Goal: make the workbench a first-class surface for harness runtime state.
 
-Planned scope:
+Implemented scope:
 
 - Show runtime workflow separately from the planning DAG.
 - Visualize gatekeeper and replay state directly on the runtime graph.
 - Reflect accepted and rejected workflow mutations on the runtime canvas.
 - Expose ledger, assignment, supersession, and blocked-reason inspection
   without making the frontend invent business rules.
+- Let operators update runtime workflow and ledger paths from the UI.
 
 ## Where The Lines Meet
 
@@ -338,16 +340,17 @@ The workbench should gradually become the visual surface for harness runtime:
 This means the UI should not become a separate source of business rules. Python
 runtime remains the source of truth.
 
-The current workbench already proves that runtime APIs are consumable, but it
-does not yet synchronize the canvas and node list with the runtime workflow.
-That synchronization belongs to B6 rather than to the completed M1 viewer work.
+The current workbench consumes runtime APIs directly for workflow, mutation,
+gatekeeper, replay, mission, and ledger state. It still treats Python runtime
+responses as authoritative; frontend state is limited to presentation,
+selection, and operator input.
 
 ## Current Priority Order
 
 1. Complete A4 Advisor Policy outcome learning.
 2. Complete A5 Orchestrator Decision Artifacts.
 3. Open Runtime Harness Milestone 3 and land its acceptance spine.
-4. Build Workbench Milestone 2 Runtime Console.
+4. Define the next workbench milestone only after M3 API shapes stabilize.
 5. Return to post-M2.5 replay evolution only after runtime decisions and UI
    inspection surfaces are stable.
 
@@ -374,4 +377,4 @@ That synchronization belongs to B6 rather than to the completed M1 viewer work.
 - No full temporal workflow replay before the M3+ replay milestone.
 - No advisor policy auto-tuning by LLM.
 - No runtime canvas/list synchronization by ad hoc frontend state outside the
-  dedicated Workbench Milestone 2 runtime console work.
+  authoritative runtime API responses.
