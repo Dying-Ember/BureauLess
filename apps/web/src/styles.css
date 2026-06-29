@@ -994,8 +994,28 @@ button {
   margin: 0;
 }
 
-.runtime-node-shell .flow-handle {
-  opacity: 0;
+.runtime-node-shell {
+  height: 100%;
+  width: 100%;
+}
+
+.dag-node-shell {
+  height: 100%;
+  width: 100%;
+}
+
+.dag-flow-node {
+  height: 100%;
+  width: 100%;
+}
+
+.runtime-node-shell .flow-handle,
+.dag-node-shell .flow-handle {
+  opacity: 1;
+}
+
+.dag-node-shell .flow-handle {
+  transform: translateY(-50%);
 }
 
 @media (min-width: 1440px) {
@@ -1042,17 +1062,28 @@ button {
   border-left-style: dashed;
 }
 
+.runtime-flow-node {
+  box-sizing: border-box;
+  height: 100%;
+  overflow: hidden;
+  width: 100%;
+}
+
 .runtime-flow-node-header {
   align-items: baseline;
   display: flex;
   gap: 8px;
   justify-content: space-between;
+  min-width: 0;
 }
 
 .runtime-flow-node-header strong,
 .runtime-flow-node-header span,
 .runtime-flow-node small {
-  overflow-wrap: anywhere;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .runtime-flow-node-header strong {
@@ -1072,6 +1103,7 @@ button {
   display: flex;
   gap: 8px;
   justify-content: space-between;
+  min-width: 0;
 }
 
 .runtime-state-pill.superseded {
@@ -1085,6 +1117,9 @@ button {
 
 .runtime-flow-node-reason {
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .graph-canvas {

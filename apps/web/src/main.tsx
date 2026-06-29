@@ -11,9 +11,11 @@ import {
   MarkerType,
   Position,
   ReactFlow,
+  useReactFlow,
   ViewportPortal,
   type Connection,
   type Edge,
+  type EdgeProps,
   type EdgeMouseHandler,
   type Node,
   type NodeProps,
@@ -40,8 +42,9 @@ import {
   X,
   XCircle,
 } from 'lucide-react';
-import { StrictMode, useEffect, useMemo, useState } from 'react';
+import { StrictMode, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { createRoot } from 'react-dom/client';
+import ELK from './elk-layout.js';
 
 import {
   createNode,
@@ -119,6 +122,11 @@ type GraphDependencyDraft = {
 
 type FlowNodePositions = Record<string, XYPosition>;
 
+type FlowNodePort = {
+  id: string;
+  y: number;
+};
+
 type DagFlowNodeData = {
   title: string;
   recommendedModel: string;
@@ -140,9 +148,21 @@ type RuntimeFlowNodeData = {
   waitsForAny: string[];
   isTerminal: boolean;
   gateCount: number;
+  incomingPorts: FlowNodePort[];
+  outgoingPorts: FlowNodePort[];
 };
 
-type RuntimeFlowEdgeData = {
+type OrthogonalFlowEdgeData = {
+  sections: XYPosition[][];
+  eventRef?: string;
+  onSelectEdge?: (edge: { source: string; target: string; eventRef: string }) => void;
+  sourceIndex?: number;
+  sourceCount?: number;
+  targetIndex?: number;
+  targetCount?: number;
+};
+
+type RuntimeFlowEdgeData = OrthogonalFlowEdgeData & {
   eventRef: string;
 };
 
@@ -152,11 +172,58 @@ type RuntimeFlowLayout = {
   orderedNodes: Array<Node<RuntimeFlowNodeData>>;
 };
 
+type PlanningFlowLayout = {
+  nodes: Array<Node<DagFlowNodeData>>;
+  edges: Array<Edge<OrthogonalFlowEdgeData>>;
+  orderedNodes: Array<Node<DagFlowNodeData>>;
+};
+
+type DirectedFlowEdgeDescriptor = {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  sourceIndex: number;
+  sourceCount: number;
+  targetIndex: number;
+  targetCount: number;
+};
+
+type DirectedElkLayoutNode = {
+  id: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  ports?: Array<{
+    id: string;
+    x?: number;
+    y?: number;
+  }>;
+};
+
+type DirectedElkLayoutEdge = {
+  id: string;
+  sections?: Array<{
+    startPoint: XYPosition;
+    endPoint: XYPosition;
+    bendPoints?: XYPosition[];
+  }>;
+};
+
+type DirectedElkLayout = {
+  children?: DirectedElkLayoutNode[];
+  edges?: DirectedElkLayoutEdge[];
+};
+
 type DirectedNodeLayoutSpacing = {
   originX: number;
   originY: number;
   columnGap: number;
   rowGap: number;
+};
+
+type DirectedNodeLayoutOptions = {
+  levelStagger?: number;
 };
 
 const PLANNING_LAYOUT_SPACING: DirectedNodeLayoutSpacing = {
@@ -166,12 +233,38 @@ const PLANNING_LAYOUT_SPACING: DirectedNodeLayoutSpacing = {
   rowGap: 170,
 };
 
+const PLANNING_NODE_WIDTH = 220;
+const PLANNING_NODE_HEIGHT = 88;
+
 const RUNTIME_LAYOUT_SPACING: DirectedNodeLayoutSpacing = {
   originX: 72,
   originY: 112,
   columnGap: 400,
   rowGap: 220,
 };
+
+const RUNTIME_NODE_WIDTH = 228;
+const RUNTIME_NODE_HEIGHT = 120;
+
+const RUNTIME_ELK_LAYOUT_OPTIONS = {
+  'elk.algorithm': 'layered',
+  'elk.direction': 'RIGHT',
+  'elk.edgeRouting': 'ORTHOGONAL',
+  'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+  'elk.layered.considerModelOrder.longEdgeStrategy': 'DUMMY_NODE_OVER',
+  'elk.layered.spacing.nodeNodeBetweenLayers': '60',
+  'elk.layered.spacing.edgeNodeBetweenLayers': '25',
+  'elk.layered.spacing.edgeEdgeBetweenLayers': '18',
+};
+
+const runtimeElk = new ELK({
+  defaultLayoutOptions: RUNTIME_ELK_LAYOUT_OPTIONS,
+});
+
+const planningElk = runtimeElk;
+
+const DAG_ORTHOGONAL_EDGE_TYPE = 'dag-orthogonal';
+const RUNTIME_ORTHOGONAL_EDGE_TYPE = 'runtime-orthogonal';
 
 type DragPreviewState = {
   id: string;
@@ -235,20 +328,63 @@ function FlowNodeCard({ data, className = '' }: { data: DagFlowNodeData; classNa
   );
 }
 
-function DagFlowNode({ data }: NodeProps<Node<DagFlowNodeData>>) {
+function PlanningGraphViewportSync({ fitKey }: { fitKey: number }) {
+  const { fitView } = useReactFlow();
+
+  useEffect(() => {
+    let cancelled = false;
+    const frame = window.requestAnimationFrame(() => {
+      if (!cancelled) {
+        void fitView({ padding: 0.2, duration: 150 });
+      }
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+    };
+  }, [fitKey, fitView]);
+
+  return null;
+}
+
+function DagFlowNode({ id, data }: NodeProps<Node<DagFlowNodeData>>) {
   return (
-    <div className="flow-node-shell">
-      <Handle type="target" position={Position.Left} className="flow-handle target" />
-      <FlowNodeCard data={data} />
-      <Handle type="source" position={Position.Right} className="flow-handle source" />
+    <div className="flow-node-shell dag-node-shell">
+      <Handle
+        id={`${id}:in`}
+        type="target"
+        position={Position.Left}
+        className="flow-handle target"
+        style={{ top: '50%' }}
+      />
+      <FlowNodeCard data={data} className="dag-flow-node" />
+      <Handle
+        id={`${id}:out`}
+        type="source"
+        position={Position.Right}
+        className="flow-handle source"
+        style={{ top: '50%' }}
+      />
     </div>
   );
 }
 
 function RuntimeFlowNode({ id, data }: NodeProps<Node<RuntimeFlowNodeData>>) {
+  const incomingPorts = data.incomingPorts.length > 0 ? data.incomingPorts : [{ id: `${id}:in`, y: RUNTIME_NODE_HEIGHT / 2 }];
+  const outgoingPorts = data.outgoingPorts.length > 0 ? data.outgoingPorts : [{ id: `${id}:out`, y: RUNTIME_NODE_HEIGHT / 2 }];
+
   return (
     <div className="flow-node-shell runtime-node-shell">
-      <Handle type="target" position={Position.Left} className="flow-handle target" />
+      {incomingPorts.map((port) => (
+        <Handle
+          key={port.id}
+          id={port.id}
+          type="target"
+          position={Position.Left}
+          className="flow-handle target"
+          style={{ top: clampRuntimePortOffset(port.y) }}
+        />
+      ))}
       <div className={`flow-node runtime-flow-node state-${data.gatekeeperTone}`}>
         <div className="runtime-flow-node-header">
           <strong>{id}</strong>
@@ -261,10 +397,79 @@ function RuntimeFlowNode({ id, data }: NodeProps<Node<RuntimeFlowNodeData>>) {
         <small>{data.stateSummary}</small>
         {data.primaryReason ? <small className="runtime-flow-node-reason">{data.primaryReason}</small> : null}
       </div>
-      <Handle type="source" position={Position.Right} className="flow-handle source" />
+      {outgoingPorts.map((port) => (
+        <Handle
+          key={port.id}
+          id={port.id}
+          type="source"
+          position={Position.Right}
+          className="flow-handle source"
+          style={{ top: clampRuntimePortOffset(port.y) }}
+        />
+      ))}
     </div>
   );
 }
+
+function OrthogonalFlowEdge({
+  id,
+  markerEnd,
+  style,
+  source,
+  target,
+  data,
+  sourceX,
+  sourceY,
+  sourcePosition,
+  targetX,
+  targetY,
+    targetPosition,
+  interactionWidth,
+}: EdgeProps<Edge<OrthogonalFlowEdgeData>>) {
+  const path = runtimeEdgePath(data?.sections ?? [], {
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+    sourceIndex: data?.sourceIndex,
+    sourceCount: data?.sourceCount,
+    targetIndex: data?.targetIndex,
+    targetCount: data?.targetCount,
+  });
+  const handleSelect = () => {
+    data?.onSelectEdge?.({ source, target, eventRef: data?.eventRef ?? 'unavailable' });
+  };
+
+  return (
+    <g className="runtime-orthogonal-edge">
+      <path
+        id={id}
+        className="react-flow__edge-path"
+        d={path}
+        markerEnd={markerEnd}
+        style={style}
+        fill="none"
+        pointerEvents="none"
+      />
+      <path
+        d={path}
+        fill="none"
+        stroke="transparent"
+        strokeWidth={interactionWidth ?? 20}
+        pointerEvents="stroke"
+        onClick={handleSelect}
+        onPointerDown={handleSelect}
+      />
+    </g>
+  );
+}
+
+const ORTHOGONAL_EDGE_TYPES = {
+  [DAG_ORTHOGONAL_EDGE_TYPE]: OrthogonalFlowEdge,
+  [RUNTIME_ORTHOGONAL_EDGE_TYPE]: OrthogonalFlowEdge,
+};
 
 const FLOW_NODE_TYPES = {
   dag: DagFlowNode,
@@ -287,6 +492,10 @@ function Workbench() {
   const runs = useQuery({ queryKey: ['runs', paths.runsDir], queryFn: () => fetchRuns(paths.runsDir) });
   const [selectedId, setSelectedId] = useState<string | undefined>();
   const [selectedRuntimeNodeId, setSelectedRuntimeNodeId] = useState<string | undefined>();
+  const [selectedRuntimeEdge, setSelectedRuntimeEdge] = useState<{ source: string; target: string; eventRef: string } | null>(null);
+  const [elkPlanningFlow, setElkPlanningFlow] = useState<PlanningFlowLayout | null>(null);
+  const [planningGraphLayoutRevision, setPlanningGraphLayoutRevision] = useState(0);
+  const [elkRuntimeFlow, setElkRuntimeFlow] = useState<RuntimeFlowLayout | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>();
   const [isCreatingNode, setIsCreatingNode] = useState(false);
   const [inspectorHasUnsavedChanges, setInspectorHasUnsavedChanges] = useState(false);
@@ -398,6 +607,7 @@ function Workbench() {
   }, [validation.data?.ok, validation.error, validation.isError, validation.isLoading, validationErrors.length]);
 
   const dagNodes = dag.data?.nodes ?? [];
+  const dagEdges = dag.data?.edges ?? [];
   const readyNodeIds = state.data?.ready ?? [];
   const readyNodes = useMemo(
     () => readyNodeIds.map((nodeId) => dagNodes.find((node) => node.id === nodeId)).filter((node): node is TaskNode => Boolean(node)),
@@ -425,6 +635,31 @@ function Workbench() {
   );
   const selectedRun = selectedRuns.find((run) => run.run_id === selectedRunId) ?? selectedRuns[0];
   const hasManualLayout = dagNodes.some((node) => manualNodePositions[node.id] !== undefined);
+  const visibleDagEdges = useMemo(
+    () =>
+      graphDependencyDraft
+        ? [
+            ...dagEdges.filter((edge) => edge.target !== graphDependencyDraft.targetId),
+            ...graphDependencyDraft.dependencies.map((dependencyId) => ({
+              id: dependencyEdgeId(dependencyId, graphDependencyDraft.targetId),
+              source: dependencyId,
+              target: graphDependencyDraft.targetId,
+            })),
+        ]
+        : dagEdges,
+    [dagEdges, graphDependencyDraft],
+  );
+  const draftDagEdgeIds = useMemo(
+    () => new Set(graphDependencyDraft?.dependencies.map((dependencyId) => dependencyEdgeId(dependencyId, graphDependencyDraft.targetId)) ?? []),
+    [graphDependencyDraft],
+  );
+  const manualPlanningFlow = useMemo<PlanningFlowLayout | null>(() => {
+    if (dagNodes.length === 0) {
+      return null;
+    }
+    return buildPlanningFlowLayoutFallback(dagNodes, visibleDagEdges);
+  }, [dagNodes, visibleDagEdges]);
+  const planningFlow = elkPlanningFlow ?? manualPlanningFlow;
 
   useEffect(() => {
     if (dagNodes.length === 0) {
@@ -470,23 +705,54 @@ function Workbench() {
     }
   }, [dagNodes, graphDependencyDraft, graphDependencyMutation]);
 
-  const flowNodes = useMemo<Node[]>(() => {
-    const automaticPositions = computeFlowNodePositions(
-      dagNodes,
-      dagNodes.map((node) => ({
-        id: node.id,
-        dependencies:
-          graphDependencyDraft?.targetId === node.id
-            ? graphDependencyDraft.dependencies
-            : node.dependencies,
-      })),
+  useEffect(() => {
+    let cancelled = false;
+
+    if (dagNodes.length === 0) {
+      setElkPlanningFlow(null);
+      return;
+    }
+
+    setElkPlanningFlow(null);
+    void buildPlanningFlowLayout(dagNodes, visibleDagEdges).then(
+      (layout) => {
+        if (!cancelled) {
+          setElkPlanningFlow(layout);
+        }
+      },
+      (error) => {
+        console.warn('Planning ELK layout failed, falling back to manual routing.', error);
+      },
     );
 
+    return () => {
+      cancelled = true;
+    };
+  }, [dagNodes, visibleDagEdges]);
+
+  useEffect(() => {
+    if (elkPlanningFlow) {
+      setPlanningGraphLayoutRevision((current) => current + 1);
+    }
+  }, [elkPlanningFlow]);
+
+  const flowNodes = useMemo<Node<DagFlowNodeData>[]>(() => {
+    const planningNodesById = new Map((planningFlow?.nodes ?? []).map((node) => [node.id, node] as const));
+
     return dagNodes.map((node) => {
+      const planningNode = planningNodesById.get(node.id);
       const nodeState = state.data?.states[node.id] ?? 'blocked';
       return {
         id: node.id,
-        position: manualNodePositions[node.id] ?? automaticPositions.get(node.id) ?? { x: 80, y: 120 },
+        selected: node.id === selectedId,
+        position:
+          manualNodePositions[node.id] ??
+          planningNode?.position ??
+          { x: PLANNING_LAYOUT_SPACING.originX, y: PLANNING_LAYOUT_SPACING.originY },
+        style: planningNode?.style ?? {
+          width: PLANNING_NODE_WIDTH,
+          height: PLANNING_NODE_HEIGHT,
+        },
         data: {
           title: node.title,
           recommendedModel: node.recommended_model,
@@ -499,35 +765,14 @@ function Workbench() {
         type: 'dag',
       };
     });
-  }, [dagNodes, graphDependencyDraft, manualNodePositions, state.data]);
+  }, [dagNodes, manualNodePositions, planningFlow, selectedId, state.data]);
 
-  const flowEdges = useMemo<Edge[]>(() => {
-    const persistedEdges = dag.data?.edges ?? [];
-    const draftEdgeIds = new Set(
-      graphDependencyDraft?.dependencies.map((dependencyId) => dependencyEdgeId(dependencyId, graphDependencyDraft.targetId)) ?? [],
-    );
-    const visibleEdges = graphDependencyDraft
-      ? [
-          ...persistedEdges.filter((edge) => edge.target !== graphDependencyDraft.targetId),
-          ...graphDependencyDraft.dependencies.map((dependencyId) => ({
-            id: dependencyEdgeId(dependencyId, graphDependencyDraft.targetId),
-            source: dependencyId,
-            target: graphDependencyDraft.targetId,
-          })),
-        ]
-      : persistedEdges;
-
-    return visibleEdges.map((edge) => ({
+  const flowEdges = useMemo<Edge<OrthogonalFlowEdgeData>[]>(() => {
+    return (planningFlow?.edges ?? []).map((edge) => ({
       ...edge,
-      animated: true,
-      ariaLabel: `${edge.source} dependency for ${edge.target}`,
-      className: draftEdgeIds.has(edge.id) ? 'flow-edge draft' : 'flow-edge',
-      deletable: true,
-      focusable: true,
-      interactionWidth: 24,
-      type: 'smoothstep',
+      className: draftDagEdgeIds.has(edge.id) ? 'flow-edge draft' : 'flow-edge',
     }));
-  }, [dag.data?.edges, graphDependencyDraft]);
+  }, [draftDagEdgeIds, planningFlow]);
 
   const confirmDiscardInspectorChanges = () => {
     if (!inspectorHasUnsavedChanges) {
@@ -579,6 +824,7 @@ function Workbench() {
   const resetGraphLayout = () => {
     setManualNodePositions({});
     persistGraphNodePositions(paths.dagPath, {});
+    setPlanningGraphLayoutRevision((current) => current + 1);
   };
 
   const startDraggedNodePreview = (node: Node<DagFlowNodeData>) => {
@@ -775,14 +1021,48 @@ function Workbench() {
       : null);
   const runtimeWorkflow = mutations.data?.current_workflow ?? null;
   const runtimeCurrentNodeIds = runtimeWorkflow?.nodes.map((node) => node.id) ?? [];
-  const runtimeFlow = useMemo<RuntimeFlowLayout | null>(() => {
+  const manualRuntimeFlow = useMemo<RuntimeFlowLayout | null>(() => {
     if (!runtimeWorkflow) {
       return null;
     }
-    return buildRuntimeFlowLayout(runtimeWorkflow, gatekeeper.data?.decisions ?? {}, selectedRuntimeNodeId);
+    return buildRuntimeFlowLayoutFallback(
+      runtimeWorkflow,
+      gatekeeper.data?.decisions ?? {},
+      selectedRuntimeNodeId,
+      (edge) => setSelectedRuntimeEdge(edge),
+    );
   }, [gatekeeper.data?.decisions, runtimeWorkflow, selectedRuntimeNodeId]);
+  const runtimeFlow = elkRuntimeFlow ?? manualRuntimeFlow;
   const planningViewActive = viewMode === 'planning';
   const firstRuntimeNodeId = runtimeFlow?.orderedNodes[0]?.id ?? runtimeCurrentNodeIds[0];
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!runtimeWorkflow) {
+      setElkRuntimeFlow(null);
+      setSelectedRuntimeEdge(null);
+      return;
+    }
+
+    setElkRuntimeFlow(null);
+    void buildRuntimeFlowLayout(
+      runtimeWorkflow,
+      gatekeeper.data?.decisions ?? {},
+      selectedRuntimeNodeId,
+      (edge) => setSelectedRuntimeEdge(edge),
+    ).then(
+      (layout) => {
+        if (!cancelled) {
+          setElkRuntimeFlow(layout);
+        }
+      },
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [gatekeeper.data?.decisions, runtimeWorkflow, selectedRuntimeNodeId]);
 
   useEffect(() => {
     if (runtimeCurrentNodeIds.length === 0) {
@@ -1101,8 +1381,9 @@ function Workbench() {
                     edges={flowEdges}
                     fitView
                     nodeTypes={FLOW_NODE_TYPES}
+                    edgeTypes={ORTHOGONAL_EDGE_TYPES}
                     connectionLineType={ConnectionLineType.SmoothStep}
-                    defaultEdgeOptions={{ type: 'smoothstep' }}
+                    defaultEdgeOptions={{ type: DAG_ORTHOGONAL_EDGE_TYPE }}
                     onNodeClick={(_, node) => attemptSelectNode(node.id)}
                     onNodeDragStart={(_, node) => startDraggedNodePreview(node as Node<DagFlowNodeData>)}
                     onNodeDrag={(_, node) => updateDraggedNodePreview(node as Node<DagFlowNodeData>)}
@@ -1114,6 +1395,7 @@ function Workbench() {
                   >
                     <Background gap={18} />
                     <Controls showInteractive={false} />
+                    <PlanningGraphViewportSync fitKey={planningGraphLayoutRevision} />
                     {dragPreview ? (
                       <ViewportPortal>
                         <div
@@ -1191,7 +1473,9 @@ function Workbench() {
               isLoading={mutations.isLoading || gatekeeper.isLoading}
               isSyncing={runtimeDecisionSyncing}
               selectedNodeId={selectedRuntimeNodeId}
+              selectedEdge={selectedRuntimeEdge}
               onSelectNode={(nodeId) => setSelectedRuntimeNodeId(nodeId)}
+              onSelectEdge={setSelectedRuntimeEdge}
             />
             <MutationPanel
               proposals={mutations.data?.proposals ?? []}
@@ -1296,7 +1580,9 @@ function RuntimeWorkflowOverview({
   isLoading,
   isSyncing,
   selectedNodeId,
+  selectedEdge,
   onSelectNode,
+  onSelectEdge,
 }: {
   workflowId: string;
   workflowPath: string;
@@ -1325,7 +1611,9 @@ function RuntimeWorkflowOverview({
   isLoading: boolean;
   isSyncing: boolean;
   selectedNodeId?: string;
+  selectedEdge: { source: string; target: string; eventRef: string } | null;
   onSelectNode: (nodeId: string) => void;
+  onSelectEdge: (edge: { source: string; target: string; eventRef: string } | null) => void;
 }) {
   const pendingCount = proposals.filter((proposal) => proposal.state === 'pending').length;
   const currentNodeIds = workflow?.nodes.map((node) => node.id) ?? [];
@@ -1347,12 +1635,34 @@ function RuntimeWorkflowOverview({
   const needsReviewCount = runtimeFlow?.nodes.filter((node) => node.data.gatekeeperTone === 'needs_review').length ?? 0;
   const completedCount = runtimeFlow?.nodes.filter((node) => node.data.gatekeeperTone === 'completed').length ?? 0;
   const supersededCount = runtimeFlow?.nodes.filter((node) => node.data.gatekeeperTone === 'superseded').length ?? 0;
-  const [selectedEdge, setSelectedEdge] = useState<{ source: string; target: string; eventRef: string } | null>(null);
   const artifactCount = ledgerQuery.data?.artifacts.length ?? 0;
   const riskCount = ledgerQuery.data?.risks.length ?? 0;
   const decisionCount = ledgerQuery.data?.decisions.length ?? 0;
   const missionGoal = missionQuery.data?.goal ?? ledgerQuery.data?.current_goal ?? 'unavailable';
   const missionStatus = missionQuery.data?.status ?? 'unavailable';
+
+  const handleRuntimeGraphPointerDownCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    const edgeElement = target?.closest('[role="img"][aria-roledescription="edge"]');
+    if (!edgeElement || !runtimeFlow) {
+      return;
+    }
+    const edgeId = edgeElement.getAttribute('data-id');
+    if (!edgeId) {
+      return;
+    }
+    const selectedRuntimeGraphEdge = runtimeFlow.edges.find((edge) => edge.id === edgeId);
+    if (!selectedRuntimeGraphEdge) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    onSelectEdge({
+      source: selectedRuntimeGraphEdge.source,
+      target: selectedRuntimeGraphEdge.target,
+      eventRef: selectedRuntimeGraphEdge.data?.eventRef ?? 'unavailable',
+    });
+  };
 
   return (
     <section className="runtime-pane" aria-labelledby="runtime-workflow-summary-heading">
@@ -1478,7 +1788,7 @@ function RuntimeWorkflowOverview({
             <span>{proposals.length > 0 ? 'Accepted decisions redraw this canvas.' : 'No workflow mutations recorded.'}</span>
           </div>
         </div>
-        <div className="runtime-graph-canvas">
+        <div className="runtime-graph-canvas" onPointerDownCapture={handleRuntimeGraphPointerDownCapture}>
           {!runtimeFlow || runtimeFlow.nodes.length === 0 ? (
             <div className="empty-state-card" role="status" aria-live="polite">
               <strong>No runtime nodes</strong>
@@ -1490,14 +1800,15 @@ function RuntimeWorkflowOverview({
               edges={runtimeFlow.edges}
               fitView
               nodeTypes={FLOW_NODE_TYPES}
+              edgeTypes={ORTHOGONAL_EDGE_TYPES}
               connectionLineType={ConnectionLineType.SmoothStep}
               defaultEdgeOptions={{ type: 'smoothstep' }}
               nodesDraggable={false}
               nodesConnectable={false}
-              elementsSelectable={false}
+              elementsSelectable={true}
               onNodeClick={(_, node) => onSelectNode(node.id)}
               onEdgeClick={(_, edge) =>
-                setSelectedEdge({
+                onSelectEdge({
                   source: edge.source,
                   target: edge.target,
                   eventRef: edge.data?.eventRef ?? 'unavailable',
@@ -1517,7 +1828,7 @@ function RuntimeWorkflowOverview({
                 <strong>{selectedEdge.source} &rarr; {selectedEdge.target}</strong>
                 <code>{selectedEdge.eventRef}</code>
               </div>
-              <button type="button" className="icon-button" onClick={() => setSelectedEdge(null)} aria-label="Clear edge selection">
+              <button type="button" className="icon-button" onClick={() => onSelectEdge(null)} aria-label="Clear edge selection">
                 <X size={14} />
               </button>
             </div>
@@ -2125,29 +2436,305 @@ function runtimeNodeDependencyIds(workflow: RuntimeWorkflow, node: RuntimeWorkfl
   return [...new Set(dependencies)];
 }
 
-function runtimeWorkflowEdges(workflow: RuntimeWorkflow): Edge<RuntimeFlowEdgeData>[] {
-  return workflow.nodes.flatMap((node) =>
-    runtimeWorkflowDependencies(workflow, node).map((dependency) => ({
-      id: `runtime:${dependency.sourceId}:${node.id}:${dependency.eventRef}:${dependency.branch}`,
-      source: dependency.sourceId,
-      target: node.id,
-      ariaLabel: `${dependency.sourceId} triggers ${dependency.eventRef} for ${node.id}`,
-      className: dependency.branch === 'any' ? 'flow-edge runtime any' : 'flow-edge runtime',
-      data: { eventRef: dependency.eventRef },
-      focusable: false,
-      interactionWidth: 20,
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-        width: 16,
-        height: 16,
-        color: dependency.branch === 'any' ? 'var(--review)' : 'var(--accent)',
-      },
-      pathOptions: {
-        borderRadius: 24,
-        offset: 44,
-      },
-      type: 'smoothstep',
+type RuntimeWorkflowEdgeDescriptor = {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  eventRef: string;
+  branch: 'all' | 'any';
+  sourcePortId: string;
+  targetPortId: string;
+};
+
+type RuntimeElkLayoutNode = DirectedElkLayoutNode;
+type RuntimeElkLayoutEdge = DirectedElkLayoutEdge;
+type RuntimeElkLayout = DirectedElkLayout;
+
+function runtimeWorkflowEdges(
+  descriptors: RuntimeWorkflowEdgeDescriptor[],
+  sectionsByEdgeId: Map<string, XYPosition[][]> = new Map(),
+  onSelectEdge?: (edge: { source: string; target: string; eventRef: string }) => void,
+): Edge<RuntimeFlowEdgeData>[] {
+  return descriptors.map((dependency) => ({
+    id: dependency.id,
+    source: dependency.sourceId,
+    sourceHandle: dependency.sourcePortId,
+    target: dependency.targetId,
+    targetHandle: dependency.targetPortId,
+    ariaLabel: `${dependency.sourceId} triggers ${dependency.eventRef} for ${dependency.targetId}`,
+    className: dependency.branch === 'any' ? 'flow-edge runtime any' : 'flow-edge runtime',
+    data: {
+      eventRef: dependency.eventRef,
+      sections: sectionsByEdgeId.get(dependency.id) ?? [],
+      onSelectEdge,
+    },
+    focusable: false,
+    interactionWidth: 20,
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      width: 16,
+      height: 16,
+      color: dependency.branch === 'any' ? 'var(--review)' : 'var(--accent)',
+    },
+    pathOptions: {
+      borderRadius: 24,
+      offset: 44,
+    },
+    type: 'runtime-orthogonal',
+  }));
+}
+
+type PlanningFlowEdgeDescriptor = DirectedFlowEdgeDescriptor;
+
+function planningFlowEdgeDescriptors(
+  nodes: TaskNode[],
+  edges: Array<{ id: string; source: string; target: string }>,
+): PlanningFlowEdgeDescriptor[] {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const validEdges = edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target) && edge.source !== edge.target);
+  const sourceCounts = new Map<string, number>();
+  const targetCounts = new Map<string, number>();
+  for (const edge of validEdges) {
+    sourceCounts.set(edge.source, (sourceCounts.get(edge.source) ?? 0) + 1);
+    targetCounts.set(edge.target, (targetCounts.get(edge.target) ?? 0) + 1);
+  }
+  const sourceIndexes = new Map<string, number>();
+  const targetIndexes = new Map<string, number>();
+
+  return validEdges.map((edge) => {
+    const sourceIndex = sourceIndexes.get(edge.source) ?? 0;
+    sourceIndexes.set(edge.source, sourceIndex + 1);
+    const targetIndex = targetIndexes.get(edge.target) ?? 0;
+    targetIndexes.set(edge.target, targetIndex + 1);
+    return {
+      id: edge.id,
+      sourceId: edge.source,
+      targetId: edge.target,
+      sourceIndex,
+      sourceCount: sourceCounts.get(edge.source) ?? 1,
+      targetIndex,
+      targetCount: targetCounts.get(edge.target) ?? 1,
+    };
+  });
+}
+
+function buildPlanningElkGraph(nodes: TaskNode[], edgeDescriptors: PlanningFlowEdgeDescriptor[]): any {
+  return {
+    id: 'root',
+    layoutOptions: RUNTIME_ELK_LAYOUT_OPTIONS,
+    children: nodes.map((node) => {
+      return {
+        id: node.id,
+        width: PLANNING_NODE_WIDTH,
+        height: PLANNING_NODE_HEIGHT,
+        layoutOptions: {
+          'elk.portConstraints': 'FIXED_SIDE',
+        },
+        ports: [
+          {
+            id: `${node.id}:in`,
+            width: 0,
+            height: 0,
+            layoutOptions: {
+              'elk.port.side': 'WEST',
+              'elk.port.index': '0',
+            },
+          },
+          {
+            id: `${node.id}:out`,
+            width: 0,
+            height: 0,
+            layoutOptions: {
+              'elk.port.side': 'EAST',
+              'elk.port.index': '0',
+            },
+          },
+        ],
+      };
+    }),
+    edges: edgeDescriptors.map((descriptor) => ({
+      id: descriptor.id,
+      sources: [`${descriptor.sourceId}:out`],
+      targets: [`${descriptor.targetId}:in`],
     })),
+  };
+}
+
+function buildPlanningFlowLayoutFallback(nodes: TaskNode[], edges: Array<{ id: string; source: string; target: string }>): PlanningFlowLayout {
+  const edgeDescriptors = planningFlowEdgeDescriptors(nodes, edges);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const dependenciesById = new Map(nodes.map((node) => [node.id, [] as string[]] as const));
+  for (const edge of edges) {
+    if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) {
+      continue;
+    }
+    dependenciesById.get(edge.target)?.push(edge.source);
+  }
+  const dependencyView = nodes.map((node) => ({
+    id: node.id,
+    dependencies: dependenciesById.get(node.id) ?? [],
+  }));
+  const positions = computeDirectedNodePositions(nodes, dependencyView, PLANNING_LAYOUT_SPACING, {
+    levelStagger: PLANNING_LAYOUT_SPACING.rowGap,
+  });
+
+  const flowNodes = nodes.map((node) => ({
+    id: node.id,
+    position: positions.get(node.id) ?? { x: PLANNING_LAYOUT_SPACING.originX, y: PLANNING_LAYOUT_SPACING.originY },
+    style: {
+      width: PLANNING_NODE_WIDTH,
+      height: PLANNING_NODE_HEIGHT,
+    },
+    data: {
+      title: node.title,
+      recommendedModel: node.recommended_model,
+      reviewGate: node.review_gate,
+      nodeState: 'blocked',
+      riskLevel: node.risk_level,
+    },
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
+    type: 'dag',
+  }));
+
+  const flowEdges = planningFlowEdges(edgeDescriptors, new Map());
+
+  const orderedNodes = flowNodes
+    .slice()
+    .sort((left, right) => {
+      const leftPosition = positions.get(left.id) ?? { x: 0, y: 0 };
+      const rightPosition = positions.get(right.id) ?? { x: 0, y: 0 };
+      return leftPosition.x - rightPosition.x || leftPosition.y - rightPosition.y || left.id.localeCompare(right.id);
+    });
+
+  return {
+    nodes: flowNodes,
+    edges: flowEdges,
+    orderedNodes,
+  };
+}
+
+async function buildPlanningFlowLayout(nodes: TaskNode[], edges: Array<{ id: string; source: string; target: string }>): Promise<PlanningFlowLayout> {
+  const edgeDescriptors = planningFlowEdgeDescriptors(nodes, edges);
+  const elkGraph = buildPlanningElkGraph(nodes, edgeDescriptors);
+  const laidOut = (await planningElk.layout(elkGraph)) as DirectedElkLayout;
+  const layoutNodesById = new Map((laidOut.children ?? []).map((child) => [child.id, child] as const));
+  const sectionsByEdgeId = new Map<string, XYPosition[][]>();
+  const positions = new Map<string, { x: number; y: number }>();
+
+  for (const node of nodes) {
+    const layoutNode = layoutNodesById.get(node.id);
+    if (layoutNode) {
+      positions.set(node.id, {
+        x: layoutNode.x ?? PLANNING_LAYOUT_SPACING.originX,
+        y: layoutNode.y ?? PLANNING_LAYOUT_SPACING.originY,
+      });
+    }
+  }
+
+  for (const edge of laidOut.edges ?? []) {
+    sectionsByEdgeId.set(
+      edge.id,
+      (edge.sections ?? []).map((section) => [
+        section.startPoint,
+        ...(section.bendPoints ?? []),
+        section.endPoint,
+      ]),
+    );
+  }
+
+  const flowNodes = nodes.map((node) => ({
+    id: node.id,
+    position: positions.get(node.id) ?? { x: PLANNING_LAYOUT_SPACING.originX, y: PLANNING_LAYOUT_SPACING.originY },
+    style: {
+      width: PLANNING_NODE_WIDTH,
+      height: PLANNING_NODE_HEIGHT,
+    },
+    data: {
+      title: node.title,
+      recommendedModel: node.recommended_model,
+      reviewGate: node.review_gate,
+      nodeState: 'blocked',
+      riskLevel: node.risk_level,
+    },
+    sourcePosition: Position.Right,
+    targetPosition: Position.Left,
+    type: 'dag',
+  }));
+
+  const flowEdges = planningFlowEdges(edgeDescriptors, sectionsByEdgeId);
+
+  const orderedNodes = flowNodes
+    .slice()
+    .sort((left, right) => {
+      const leftPosition = positions.get(left.id) ?? { x: 0, y: 0 };
+      const rightPosition = positions.get(right.id) ?? { x: 0, y: 0 };
+      return leftPosition.x - rightPosition.x || leftPosition.y - rightPosition.y || left.id.localeCompare(right.id);
+    });
+
+  return {
+    nodes: flowNodes,
+    edges: flowEdges,
+    orderedNodes,
+  };
+}
+
+function planningFlowEdges(
+  descriptors: PlanningFlowEdgeDescriptor[],
+  sectionsByEdgeId: Map<string, XYPosition[][]> = new Map(),
+): Edge<OrthogonalFlowEdgeData>[] {
+  return descriptors.map((descriptor) => ({
+    id: descriptor.id,
+    source: descriptor.sourceId,
+    sourceHandle: `${descriptor.sourceId}:out`,
+    target: descriptor.targetId,
+    targetHandle: `${descriptor.targetId}:in`,
+    ariaLabel: `${descriptor.sourceId} dependency for ${descriptor.targetId}`,
+    animated: true,
+    data: {
+      sections: sectionsByEdgeId.get(descriptor.id) ?? [],
+      sourceIndex: descriptor.sourceIndex,
+      sourceCount: descriptor.sourceCount,
+      targetIndex: descriptor.targetIndex,
+      targetCount: descriptor.targetCount,
+    },
+    deletable: true,
+    focusable: true,
+    interactionWidth: 24,
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      width: 16,
+      height: 16,
+      color: 'var(--accent)',
+    },
+    pathOptions: {
+      borderRadius: 24,
+      offset: 44,
+    },
+    type: DAG_ORTHOGONAL_EDGE_TYPE,
+  }));
+}
+
+function runtimeWorkflowEdgeDescriptors(workflow: RuntimeWorkflow): RuntimeWorkflowEdgeDescriptor[] {
+  const sourcePortIndexes = new Map<string, number>();
+  const targetPortIndexes = new Map<string, number>();
+
+  return workflow.nodes.flatMap((node) =>
+    runtimeWorkflowDependencies(workflow, node).map((dependency) => {
+      const sourcePortIndex = sourcePortIndexes.get(dependency.sourceId) ?? 0;
+      sourcePortIndexes.set(dependency.sourceId, sourcePortIndex + 1);
+      const targetPortIndex = targetPortIndexes.get(node.id) ?? 0;
+      targetPortIndexes.set(node.id, targetPortIndex + 1);
+      return {
+        id: `runtime:${dependency.sourceId}:${node.id}:${dependency.eventRef}:${dependency.branch}`,
+        sourceId: dependency.sourceId,
+        targetId: node.id,
+        eventRef: dependency.eventRef,
+        branch: dependency.branch,
+        sourcePortId: `${dependency.sourceId}:out:${sourcePortIndex}`,
+        targetPortId: `${node.id}:in:${targetPortIndex}`,
+      };
+    }),
   );
 }
 
@@ -2180,16 +2767,160 @@ function runtimeWorkflowDependencies(
   return [...resolveRefs(waitsFor.allOf, 'all'), ...resolveRefs(waitsFor.anyOf, 'any')];
 }
 
-function buildRuntimeFlowLayout(
+function directedFlowNodePortLayouts(
+  nodeIds: string[],
+  edgeDescriptors: Array<{
+    sourceId: string;
+    targetId: string;
+    sourcePortId: string;
+    targetPortId: string;
+  }>,
+  nodeHeight: number,
+  layoutNodesById?: Map<string, DirectedElkLayoutNode>,
+): Map<string, { incomingPorts: FlowNodePort[]; outgoingPorts: FlowNodePort[] }> {
+  const nodePorts = new Map<string, { incomingPorts: FlowNodePort[]; outgoingPorts: FlowNodePort[] }>();
+
+  for (const nodeId of nodeIds) {
+    const layoutNode = layoutNodesById?.get(nodeId);
+    const layoutPortsById = new Map(layoutNode?.ports?.map((port) => [port.id, port] as const) ?? []);
+    const incomingEdges = edgeDescriptors.filter((descriptor) => descriptor.targetId === nodeId);
+    const outgoingEdges = edgeDescriptors.filter((descriptor) => descriptor.sourceId === nodeId);
+    const incomingFallbackYs = directedPortOffsets(incomingEdges.length, nodeHeight);
+    const outgoingFallbackYs = directedPortOffsets(outgoingEdges.length, nodeHeight);
+    nodePorts.set(nodeId, {
+      incomingPorts: incomingEdges.map((descriptor, index) => ({
+        id: descriptor.targetPortId,
+        y: clampFlowPortOffset(layoutPortsById.get(descriptor.targetPortId)?.y ?? incomingFallbackYs[index] ?? nodeHeight / 2, nodeHeight),
+      })),
+      outgoingPorts: outgoingEdges.map((descriptor, index) => ({
+        id: descriptor.sourcePortId,
+        y: clampFlowPortOffset(layoutPortsById.get(descriptor.sourcePortId)?.y ?? outgoingFallbackYs[index] ?? nodeHeight / 2, nodeHeight),
+      })),
+    });
+  }
+
+  return nodePorts;
+}
+
+function directedPortOffsets(count: number, nodeHeight: number): number[] {
+  if (count <= 0) {
+    return [];
+  }
+  if (count === 1) {
+    return [nodeHeight / 2];
+  }
+  const top = 18;
+  const bottom = nodeHeight - 18;
+  const step = (bottom - top) / (count - 1);
+  return Array.from({ length: count }, (_, index) => top + index * step);
+}
+
+function clampFlowPortOffset(offset: number, nodeHeight: number): number {
+  return Math.max(12, Math.min(nodeHeight - 12, offset));
+}
+
+function directedEdgePath(
+  sections: XYPosition[][],
+  fallback: {
+    sourceX: number;
+    sourceY: number;
+    sourcePosition: Position;
+    targetX: number;
+    targetY: number;
+    targetPosition: Position;
+    sourceIndex?: number;
+    sourceCount?: number;
+    targetIndex?: number;
+    targetCount?: number;
+  },
+): string {
+  if (sections.length > 0 && areEdgeSectionsAnchoredToFallback(sections, fallback)) {
+    return sections
+      .map((section) => {
+        if (section.length === 0) {
+          return '';
+        }
+        const [firstPoint, ...rest] = section;
+        return `M ${firstPoint.x} ${firstPoint.y} ${rest.map((point) => `L ${point.x} ${point.y}`).join(' ')}`.trim();
+      })
+      .filter((segment) => segment.length > 0)
+      .join(' ');
+  }
+
+  return orthogonalEdgePath(fallback);
+}
+
+function areEdgeSectionsAnchoredToFallback(
+  sections: XYPosition[][],
+  fallback: {
+    sourceX: number;
+    sourceY: number;
+    targetX: number;
+    targetY: number;
+  },
+): boolean {
+  const firstSection = sections[0];
+  const lastSection = sections[sections.length - 1];
+  if (!firstSection || firstSection.length === 0 || !lastSection || lastSection.length === 0) {
+    return false;
+  }
+  const startPoint = firstSection[0];
+  const endPoint = lastSection[lastSection.length - 1];
+  return (
+    Math.abs(startPoint.x - fallback.sourceX) < 1.5 &&
+    Math.abs(startPoint.y - fallback.sourceY) < 1.5 &&
+    Math.abs(endPoint.x - fallback.targetX) < 1.5 &&
+    Math.abs(endPoint.y - fallback.targetY) < 1.5
+  );
+}
+
+function orthogonalEdgePath(fallback: {
+  sourceX: number;
+  sourceY: number;
+  sourcePosition: Position;
+  targetX: number;
+  targetY: number;
+  targetPosition: Position;
+  sourceIndex?: number;
+  sourceCount?: number;
+  targetIndex?: number;
+  targetCount?: number;
+}): string {
+  const sourceSpread = balanceIndexOffset(fallback.sourceIndex ?? 0, fallback.sourceCount ?? 1, 8);
+  const targetSpread = balanceIndexOffset(fallback.targetIndex ?? 0, fallback.targetCount ?? 1, 8);
+  const sourceY = fallback.sourceY + sourceSpread;
+  const targetY = fallback.targetY + targetSpread;
+  const corridorX = (fallback.sourceX + fallback.targetX) / 2;
+  return [
+    `M ${fallback.sourceX} ${sourceY}`,
+    `L ${corridorX} ${sourceY}`,
+    `L ${corridorX} ${targetY}`,
+    `L ${fallback.targetX} ${targetY}`,
+  ].join(' ');
+}
+
+function balanceIndexOffset(index: number, count: number, spacing: number): number {
+  if (count <= 1) {
+    return 0;
+  }
+  return (index - (count - 1) / 2) * spacing;
+}
+
+function buildRuntimeFlowLayoutFallback(
   workflow: RuntimeWorkflow,
   decisions: Record<string, GatekeeperDecision>,
-  selectedNodeId?: string,
+  selectedNodeId: string | undefined,
+  onSelectEdge?: (edge: { source: string; target: string; eventRef: string }) => void,
 ): RuntimeFlowLayout {
+  const edgeDescriptors = runtimeWorkflowEdgeDescriptors(workflow);
   const dependencyView = workflow.nodes.map((node) => ({
     id: node.id,
     dependencies: runtimeNodeDependencyIds(workflow, node),
   }));
-  const positions = computeDirectedNodePositions(workflow.nodes, dependencyView, RUNTIME_LAYOUT_SPACING);
+  const positions = computeDirectedNodePositions(workflow.nodes, dependencyView, RUNTIME_LAYOUT_SPACING, {
+    levelStagger: RUNTIME_LAYOUT_SPACING.rowGap,
+  });
+  const portLayouts = runtimeFlowNodePortLayouts(workflow, edgeDescriptors);
   const terminalEvents = new Set(workflow.terminal_events);
   const gateCounts = workflow.gates.reduce<Map<string, number>>((counts, gate) => {
     counts.set(gate.node_id, (counts.get(gate.node_id) ?? 0) + 1);
@@ -2212,7 +2943,11 @@ function buildRuntimeFlowLayout(
     return {
       id: node.id,
       selected: node.id === selectedNodeId,
-      position: positions.get(node.id) ?? { x: 80, y: 120 },
+      position: positions.get(node.id) ?? { x: RUNTIME_LAYOUT_SPACING.originX, y: RUNTIME_LAYOUT_SPACING.originY },
+      style: {
+        width: RUNTIME_NODE_WIDTH,
+        height: RUNTIME_NODE_HEIGHT,
+      },
       data: {
         role: node.role,
         gatekeeperState: decision?.state ?? 'unknown',
@@ -2226,6 +2961,8 @@ function buildRuntimeFlowLayout(
         waitsForAny: waitsFor.anyOf,
         isTerminal: node.emits.some((eventName) => terminalEvents.has(eventName)),
         gateCount: gateCounts.get(node.id) ?? 0,
+        incomingPorts: portLayouts.get(node.id)?.incomingPorts ?? [],
+        outgoingPorts: portLayouts.get(node.id)?.outgoingPorts ?? [],
       },
       sourcePosition: Position.Right,
       targetPosition: Position.Left,
@@ -2239,9 +2976,215 @@ function buildRuntimeFlowLayout(
 
   return {
     nodes,
-    edges: runtimeWorkflowEdges(workflow),
+    edges: runtimeWorkflowEdges(edgeDescriptors, new Map(), onSelectEdge),
     orderedNodes,
   };
+}
+
+async function buildRuntimeFlowLayout(
+  workflow: RuntimeWorkflow,
+  decisions: Record<string, GatekeeperDecision>,
+  selectedNodeId: string | undefined,
+  onSelectEdge?: (edge: { source: string; target: string; eventRef: string }) => void,
+): Promise<RuntimeFlowLayout> {
+  const edgeDescriptors = runtimeWorkflowEdgeDescriptors(workflow);
+  const fallbackLayout = buildRuntimeFlowLayoutFallback(workflow, decisions, selectedNodeId, onSelectEdge);
+  try {
+    return await buildRuntimeFlowLayoutWithElk(workflow, decisions, selectedNodeId, edgeDescriptors, onSelectEdge);
+  } catch (error) {
+    console.warn('Runtime ELK layout failed, falling back to manual routing.', error);
+    return fallbackLayout;
+  }
+}
+
+async function buildRuntimeFlowLayoutWithElk(
+  workflow: RuntimeWorkflow,
+  decisions: Record<string, GatekeeperDecision>,
+  selectedNodeId: string | undefined,
+  edgeDescriptors: RuntimeWorkflowEdgeDescriptor[],
+  onSelectEdge?: (edge: { source: string; target: string; eventRef: string }) => void,
+): Promise<RuntimeFlowLayout> {
+  const elkGraph = buildRuntimeElkGraph(workflow, edgeDescriptors);
+  const laidOut = (await runtimeElk.layout(elkGraph)) as RuntimeElkLayout;
+  const layoutNodesById = new Map((laidOut.children ?? []).map((child) => [child.id, child] as const));
+  const sectionsByEdgeId = new Map<string, XYPosition[][]>();
+  const positions = new Map<string, { x: number; y: number }>();
+  const portLayouts = runtimeFlowNodePortLayouts(workflow, edgeDescriptors, layoutNodesById);
+
+  for (const node of workflow.nodes) {
+    const layoutNode = layoutNodesById.get(node.id);
+    if (layoutNode) {
+      positions.set(node.id, {
+        x: layoutNode.x ?? RUNTIME_LAYOUT_SPACING.originX,
+        y: layoutNode.y ?? RUNTIME_LAYOUT_SPACING.originY,
+      });
+    }
+  }
+
+  for (const edge of laidOut.edges ?? []) {
+    sectionsByEdgeId.set(
+      edge.id,
+      (edge.sections ?? []).map((section) => [
+        section.startPoint,
+        ...(section.bendPoints ?? []),
+        section.endPoint,
+      ]),
+    );
+  }
+
+  const terminalEvents = new Set(workflow.terminal_events);
+  const gateCounts = workflow.gates.reduce<Map<string, number>>((counts, gate) => {
+    counts.set(gate.node_id, (counts.get(gate.node_id) ?? 0) + 1);
+    return counts;
+  }, new Map());
+
+  const nodes = workflow.nodes.map((node) => {
+    const waitsFor = splitRuntimeWaitsFor(node.waits_for);
+    const decision = decisions[node.id];
+    const stateSummary = summarizeRuntimeNodeState({
+      decision,
+      waitsForAll: waitsFor.allOf,
+      waitsForAny: waitsFor.anyOf,
+      emits: node.emits,
+      isTerminal: node.emits.some((eventName) => terminalEvents.has(eventName)),
+    });
+    const gatekeeperTone = runtimeDecisionTone(decision);
+    const primaryReason = summarizePrimaryReason(decision?.blocked_reasons ?? []);
+    const portLayout = portLayouts.get(node.id) ?? { incomingPorts: [], outgoingPorts: [] };
+
+    return {
+      id: node.id,
+      selected: node.id === selectedNodeId,
+      position: positions.get(node.id) ?? { x: RUNTIME_LAYOUT_SPACING.originX, y: RUNTIME_LAYOUT_SPACING.originY },
+      style: {
+        width: RUNTIME_NODE_WIDTH,
+        height: RUNTIME_NODE_HEIGHT,
+      },
+      data: {
+        role: node.role,
+        gatekeeperState: decision?.state ?? 'unknown',
+        gatekeeperStateLabel: formatRuntimeStateLabel(decision?.state),
+        gatekeeperTone,
+        stateSummary,
+        primaryReason,
+        blockedReasons: decision?.blocked_reasons ?? [],
+        emits: node.emits,
+        waitsForAll: waitsFor.allOf,
+        waitsForAny: waitsFor.anyOf,
+        isTerminal: node.emits.some((eventName) => terminalEvents.has(eventName)),
+        gateCount: gateCounts.get(node.id) ?? 0,
+        incomingPorts: portLayout.incomingPorts,
+        outgoingPorts: portLayout.outgoingPorts,
+      },
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+      type: 'runtime',
+    };
+  });
+
+  const orderedNodes = nodes
+    .slice()
+    .sort((left, right) => compareRuntimeNodePositions(left, right, positions));
+
+  return {
+    nodes,
+    edges: runtimeWorkflowEdges(edgeDescriptors, sectionsByEdgeId, onSelectEdge),
+    orderedNodes,
+  };
+}
+
+function buildRuntimeElkGraph(workflow: RuntimeWorkflow, edgeDescriptors: RuntimeWorkflowEdgeDescriptor[]): any {
+  const incomingEdgesByNodeId = new Map<string, RuntimeWorkflowEdgeDescriptor[]>();
+  const outgoingEdgesByNodeId = new Map<string, RuntimeWorkflowEdgeDescriptor[]>();
+  for (const descriptor of edgeDescriptors) {
+    const incomingEdges = incomingEdgesByNodeId.get(descriptor.targetId) ?? [];
+    incomingEdges.push(descriptor);
+    incomingEdgesByNodeId.set(descriptor.targetId, incomingEdges);
+    const outgoingEdges = outgoingEdgesByNodeId.get(descriptor.sourceId) ?? [];
+    outgoingEdges.push(descriptor);
+    outgoingEdgesByNodeId.set(descriptor.sourceId, outgoingEdges);
+  }
+
+  return {
+    id: 'root',
+    layoutOptions: RUNTIME_ELK_LAYOUT_OPTIONS,
+    children: workflow.nodes.map((node) => {
+      const incomingEdges = incomingEdgesByNodeId.get(node.id) ?? [];
+      const outgoingEdges = outgoingEdgesByNodeId.get(node.id) ?? [];
+      return {
+        id: node.id,
+        width: RUNTIME_NODE_WIDTH,
+        height: RUNTIME_NODE_HEIGHT,
+        layoutOptions: {
+          'elk.portConstraints': 'FIXED_ORDER',
+        },
+        ports: [
+          ...incomingEdges.map((descriptor, index) => ({
+            id: descriptor.targetPortId,
+            width: 0,
+            height: 0,
+            layoutOptions: {
+              'elk.port.side': 'WEST',
+              'elk.port.index': `${index}`,
+            },
+          })),
+          ...outgoingEdges.map((descriptor, index) => ({
+            id: descriptor.sourcePortId,
+            width: 0,
+            height: 0,
+            layoutOptions: {
+              'elk.port.side': 'EAST',
+              'elk.port.index': `${index}`,
+            },
+          })),
+        ],
+      };
+    }),
+    edges: edgeDescriptors.map((descriptor) => ({
+      id: descriptor.id,
+      sources: [descriptor.sourcePortId],
+      targets: [descriptor.targetPortId],
+    })),
+  };
+}
+
+function runtimeFlowNodePortLayouts(
+  workflow: RuntimeWorkflow,
+  edgeDescriptors: RuntimeWorkflowEdgeDescriptor[],
+  layoutNodesById?: Map<string, RuntimeElkLayoutNode>,
+): Map<string, { incomingPorts: FlowNodePort[]; outgoingPorts: FlowNodePort[] }> {
+  return directedFlowNodePortLayouts(
+    workflow.nodes.map((node) => node.id),
+    edgeDescriptors,
+    RUNTIME_NODE_HEIGHT,
+    layoutNodesById,
+  );
+}
+
+function runtimePortOffsets(count: number): number[] {
+  return directedPortOffsets(count, RUNTIME_NODE_HEIGHT);
+}
+
+function clampRuntimePortOffset(offset: number): number {
+  return clampFlowPortOffset(offset, RUNTIME_NODE_HEIGHT);
+}
+
+function runtimeEdgePath(
+  sections: XYPosition[][],
+  fallback: {
+    sourceX: number;
+    sourceY: number;
+    sourcePosition: Position;
+    targetX: number;
+    targetY: number;
+    targetPosition: Position;
+    sourceIndex?: number;
+    sourceCount?: number;
+    targetIndex?: number;
+    targetCount?: number;
+  },
+): string {
+  return directedEdgePath(sections, fallback);
 }
 
 function compareRuntimeNodePositions(
@@ -3542,6 +4485,7 @@ function computeDirectedNodePositions<T extends { id: string }>(
   nodes: T[],
   dependencyView: Array<{ id: string; dependencies: string[] }>,
   spacing: DirectedNodeLayoutSpacing,
+  options: DirectedNodeLayoutOptions = {},
 ): Map<string, { x: number; y: number }> {
   const positions = new Map<string, { x: number; y: number }>();
   const nodeIds = new Set(nodes.map((node) => node.id));
@@ -3618,7 +4562,7 @@ function computeDirectedNodePositions<T extends { id: string }>(
     orderedBucket.forEach((node, row) => {
       positions.set(node.id, {
         x: spacing.originX + level * spacing.columnGap,
-        y: spacing.originY + row * spacing.rowGap,
+        y: spacing.originY + row * spacing.rowGap + Math.max(0, level - 1) * (options.levelStagger ?? 0),
       });
     });
   }
