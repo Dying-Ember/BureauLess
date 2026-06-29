@@ -3,7 +3,6 @@ import './styles.css';
 
 import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  BaseEdge,
   Background,
   ConnectionLineType,
   Controls,
@@ -16,7 +15,6 @@ import {
   type Connection,
   type Edge,
   type EdgeMouseHandler,
-  type EdgeProps,
   type Node,
   type NodeProps,
   type XYPosition,
@@ -146,7 +144,6 @@ type RuntimeFlowNodeData = {
 
 type RuntimeFlowEdgeData = {
   eventRef: string;
-  routeSide: -1 | 1;
 };
 
 type RuntimeFlowLayout = {
@@ -268,46 +265,6 @@ function RuntimeFlowNode({ id, data }: NodeProps<Node<RuntimeFlowNodeData>>) {
     </div>
   );
 }
-
-type RuntimeFlowEdgeProps = EdgeProps<Edge<RuntimeFlowEdgeData, 'runtime'>>;
-
-function RuntimeFlowEdge({
-  id,
-  data,
-  markerEnd,
-  interactionWidth,
-  sourceX,
-  sourceY,
-  targetX,
-  targetY,
-  style,
-}: RuntimeFlowEdgeProps) {
-  const deltaX = targetX - sourceX;
-  const direction = deltaX >= 0 ? 1 : -1;
-  const spanX = Math.abs(deltaX);
-  const bend = Math.min(Math.max(48, spanX * 0.34), Math.max(56, spanX / 2 - 16));
-  const detour = Math.min(Math.max(42, spanX * 0.2), 92);
-  const laneY =
-    data?.routeSide === -1
-      ? Math.min(sourceY, targetY) - detour
-      : Math.max(sourceY, targetY) + detour;
-  const control1X = sourceX + direction * bend;
-  const control2X = targetX - direction * bend;
-
-  return (
-    <BaseEdge
-      id={id}
-      path={`M ${sourceX} ${sourceY} C ${control1X} ${laneY}, ${control2X} ${laneY}, ${targetX} ${targetY}`}
-      markerEnd={markerEnd}
-      interactionWidth={interactionWidth}
-      style={style}
-    />
-  );
-}
-
-const RUNTIME_EDGE_TYPES = {
-  runtime: RuntimeFlowEdge,
-};
 
 const FLOW_NODE_TYPES = {
   dag: DagFlowNode,
@@ -1532,7 +1489,6 @@ function RuntimeWorkflowOverview({
               nodes={runtimeFlow.nodes}
               edges={runtimeFlow.edges}
               fitView
-              edgeTypes={RUNTIME_EDGE_TYPES}
               nodeTypes={FLOW_NODE_TYPES}
               connectionLineType={ConnectionLineType.SmoothStep}
               defaultEdgeOptions={{ type: 'smoothstep' }}
@@ -2170,31 +2126,28 @@ function runtimeNodeDependencyIds(workflow: RuntimeWorkflow, node: RuntimeWorkfl
 }
 
 function runtimeWorkflowEdges(workflow: RuntimeWorkflow): Edge<RuntimeFlowEdgeData>[] {
-  const outgoingCounts = new Map<string, number>();
-
   return workflow.nodes.flatMap((node) =>
-    runtimeWorkflowDependencies(workflow, node).map((dependency) => {
-      const routeIndex = outgoingCounts.get(dependency.sourceId) ?? 0;
-      outgoingCounts.set(dependency.sourceId, routeIndex + 1);
-
-      return {
-        id: `runtime:${dependency.sourceId}:${node.id}:${dependency.eventRef}:${dependency.branch}`,
-        source: dependency.sourceId,
-        target: node.id,
-        ariaLabel: `${dependency.sourceId} triggers ${dependency.eventRef} for ${node.id}`,
-        className: dependency.branch === 'any' ? 'flow-edge runtime any' : 'flow-edge runtime',
-        data: { eventRef: dependency.eventRef, routeSide: routeIndex % 2 === 0 ? -1 : 1 },
-        focusable: false,
-        interactionWidth: 20,
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          width: 16,
-          height: 16,
-          color: dependency.branch === 'any' ? 'var(--review)' : 'var(--accent)',
-        },
-        type: 'runtime',
-      };
-    }),
+    runtimeWorkflowDependencies(workflow, node).map((dependency) => ({
+      id: `runtime:${dependency.sourceId}:${node.id}:${dependency.eventRef}:${dependency.branch}`,
+      source: dependency.sourceId,
+      target: node.id,
+      ariaLabel: `${dependency.sourceId} triggers ${dependency.eventRef} for ${node.id}`,
+      className: dependency.branch === 'any' ? 'flow-edge runtime any' : 'flow-edge runtime',
+      data: { eventRef: dependency.eventRef },
+      focusable: false,
+      interactionWidth: 20,
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        width: 16,
+        height: 16,
+        color: dependency.branch === 'any' ? 'var(--review)' : 'var(--accent)',
+      },
+      pathOptions: {
+        borderRadius: 24,
+        offset: 44,
+      },
+      type: 'smoothstep',
+    })),
   );
 }
 
