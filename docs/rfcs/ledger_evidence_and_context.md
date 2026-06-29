@@ -2,8 +2,10 @@
 
 ## Status
 
-**Accepted design; implementation pending in Milestone 3.** Canonical rules are
-promoted into
+**Accepted design; partially implemented in Milestone 3.** The node-outcome
+protocol, outcome-decision event, accepted-state projection cursor, and stale
+outcome guardrails are now implemented. Context-capsule compilation and review
+decision artifacts remain tracked in later M3 tasks. Canonical rules are promoted into
 [`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md) and
 [`docs/architecture/context_economy.md`](../architecture/context_economy.md).
 This RFC remains as decision history while implementation is tracked in

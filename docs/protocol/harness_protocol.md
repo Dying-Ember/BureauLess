@@ -145,6 +145,7 @@ includes:
 ```yaml
 projection:
   through_event_id: event-outcome-decision-017
+  accepted_workspace_ref: workspace:def456
   generated_at: "2026-06-29T00:00:00Z"
 ```
 
@@ -165,9 +166,9 @@ workflow_id: workflow-001
 node_id: implement
 assignment_id: assign-017
 session_id: session-017
-status: succeeded
-pre_state_ref: git-tree:abc123
-post_state_ref: git-tree:def456
+status: completed
+pre_state_ref: workspace:abc123
+post_state_ref: workspace:def456
 observed_delta:
   modified_files:
     - src/bureauless/runtime/replay.py
@@ -208,6 +209,8 @@ source_outcome_id: outcome-017
 outcome_ref: artifact-outcome-017
 actor: harness
 disposition: partially_accepted
+pre_state_ref: workspace:abc123
+post_state_ref: workspace:def456
 validation_rule: low_risk_workspace_delta_v1
 accepted:
   observation_ids:

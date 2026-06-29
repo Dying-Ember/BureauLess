@@ -84,10 +84,12 @@ bounded session, packages a result, imports it into the ledger, and leaves the
 resulting mission state inspectable through the normal mission/workflow/ledger/
 replay/gatekeeper endpoints.
 
-The next acceptance step is not "support many agents". It is "prove one real
-agent path". The M3 demo should launch one bounded real task through
-`codex-cli`, persist inspectable session/review/ledger state, and make that
-path stable enough to show as the first public end-to-end BureauLess demo.
+The next acceptance step was not "support many agents". It was "prove one real
+agent path". That M3 step is now in place: `codex-cli` can launch bounded real
+tasks non-interactively, return structured result payloads, and drive the demo
+workflow end to end through normal session/import/replay paths. Broader agent
+and provider breadth remains out of scope until the next decision-artifact and
+context work is complete.
 
 The local development entrypoint for that API is `npm run api:dev`. It pins
 execution to the repo-local `.venv`, tolerates another active shell virtual
@@ -108,7 +110,8 @@ and broken down in
 
 ### A1: Mission, Ledger, Workflow Foundation
 
-Status: completed for the M1/M2 baseline.
+Status: completed for the M1/M2 baseline, with the M3 node-outcome/projection
+spine now implemented.
 
 Implemented:
 
@@ -152,9 +155,6 @@ Acceptance:
 
 Next:
 
-- Normalize successful, failed, and partial assignment attempts into compact
-  node outcomes with observed workspace deltas and native trace refs.
-- Keep current ledger summaries as projections over accepted events.
 - Compile bounded assignment context from accepted facts and expose deeper
   evidence only through scoped requests.
 - Measure context fit before adapting context policy.
@@ -221,7 +221,7 @@ Acceptance:
 
 ### A5.5: Real Agent Binding Spine
 
-Status: planned for M3.
+Status: completed for the initial M3 spine.
 
 Goal: add the smallest runtime registry needed to launch one real agent path
 without turning the harness into a general provider platform.
@@ -243,6 +243,8 @@ Acceptance:
   session starts.
 - One bounded `codex-cli` assignment can run non-interactively in isolation and
   produce an importable result proposal.
+- The live demo path can advance `implement -> review -> commit` through real
+  bounded sessions and normal ledger replay.
 - This work does not expand into a broad provider marketplace, fallback mesh,
   or secret-management subsystem.
 
