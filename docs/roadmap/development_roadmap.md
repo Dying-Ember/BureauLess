@@ -18,7 +18,11 @@ The project currently has two runtime layers:
 Milestones 1, 2, and 2.5 are complete. The next runtime priority is establishing
 the node-outcome and bounded-context boundary before completing advisor outcome
 learning and the remaining orchestrator decision artifacts. Those tasks form
-Runtime Harness Milestone 3.
+Runtime Harness Milestone 3. That milestone now explicitly includes a narrow
+real-agent binding spine: `codex-cli` is the first real worker target for the
+demo path. This is not a full provider platform milestone. Broader agent and
+provider expansion, including deeper `opencode` customization, stays after the
+first `codex-cli` path is stable.
 
 The project has one UI surface:
 
@@ -79,6 +83,11 @@ the API. That demo prepares a workspace, exports an assignment, runs one
 bounded session, packages a result, imports it into the ledger, and leaves the
 resulting mission state inspectable through the normal mission/workflow/ledger/
 replay/gatekeeper endpoints.
+
+The next acceptance step is not "support many agents". It is "prove one real
+agent path". The M3 demo should launch one bounded real task through
+`codex-cli`, persist inspectable session/review/ledger state, and make that
+path stable enough to show as the first public end-to-end BureauLess demo.
 
 The local development entrypoint for that API is `npm run api:dev`. It pins
 execution to the repo-local `.venv`, tolerates another active shell virtual
@@ -209,6 +218,33 @@ Work:
 Acceptance:
 
 - A complete orchestrator proposal can be compiled before worker dispatch.
+
+### A5.5: Real Agent Binding Spine
+
+Status: planned for M3.
+
+Goal: add the smallest runtime registry needed to launch one real agent path
+without turning the harness into a general provider platform.
+
+Work:
+
+- Bind one verified agent adapter to one provider profile and validate the
+  target model/provider pair before launch.
+- Reuse agent doctor and readiness outputs instead of creating a second agent
+  metadata system.
+- Launch `codex-cli` as the first real worker target for the M3 demo path.
+- Keep provider auth injection environment-scoped and narrow.
+- Defer deeper `opencode` customization until after the first real-agent demo
+  path is stable.
+
+Acceptance:
+
+- The runtime can reject an invalid agent/provider/model binding before any
+  session starts.
+- One bounded `codex-cli` assignment can run non-interactively in isolation and
+  produce an importable result proposal.
+- This work does not expand into a broad provider marketplace, fallback mesh,
+  or secret-management subsystem.
 
 ### A6: Controlled Workflow Mutation
 

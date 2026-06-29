@@ -17,6 +17,14 @@ Milestone 3 has three goals:
 3. Establish a minimum-sufficient ledger boundary and bounded, measurable
    context delivery for real-agent runs.
 
+Milestone 3 also has one delivery constraint: it must end with one maintained
+real-agent demo path, not only fixture-only or shell-dummy validation. The
+first real worker target is `codex-cli`. This milestone does not attempt to
+build a complete multi-provider or multi-agent platform; it adds only the
+minimum binding spine needed to launch a bounded real task and inspect the
+result through the normal runtime surfaces. `opencode` remains the next
+strategic integration target after that first path is stable.
+
 Within this document, `milestone` names the user-visible delivery target and
 `workstream` names an internal implementation grouping inside that milestone.
 
@@ -33,8 +41,52 @@ Within this document, `milestone` names the user-visible delivery target and
 - Make ledger and context work scale with node outcomes, not internal tool
   calls.
 - Keep low-risk execution free of mandatory summarizer or reviewer agents.
+- Keep real-agent integration narrow: prove one `codex-cli` path before
+  broadening provider or agent coverage.
+- Do not turn Milestone 3 into a general provider platform or plugin
+  ecosystem.
 - Keep temporal replay out of scope for this milestone; focus on decision
   quality and auditability first.
+
+## Workstream 0: Real Agent Binding Spine
+
+Goal: launch one bounded real agent path for the Milestone 3 demo without
+expanding into a full provider abstraction platform.
+
+### [ ] RM3-00: Codex CLI Binding Spine
+
+- Status: pending
+- Priority: high
+- Recommended model: gpt-5.5
+- Risk: high
+- Labels: runtime, agents, provider, demo
+- Target docs:
+  - `docs/protocol/harness_protocol.md`
+  - `docs/roadmap/development_roadmap.md`
+- Target code:
+  - `src/bureauless/agents/`
+  - `src/bureauless/runtime/sessions.py`
+  - `src/bureauless/cli/main.py`
+  - `tests/test_harness.py`
+- Work:
+  - Add the minimum runtime registry needed to bind one agent adapter to one
+    provider profile and validate target model/provider combinations before
+    launch.
+  - Keep provider auth injection environment-scoped for automation and avoid
+    introducing a broad secret-management subsystem.
+  - Implement the first real launch path for `codex-cli`, reusing doctor and
+    readiness signals rather than creating a separate registry.
+  - Record `target_model`, `target_provider`, and resolved `effective_*`
+    session/result fields on the real launch path.
+  - Explicitly defer `opencode` customization and multi-provider breadth until
+    the first `codex-cli` demo path is stable.
+- Acceptance criteria:
+  - The runtime can reject an invalid agent/provider/model binding before any
+    external session starts.
+  - One bounded `codex-cli` assignment can run non-interactively in an
+    isolated workspace and return an importable result proposal.
+  - The implementation does not require a general provider marketplace,
+    fallback mesh, or dynamic secret backend.
 
 ## Workstream 1: Advisor Outcome Learning
 
@@ -313,14 +365,19 @@ of isolated unit tests.
   - `examples/`
   - `tests/test_harness.py`
 - Work:
-  - Add one maintained demo fixture that includes routing rationale, advisor
-    invocation or skip, a scored outcome, a node outcome, and a compiled
-    context capsule.
-  - Keep the fixture small enough to inspect manually.
-  - Reuse the same fixture in replay, metrics, and API tests.
+  - Add one maintained demo path that covers a real small task, not only a
+    synthetic fixture.
+  - Use `codex-cli` as the first real worker target for that path.
+  - Include routing rationale, advisor invocation or skip, a scored outcome, a
+    node outcome, a compiled context capsule, and the resulting review/ledger
+    decisions.
+  - Keep the demo small enough to inspect manually and stable enough to reuse
+    in replay, metrics, and API tests.
 - Acceptance criteria:
-  - One stable fixture exercises the full M3 path.
-  - The fixture can be inspected through the normal API surface.
+  - One stable demo path exercises the full M3 path end to end.
+  - The demo can be inspected through the normal API and workbench surfaces.
+  - The milestone is not considered complete if the path still depends solely
+    on `fake` or `shell-dummy` execution.
 
 ### [ ] RM3-12: M3 Runtime API Coverage
 
@@ -342,23 +399,26 @@ of isolated unit tests.
 
 ## Recommended Execution Order
 
-1. RM3-07 Node Outcome And Workspace Delta Protocol
-2. RM3-05 Review Decision Artifact
-3. RM3-08 Deterministic Context Capsule Compiler
-4. RM3-09 Scoped Context Requests And Progressive Disclosure
-5. RM3-10 Context Telemetry And Policy Feedback
-6. RM3-01 Advisor Outcome Event Model
-7. RM3-04 Routing Decision Artifact
-8. RM3-06 Turn Report And Dispatch Packet Compiler
-9. RM3-02 Budget Snapshot Attribution
-10. RM3-03 Advisor Outcome Scoring Pass
-11. RM3-11 M3 Integrated Demo Fixture
-12. RM3-12 M3 Runtime API Coverage
+1. RM3-00 Codex CLI Binding Spine
+2. RM3-07 Node Outcome And Workspace Delta Protocol
+3. RM3-05 Review Decision Artifact
+4. RM3-08 Deterministic Context Capsule Compiler
+5. RM3-09 Scoped Context Requests And Progressive Disclosure
+6. RM3-10 Context Telemetry And Policy Feedback
+7. RM3-01 Advisor Outcome Event Model
+8. RM3-04 Routing Decision Artifact
+9. RM3-06 Turn Report And Dispatch Packet Compiler
+10. RM3-02 Budget Snapshot Attribution
+11. RM3-03 Advisor Outcome Scoring Pass
+12. RM3-11 M3 Integrated Demo Fixture
+13. RM3-12 M3 Runtime API Coverage
 
 ## Milestone 3 Acceptance
 
 - Advisor opportunities can be recorded and scored without calling an LLM.
 - Routing and review judgments are persisted as structured YAML artifacts.
+- One maintained `codex-cli` path can execute a bounded real task and produce
+  inspectable session, review, and ledger state.
 - Node outcomes preserve complete evidence refs while committing only accepted,
   revision-scoped facts.
 - Fresh workers receive bounded deterministic context and can request targeted
