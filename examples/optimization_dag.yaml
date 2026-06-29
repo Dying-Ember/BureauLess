@@ -125,6 +125,7 @@ nodes:
   dependencies:
   - field-resolver-skeleton
   - worker-stop-lifecycle
+  - baseline-inventory
   target_files: []
   context_files: []
   allowed_models:
