@@ -423,10 +423,14 @@ function OrthogonalFlowEdge({
   sourcePosition,
   targetX,
   targetY,
-    targetPosition,
-  interactionWidth,
+  targetPosition,
+    interactionWidth,
 }: EdgeProps<Edge<OrthogonalFlowEdgeData>>) {
+  const { getNodes } = useReactFlow();
   const path = runtimeEdgePath(data?.sections ?? [], {
+    nodes: getNodes(),
+    sourceId: source,
+    targetId: target,
     sourceX,
     sourceY,
     sourcePosition,
@@ -2822,6 +2826,9 @@ function clampFlowPortOffset(offset: number, nodeHeight: number): number {
 function directedEdgePath(
   sections: XYPosition[][],
   fallback: {
+    nodes?: Array<Node>;
+    sourceId: string;
+    targetId: string;
     sourceX: number;
     sourceY: number;
     sourcePosition: Position;
@@ -2847,7 +2854,8 @@ function directedEdgePath(
       .join(' ');
   }
 
-  return orthogonalEdgePath(fallback);
+  const routedPath = obstacleAvoidingEdgePath(fallback);
+  return routedPath ?? orthogonalEdgePath(fallback);
 }
 
 function areEdgeSectionsAnchoredToFallback(
@@ -2872,6 +2880,259 @@ function areEdgeSectionsAnchoredToFallback(
     Math.abs(endPoint.x - fallback.targetX) < 1.5 &&
     Math.abs(endPoint.y - fallback.targetY) < 1.5
   );
+}
+
+type RoutePoint = {
+  x: number;
+  y: number;
+};
+
+type RectObstacle = {
+  id: string;
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+};
+
+function obstacleAvoidingEdgePath(fallback: {
+  nodes?: Array<Node>;
+  sourceId: string;
+  targetId: string;
+  sourceX: number;
+  sourceY: number;
+  sourcePosition: Position;
+  targetX: number;
+  targetY: number;
+  targetPosition: Position;
+  sourceIndex?: number;
+  sourceCount?: number;
+  targetIndex?: number;
+  targetCount?: number;
+}): string | null {
+  const nodes = fallback.nodes ?? [];
+  if (nodes.length === 0) {
+    return null;
+  }
+
+  const routeGap = 24;
+  const gridSize = 10;
+  const sourceAnchor = offsetHandlePoint(fallback.sourceX, fallback.sourceY, fallback.sourcePosition, routeGap);
+  const targetAnchor = offsetHandlePoint(fallback.targetX, fallback.targetY, fallback.targetPosition, routeGap);
+  const obstacles = buildRouteObstacles(nodes, fallback.sourceId, fallback.targetId, 16);
+  const routedPoints = findOrthogonalRoute(sourceAnchor, targetAnchor, obstacles, gridSize, routeGap);
+  if (!routedPoints) {
+    return null;
+  }
+
+  return pointsToSvgPath([{
+    x: fallback.sourceX,
+    y: fallback.sourceY,
+  }, ...routedPoints, {
+    x: fallback.targetX,
+    y: fallback.targetY,
+  }]);
+}
+
+function buildRouteObstacles(
+  nodes: Array<Node>,
+  sourceId: string,
+  targetId: string,
+  padding: number,
+): RectObstacle[] {
+  return nodes.flatMap((node) => {
+    const rect = nodeToRect(node, padding);
+    if (!rect || node.id === sourceId || node.id === targetId) {
+      return [];
+    }
+    return [rect];
+  });
+}
+
+function nodeToRect(node: Node, padding: number): RectObstacle | null {
+  const width = node.measured?.width ?? node.width ?? (node.type === 'runtime' ? RUNTIME_NODE_WIDTH : PLANNING_NODE_WIDTH);
+  const height = node.measured?.height ?? node.height ?? (node.type === 'runtime' ? RUNTIME_NODE_HEIGHT : PLANNING_NODE_HEIGHT);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  const left = node.position.x - padding;
+  const top = node.position.y - padding;
+  return {
+    id: node.id,
+    left,
+    right: left + width + padding * 2,
+    top,
+    bottom: top + height + padding * 2,
+  };
+}
+
+function offsetHandlePoint(x: number, y: number, position: Position, distance: number): RoutePoint {
+  switch (position) {
+    case Position.Left:
+      return { x: x - distance, y };
+    case Position.Right:
+      return { x: x + distance, y };
+    case Position.Top:
+      return { x, y: y - distance };
+    case Position.Bottom:
+      return { x, y: y + distance };
+    default:
+      return { x, y };
+  }
+}
+
+function findOrthogonalRoute(
+  start: RoutePoint,
+  goal: RoutePoint,
+  obstacles: RectObstacle[],
+  step: number,
+  padding: number,
+): RoutePoint[] | null {
+  const snap = (value: number) => Math.round(value / step) * step;
+  const startPoint = { x: snap(start.x), y: snap(start.y) };
+  const goalPoint = { x: snap(goal.x), y: snap(goal.y) };
+  const minX = Math.floor((Math.min(startPoint.x, goalPoint.x, ...obstacles.map((obstacle) => obstacle.left)) - padding) / step) * step;
+  const maxX = Math.ceil((Math.max(startPoint.x, goalPoint.x, ...obstacles.map((obstacle) => obstacle.right)) + padding) / step) * step;
+  const minY = Math.floor((Math.min(startPoint.y, goalPoint.y, ...obstacles.map((obstacle) => obstacle.top)) - padding) / step) * step;
+  const maxY = Math.ceil((Math.max(startPoint.y, goalPoint.y, ...obstacles.map((obstacle) => obstacle.bottom)) + padding) / step) * step;
+
+  const startKey = `${startPoint.x}:${startPoint.y}`;
+  const goalKey = `${goalPoint.x}:${goalPoint.y}`;
+  const open = [{ key: startKey, point: startPoint, g: 0, f: manhattanDistance(startPoint, goalPoint) }];
+  const cameFrom = new Map<string, string>();
+  const pointByKey = new Map<string, RoutePoint>([[startKey, startPoint]]);
+  const gScore = new Map<string, number>([[startKey, 0]]);
+  const closed = new Set<string>();
+
+  while (open.length > 0) {
+    open.sort((left, right) => left.f - right.f || left.g - right.g);
+    const current = open.shift();
+    if (!current) {
+      break;
+    }
+    if (closed.has(current.key)) {
+      continue;
+    }
+    if (current.key === goalKey) {
+      return simplifyRoute(reconstructRoute(goalKey, cameFrom, pointByKey));
+    }
+    closed.add(current.key);
+
+    for (const neighbor of orthogonalNeighbors(current.point, step)) {
+      if (neighbor.x < minX || neighbor.x > maxX || neighbor.y < minY || neighbor.y > maxY) {
+        continue;
+      }
+      const neighborKey = `${neighbor.x}:${neighbor.y}`;
+      if (closed.has(neighborKey)) {
+        continue;
+      }
+      if (isBlockedByObstacle(neighbor, obstacles) && neighborKey !== startKey && neighborKey !== goalKey) {
+        continue;
+      }
+      const tentativeG =
+        (gScore.get(current.key) ?? Number.POSITIVE_INFINITY) +
+        step +
+        obstacleAvoidancePenalty(neighbor, obstacles);
+      if (tentativeG >= (gScore.get(neighborKey) ?? Number.POSITIVE_INFINITY)) {
+        continue;
+      }
+      cameFrom.set(neighborKey, current.key);
+      pointByKey.set(neighborKey, neighbor);
+      gScore.set(neighborKey, tentativeG);
+      open.push({
+        key: neighborKey,
+        point: neighbor,
+        g: tentativeG,
+        f: tentativeG + manhattanDistance(neighbor, goalPoint),
+      });
+    }
+  }
+
+  return null;
+}
+
+function orthogonalNeighbors(point: RoutePoint, step: number): RoutePoint[] {
+  return [
+    { x: point.x + step, y: point.y },
+    { x: point.x - step, y: point.y },
+    { x: point.x, y: point.y + step },
+    { x: point.x, y: point.y - step },
+  ];
+}
+
+function isBlockedByObstacle(point: RoutePoint, obstacles: RectObstacle[]): boolean {
+  return obstacles.some(
+    (obstacle) =>
+      point.x > obstacle.left &&
+      point.x < obstacle.right &&
+      point.y > obstacle.top &&
+      point.y < obstacle.bottom,
+  );
+}
+
+function obstacleAvoidancePenalty(point: RoutePoint, obstacles: RectObstacle[]): number {
+  const nearestDistance = obstacles.reduce((closest, obstacle) => Math.min(closest, distanceToRect(point, obstacle)), Number.POSITIVE_INFINITY);
+  if (!Number.isFinite(nearestDistance)) {
+    return 0;
+  }
+  const comfortDistance = 120;
+  if (nearestDistance >= comfortDistance) {
+    return 0;
+  }
+  return (comfortDistance - nearestDistance) * 0.25;
+}
+
+function distanceToRect(point: RoutePoint, rect: RectObstacle): number {
+  const dx = Math.max(rect.left - point.x, 0, point.x - rect.right);
+  const dy = Math.max(rect.top - point.y, 0, point.y - rect.bottom);
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function reconstructRoute(
+  goalKey: string,
+  cameFrom: Map<string, string>,
+  pointByKey: Map<string, RoutePoint>,
+): RoutePoint[] {
+  const points = [pointByKey.get(goalKey) ?? { x: 0, y: 0 }];
+  let currentKey = goalKey;
+  while (cameFrom.has(currentKey)) {
+    currentKey = cameFrom.get(currentKey) ?? currentKey;
+    const point = pointByKey.get(currentKey);
+    if (point) {
+      points.push(point);
+    }
+  }
+  return points.reverse();
+}
+
+function simplifyRoute(points: RoutePoint[]): RoutePoint[] {
+  if (points.length <= 2) {
+    return points;
+  }
+  const simplified: RoutePoint[] = [points[0]];
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const previous = simplified[simplified.length - 1];
+    const current = points[index];
+    const next = points[index + 1];
+    if ((previous.x === current.x && current.x === next.x) || (previous.y === current.y && current.y === next.y)) {
+      continue;
+    }
+    simplified.push(current);
+  }
+  simplified.push(points[points.length - 1]);
+  return simplified;
+}
+
+function pointsToSvgPath(points: RoutePoint[]): string {
+  if (points.length === 0) {
+    return '';
+  }
+  const [firstPoint, ...rest] = points;
+  return `M ${firstPoint.x} ${firstPoint.y} ${rest.map((point) => `L ${point.x} ${point.y}`).join(' ')}`.trim();
+}
+
+function manhattanDistance(left: RoutePoint, right: RoutePoint): number {
+  return Math.abs(left.x - right.x) + Math.abs(left.y - right.y);
 }
 
 function orthogonalEdgePath(fallback: {
@@ -3172,6 +3433,9 @@ function clampRuntimePortOffset(offset: number): number {
 function runtimeEdgePath(
   sections: XYPosition[][],
   fallback: {
+    nodes?: Array<Node>;
+    sourceId: string;
+    targetId: string;
     sourceX: number;
     sourceY: number;
     sourcePosition: Position;
