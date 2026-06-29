@@ -23,6 +23,9 @@ acceptance criteria.
   completed runtime/harness milestone for real-agent execution loop hardening.
 - [`tasks/runtime_harness_milestone_2_5_tasklist.md`](tasks/runtime_harness_milestone_2_5_tasklist.md):
   completed runtime/harness bridge milestone for controlled workflow mutation.
+- [`tasks/runtime_harness_milestone_3_tasklist.md`](tasks/runtime_harness_milestone_3_tasklist.md):
+  active runtime milestone for node outcomes, bounded context delivery,
+  orchestrator decision artifacts, and advisor outcome learning.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
@@ -38,6 +41,9 @@ behavior is promoted into `protocol/`; the RFC remains as provenance.
 
 - [`rfcs/workflow_mutation_proposal.md`](rfcs/workflow_mutation_proposal.md):
   implemented Milestone 2.5 design history for controlled workflow mutation.
+- [`rfcs/ledger_evidence_and_context.md`](rfcs/ledger_evidence_and_context.md):
+  accepted design for separating native evidence, node outcomes, canonical
+  ledger facts, progressive context disclosure, and context-policy feedback.
 
 ## Architecture
 

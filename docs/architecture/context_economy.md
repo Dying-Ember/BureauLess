@@ -42,6 +42,26 @@ toward a simpler workflow.
 - Default large tool output handling is artifact reference plus summary.
 - Default low-risk task handling avoids advisors.
 
+## Evidence, Ledger, And Context
+
+BureauLess separates retention from delivery:
+
+```text
+evidence store       ledger                    context capsule
+full trace and logs  minimum sufficient facts  bounded assignment view
+diffs and artifacts  accepted state changes    relevant references
+```
+
+Native traces preserve what an agent attempted. Node outcomes describe observed
+pre/post state and proposed semantic changes. The ledger records only accepted
+mission-relevant facts and evidence refs. A context compiler projects the facts
+needed for one assignment.
+
+The complete evidence history may be large. The context delivered to a worker
+must remain bounded. A fact belongs in the ledger when removing it could cause a
+later worker to take an invalid action, repeat material work, violate a
+constraint, or make replay unable to explain mission state.
+
 ## Anti-Patterns
 
 - Full ledger broadcast after every tool call.
@@ -93,6 +113,98 @@ accepted_facts: []
 discarded_as_private: []
 open_questions: []
 ```
+
+Compaction is a derived view, not a canonical write. It must preserve source
+references and must not create accepted findings by inference.
+
+## Progressive Disclosure
+
+Assignment context is disclosed in layers:
+
+1. Mission constraints, assignment contract, accepted facts, gates, and current
+   workspace state.
+2. Concise rationale, provenance, diffs, and verification summaries.
+3. Selected artifact bodies or trace excerpts.
+4. Full native traces only for audit, conflict resolution, or exceptional
+   review.
+
+The initial capsule should already contain information implied by dependency
+closure, role, active risks, and required gates. Progressive disclosure is not
+an excuse to make every worker fail once before receiving necessary context.
+
+A request for more context must identify:
+
+- the missing information;
+- the artifact or fact references requested;
+- the expected value to the current assignment.
+
+The context broker checks role visibility, relevance, and budget, then returns
+only the requested material. Unavailable evidence stays unavailable. Context
+requests are session telemetry unless they expose a canonical blocker or risk.
+
+## Context Delivery Budget
+
+Context priority is:
+
+1. Safety constraints, permissions, and gates.
+2. Current assignment and workspace state.
+3. Accepted facts from direct and transitive dependencies.
+4. Active risks and open questions.
+5. Historical rationale.
+6. Evidence bodies and native traces.
+
+When the budget is exhausted, lower-priority content becomes an artifact
+reference rather than displacing higher-priority facts. Context selection uses
+workflow dependencies, scope, paths, artifacts, and role visibility before
+introducing semantic retrieval.
+
+Low-risk nodes must not require an extra summarizer or reviewer by default.
+Ledger work should scale with node outcomes, not internal tool calls, and normal
+replay should never load native transcripts.
+
+## Context Feedback
+
+Every context capsule records its policy version, token estimate, disclosure
+level, and included fact and artifact refs. Session metrics connect that
+delivery to observable outcomes:
+
+- context request rate;
+- missing-context block rate;
+- added tokens after disclosure;
+- first-pass success and rework;
+- review rejection;
+- repeated artifact requests;
+- context tokens as a share of execution tokens.
+
+Context fit uses conservative classifications:
+
+- `under_provisioned`
+- `well_provisioned`
+- `over_provisioned`
+- `mis_scoped`
+- `insufficient_evidence`
+
+The runtime should prefer external signals over model self-report. It cannot
+reliably observe whether a model internally used a prompt fragment. Policy
+recommendations require repeated evidence grouped by role, task type, risk,
+model, and policy version. A single run never changes context policy
+automatically.
+
+Context telemetry remains outside canonical ledger state. An accepted policy
+change, its evidence basis, and its version are ledger decisions.
+
+## Cold-Start Test
+
+A fresh worker with no prior conversation should be able to continue from:
+
+```text
+mission + assignment + context capsule + referenced artifacts
+```
+
+Routine requests for the same missing evidence indicate under-provisioning and
+should promote that evidence class into the default capsule. Routine delivery
+of large irrelevant context indicates over-provisioning and should demote it to
+on-demand disclosure.
 
 ## Model Routing
 

@@ -15,9 +15,10 @@ The project currently has two runtime layers:
   checks, isolated sessions, result packaging, outcome metrics, and dispatch
   readiness checks.
 
-Milestones 1, 2, and 2.5 are complete. The next runtime priority is completing
-advisor outcome learning and the remaining orchestrator decision artifacts.
-Those tasks form Runtime Harness Milestone 3.
+Milestones 1, 2, and 2.5 are complete. The next runtime priority is establishing
+the node-outcome and bounded-context boundary before completing advisor outcome
+learning and the remaining orchestrator decision artifacts. Those tasks form
+Runtime Harness Milestone 3.
 
 The project has one UI surface:
 
@@ -36,7 +37,10 @@ Build a YAML-only orchestration harness where:
 - The orchestrator owns coordination, not execution.
 - Workers own bounded execution, not global truth.
 - The harness enforces workflow safety with deterministic rules.
-- The ledger records durable mission truth with provenance.
+- The ledger records the minimum sufficient durable mission truth with
+  provenance while native traces remain referenced evidence.
+- Workers receive bounded assignment context with progressive evidence
+  disclosure rather than full-ledger broadcasts.
 - Advisors are lazy and budget-gated.
 - The workbench makes the system inspectable before it becomes deeply editable.
 
@@ -136,6 +140,15 @@ Acceptance:
 - Public findings without provenance are rejected.
 - Accepted artifact references verify against recorded hashes.
 - Replaying event history explains why a workflow node is blocked, runnable, or complete.
+
+Next:
+
+- Normalize successful, failed, and partial assignment attempts into compact
+  node outcomes with observed workspace deltas and native trace refs.
+- Keep current ledger summaries as projections over accepted events.
+- Compile bounded assignment context from accepted facts and expose deeper
+  evidence only through scoped requests.
+- Measure context fit before adapting context policy.
 
 ### A3: Gatekeeper
 

@@ -120,6 +120,118 @@ accepted_by: orchestrator
 created_at: "2026-06-19T00:00:00Z"
 ```
 
+### Canonical State Boundary
+
+The ledger stores accepted mission-relevant facts, not a compressed copy of an
+agent transcript. A record belongs in canonical state when removing it could
+cause a later worker to take an invalid action, repeat material work, violate a
+constraint, or make replay unable to explain mission state.
+
+The runtime separates four kinds of records:
+
+- Native traces and large outputs are immutable evidence artifacts.
+- Node outcomes are compact proposals at the assignment boundary.
+- Acceptance decisions identify which observations, findings, and decisions
+  become canonical.
+- Current findings, risks, decisions, and open questions are projections over
+  accepted events, not independent competing sources of truth.
+
+Corrections append supersession or invalidation events. They do not rewrite
+accepted history. Normal replay must not read native transcripts.
+
+If a current-state projection is persisted, it records the last event it
+includes:
+
+```yaml
+projection:
+  through_event_id: event-outcome-decision-017
+  generated_at: "2026-06-29T00:00:00Z"
+```
+
+A missing or mismatched projection cursor makes the projection a rebuildable
+cache. The accepted event history remains authoritative.
+
+### Node Outcome
+
+Every completed, failed, timed-out, cancelled, or partial assignment attempt
+produces a compact node outcome. The harness fills deterministic observations;
+workers may propose semantic findings but cannot accept them.
+
+```yaml
+outcome_id: outcome-017
+run_id: run-017
+mission_id: optimize-worker-lifecycle
+workflow_id: workflow-001
+node_id: implement
+assignment_id: assign-017
+session_id: session-017
+status: succeeded
+pre_state_ref: git-tree:abc123
+post_state_ref: git-tree:def456
+observed_delta:
+  modified_files:
+    - src/bureauless/runtime/replay.py
+  created_artifact_refs:
+    - artifact-patch-017
+  external_effects: []
+verification:
+  status: passed
+  evidence_refs:
+    - artifact-test-report-017
+proposed_findings:
+  - finding_id: finding-017
+    content: Superseded assignment events no longer satisfy downstream gates.
+risks:
+  - risk_id: risk-017
+    content: Temporal replay remains unsupported.
+open_questions: []
+unknowns: []
+trace_ref: artifact-trace-017
+```
+
+Outcome content is classified before acceptance:
+
+- `observation`: machine-verifiable state, hash, exit, or verification fact.
+- `finding`: a semantic claim with evidence and review provenance.
+- `decision`: an orchestrator, policy, reviewer, or human disposition.
+- `unknown`: information that could not be established and must not be guessed.
+
+Low-risk observations may be accepted automatically by deterministic harness
+rules. Semantic, conflicting, externally visible, or high-risk claims use the
+review and permission model. Accepted events identify the actor, source
+outcome, evidence refs, and validation rule.
+
+```yaml
+event_id: event-outcome-decision-017
+event_type: node_outcome_decided
+source_outcome_id: outcome-017
+outcome_ref: artifact-outcome-017
+actor: harness
+disposition: partially_accepted
+validation_rule: low_risk_workspace_delta_v1
+accepted:
+  observation_ids:
+    - observation-workspace-delta-017
+    - observation-tests-passed-017
+  finding_ids:
+    - finding-017
+  risk_ids:
+    - risk-017
+rejected_claim_ids: []
+evidence_refs:
+  - artifact-patch-017
+  - artifact-test-report-017
+```
+
+The decision event supports `accepted`, `partially_accepted`, and `rejected`
+dispositions without copying the full outcome into the ledger. Effective
+workflow completion events reference this decision event.
+
+An outcome's state claims are scoped to its `pre_state_ref`, `post_state_ref`,
+and workflow. If the accepted workspace has moved past the pre-state, the
+outcome is `stale` or `needs_review`; it is not silently applied. Failed and
+interrupted outcomes must record partial effects and cleanup requirements.
+
 ## Artifact Integrity
 
 Artifacts are immutable evidence objects. Ledger records should refer to
@@ -318,6 +430,22 @@ notes: >
 Task results are proposals. They do not become public ledger facts until the
 harness validates role permissions, expected events, artifact integrity,
 forbidden actions, and any required review gates.
+
+Result import, workspace observation, and outcome acceptance are distinct
+boundaries:
+
+```text
+result submitted
+  -> workspace and evidence observed
+  -> node outcome validated
+  -> outcome accepted or rejected
+  -> accepted workflow events become effective
+```
+
+An emitted event asserted by a worker must not become effective merely because
+it appears in a transcript. Low-risk event acceptance may be automatic, but the
+ledger still records that the harness accepted it and which deterministic rule
+was used.
 
 A result that discovers a structural workflow gap uses
 `status: completed_with_proposal` and lists proposal artifact IDs in
@@ -521,6 +649,11 @@ native_log_refs:
 Session records may produce result proposals, but sessions must not write the
 canonical ledger directly.
 
+Native logs preserve provider-specific evidence. They may include tool calls,
+command output, file edits, and errors, but are not normalized into ledger
+events one tool call at a time. Trace access follows artifact visibility,
+redaction, and retention policy.
+
 ## Outcome Metrics
 
 The v1 metrics target is assignment/session-level accounting, not root-cause
@@ -543,6 +676,12 @@ outcome_metrics:
 
 If token or cost data is unavailable, the runtime should record the missing data
 explicitly with `usage_confidence: none` rather than inventing a precise value.
+
+Context-delivery telemetry is also session-level data. It records the context
+policy version, capsule size, included references, later context requests,
+first-pass outcome, review outcome, and rework. High-volume telemetry does not
+become canonical mission state. Only an accepted context-policy change and its
+rationale become a ledger decision.
 
 ## Event
 
@@ -691,6 +830,70 @@ excluded_reason:
   reviewer_private_notes: not_visible_to_role
 ```
 
+## Context Capsule And Progressive Disclosure
+
+Workers receive a bounded context capsule compiled for one assignment rather
+than a full ledger broadcast. Selection uses explicit relationships before any
+semantic retrieval:
+
+- mission constraints and current workspace revision;
+- direct and transitive workflow dependencies;
+- required gates and role permissions;
+- active findings, risks, and questions scoped to the node;
+- shared paths, artifacts, and accepted decisions.
+
+Unrelated branches, resolved risks, superseded history, raw private output, full
+tool logs, and large artifact bodies are excluded by default.
+
+```yaml
+context_capsule_id: context-022
+policy_version: context-v1
+mission_id: optimize-worker-lifecycle
+assignment_id: assign-022
+workspace_ref: git-tree:def456
+included_fact_ids:
+  - finding-017
+included_decision_ids:
+  - decision-008
+active_risk_ids:
+  - risk-017
+artifact_refs:
+  - artifact-patch-017
+excluded:
+  unrelated_branch_history: not_in_dependency_scope
+  raw_tool_logs: disclosure_level_too_low
+```
+
+Disclosure is progressive:
+
+1. Assignment, constraints, accepted facts, gates, and current state.
+2. Concise rationale, provenance, relevant diffs, and verification summaries.
+3. Selected artifact bodies or trace excerpts.
+4. Full native trace only for audit, conflict resolution, or exceptional review.
+
+A worker requesting more context must identify the missing information,
+requested refs, and expected value. The context broker checks relevance,
+visibility, and token budget, then returns a targeted context packet. It does
+not rebroadcast an entire level. Missing evidence is returned as `unavailable`.
+
+```yaml
+context_request_id: context-request-004
+assignment_id: assign-022
+missing_information: The failing verification details are not in the capsule.
+requested_refs:
+  - artifact-test-report-017
+expected_value: Determine whether the failure is in the patch or environment.
+```
+
+Context requests remain session telemetry unless they expose a mission blocker,
+risk, or decision. Repeated requests may produce a versioned policy
+recommendation, but a single run must not change context policy automatically.
+
+The cold-start acceptance test is explicit: a fresh worker with no previous
+conversation should be able to continue from the mission, assignment, context
+capsule, and referenced artifacts. Routine dependence on full transcripts means
+the accepted facts or context policy are inadequate.
+
 ## Workflow Compiler
 
 The compiler must reject workflows that violate hard rules.
@@ -783,5 +986,13 @@ Harness invariants:
 - Gate satisfaction is derived from accepted events and approvals.
 - Budget checks use a recorded price snapshot or explicitly mark price data as
   unknown.
+- Ledger maintenance scales with node outcomes, not native tool calls.
+- Normal replay does not read agent transcripts.
+- Current ledger summaries and context capsules are derived projections.
+- Facts are scoped to their observed workflow and workspace state.
+- Missing evidence remains explicit and is never filled by model inference.
+- Low-risk nodes do not require an extra summarizer or reviewer by default.
+- Context policy changes are versioned and based on aggregated evidence rather
+  than a single run.
 
 Human override is allowed only when it is explicit, persisted, and replayable.

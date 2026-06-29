@@ -20,8 +20,8 @@ internal implementation grouping inside that milestone.
   can propose DAG changes but only accepted ledger events can change current
   workflow state.
 - [`runtime_harness_milestone_3_tasklist.md`](runtime_harness_milestone_3_tasklist.md):
-  the next active milestone for advisor outcome learning and orchestrator
-  decision artifacts.
+  the next active milestone for node outcomes, bounded and measurable context
+  delivery, advisor outcome learning, and orchestrator decision artifacts.
 
 ## Reading Order
 
