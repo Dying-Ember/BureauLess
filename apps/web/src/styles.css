@@ -411,7 +411,7 @@ button {
   border: 1px solid var(--border);
   border-radius: 8px;
   display: grid;
-  grid-template-rows: auto minmax(320px, 1fr);
+  grid-template-rows: auto minmax(320px, 1fr) auto;
   gap: 10px;
   min-height: 380px;
   padding: 12px;
@@ -594,33 +594,27 @@ button {
   text-align: left;
 }
 
-.runtime-node-chip.state-runnable,
-.runtime-flow-node.state-runnable {
+.runtime-node-chip.state-runnable {
   border-color: color-mix(in srgb, var(--ready) 34%, var(--border));
 }
 
-.runtime-node-chip.state-blocked,
-.runtime-flow-node.state-blocked {
+.runtime-node-chip.state-blocked {
   border-color: color-mix(in srgb, var(--blocked) 42%, var(--border));
 }
 
-.runtime-node-chip.state-needs_review,
-.runtime-flow-node.state-needs_review {
+.runtime-node-chip.state-needs_review {
   border-color: color-mix(in srgb, var(--review) 42%, var(--border));
 }
 
-.runtime-node-chip.state-completed,
-.runtime-flow-node.state-completed {
+.runtime-node-chip.state-completed {
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
 }
 
-.runtime-node-chip.state-superseded,
-.runtime-flow-node.state-superseded {
+.runtime-node-chip.state-superseded {
   border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
 }
 
-.runtime-node-chip.state-unknown,
-.runtime-flow-node.state-unknown {
+.runtime-node-chip.state-unknown {
   border-style: dashed;
 }
 
@@ -1024,19 +1018,28 @@ button {
   }
 }
 
-.runtime-flow-node {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
-  display: grid;
-  gap: 6px;
-  min-width: 220px;
-  padding: 12px 14px;
+.runtime-flow-node.state-runnable {
+  border-left-color: var(--ready);
 }
 
-.runtime-flow-node.terminal {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+.runtime-flow-node.state-blocked {
+  border-left-color: var(--blocked);
+}
+
+.runtime-flow-node.state-needs_review {
+  border-left-color: var(--review);
+}
+
+.runtime-flow-node.state-completed {
+  border-left-color: var(--accent);
+}
+
+.runtime-flow-node.state-superseded {
+  border-left-color: var(--danger);
+}
+
+.runtime-flow-node.state-unknown {
+  border-left-style: dashed;
 }
 
 .runtime-flow-node-header {
@@ -1199,21 +1202,24 @@ button {
 }
 
 .runtime-edge-inspector {
-  align-items: center;
   background: var(--surface-muted);
   border: 1px solid var(--border);
   border-radius: 8px;
-  display: flex;
+  display: grid;
   gap: 10px;
-  justify-content: space-between;
-  margin-top: 8px;
   padding: 8px 10px;
 }
 
 .runtime-edge-inspector-header {
-  align-items: center;
-  display: flex;
-  gap: 8px;
+  align-items: start;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.runtime-edge-inspector-title {
+  display: grid;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -1227,7 +1233,9 @@ button {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
+  display: inline-flex;
   font-size: 11px;
+  width: fit-content;
   padding: 4px 6px;
 }
 
