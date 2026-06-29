@@ -2,20 +2,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import hashlib
+import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import yaml
 
+from ..agents import resolve_agent_binding
 from ..core import ProtocolError
 from ..protocol.artifacts import sha256_file
 from ..protocol.assignments import AssignmentPacket
+from ..protocol.assignments import render_assignment_prompt
 from ..protocol.harness import Workflow
+from ..protocol.ledger import append_ledger_event
+from ..protocol.outcomes import (
+    build_node_outcome_decision_event,
+    node_outcome_from_session,
+    reconcile_node_outcome_state,
+)
 from ..protocol.results import ResultProposal, load_result_proposal
+from ..protocol.results import import_result_proposal
 from ..runtime_workspace import (
     WorkspaceReadiness,
     assess_workspace_isolation,
@@ -24,7 +36,9 @@ from ..runtime_workspace import (
 )
 
 
-SUPPORTED_SESSION_AGENTS = {"fake", "shell-dummy"}
+SUPPORTED_SESSION_AGENTS = {"fake", "shell-dummy", "codex-cli"}
+
+CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 @dataclass(frozen=True)
@@ -38,6 +52,11 @@ class SessionSpec:
     isolation_mode: str
     cleanup_policy: str
     shell_command: str | None = None
+    target_model: str | None = None
+    target_provider: str | None = None
+    provider_base_url: str | None = None
+    provider_api_key_env: str | None = None
+    provider_wire_api: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +69,11 @@ class SessionSpec:
             "isolation_mode": self.isolation_mode,
             "cleanup_policy": self.cleanup_policy,
             "shell_command": self.shell_command,
+            "target_model": self.target_model,
+            "target_provider": self.target_provider,
+            "provider_base_url": self.provider_base_url,
+            "provider_api_key_env": self.provider_api_key_env,
+            "provider_wire_api": self.provider_wire_api,
         }
 
 
@@ -98,6 +122,11 @@ def create_session_spec(
     isolation_mode: str = "copy",
     cleanup_policy: str = "retain_session_root",
     shell_command: str | None = None,
+    target_model: str | None = None,
+    target_provider: str | None = None,
+    provider_base_url: str | None = None,
+    provider_api_key_env: str | None = None,
+    provider_wire_api: str | None = None,
     session_id: str | None = None,
 ) -> SessionSpec:
     if agent_id not in SUPPORTED_SESSION_AGENTS:
@@ -106,6 +135,17 @@ def create_session_spec(
         raise ProtocolError(f"Unsupported isolation_mode: {isolation_mode}")
     if agent_id == "shell-dummy" and not dry_run and not shell_command:
         raise ProtocolError("shell-dummy session requires --shell-command")
+    if agent_id == "codex-cli":
+        if target_model is None or target_provider is None:
+            raise ProtocolError("codex-cli session requires target_model and target_provider")
+        resolve_agent_binding(
+            agent_id,
+            target_model=target_model,
+            target_provider=target_provider,
+            provider_base_url=provider_base_url,
+            provider_api_key_env=provider_api_key_env,
+            provider_wire_api=provider_wire_api,
+        )
     return SessionSpec(
         session_id=session_id or f"session-{uuid4()}",
         assignment_id=assignment.assignment_id,
@@ -116,10 +156,20 @@ def create_session_spec(
         isolation_mode=isolation_mode,
         cleanup_policy=cleanup_policy,
         shell_command=shell_command,
+        target_model=target_model,
+        target_provider=target_provider,
+        provider_base_url=provider_base_url,
+        provider_api_key_env=provider_api_key_env,
+        provider_wire_api=provider_wire_api,
     )
 
 
-def run_session(spec: SessionSpec, assignment: AssignmentPacket) -> SessionRecord:
+def run_session(
+    spec: SessionSpec,
+    assignment: AssignmentPacket,
+    *,
+    command_runner: CommandRunner | None = None,
+) -> SessionRecord:
     if assignment.assignment_id != spec.assignment_id:
         raise ProtocolError("Session assignment_id does not match assignment packet")
 
@@ -204,6 +254,15 @@ def run_session(spec: SessionSpec, assignment: AssignmentPacket) -> SessionRecor
                 ],
             },
             result_proposal=result.to_dict(),
+        )
+
+    if spec.agent_id == "codex-cli":
+        return _run_codex_cli_session(
+            spec,
+            assignment,
+            started_at,
+            started_monotonic,
+            command_runner=command_runner,
         )
 
     return _run_shell_dummy_session(spec, assignment, started_at, started_monotonic)
@@ -361,6 +420,53 @@ def package_session_result(
     )
 
 
+def import_session_record(
+    workflow: Workflow,
+    ledger: Any,
+    assignment: AssignmentPacket,
+    record: SessionRecord,
+    *,
+    artifact_root: Path | None = None,
+    result_id: str | None = None,
+    outcome_id: str | None = None,
+    decision_event_id: str | None = None,
+    actor: str = "harness",
+    disposition: str = "accepted",
+    accepted_event_types: list[str] | None = None,
+    validation_rule: str | None = None,
+) -> Any:
+    result = package_session_result(
+        record,
+        assignment,
+        artifact_root=artifact_root,
+        result_id=result_id,
+    )
+    updated = import_result_proposal(workflow, ledger, assignment, result)
+    outcome = reconcile_node_outcome_state(
+        node_outcome_from_session(
+            assignment,
+            record.to_dict(),
+            outcome_id=outcome_id,
+        ),
+        _accepted_workspace_ref_for_node(ledger, assignment.node_id),
+    )
+    accepted_event_types = accepted_event_types or result.emitted_events
+    if outcome.status in {"stale", "needs_review"}:
+        accepted_event_types = []
+    decision_event = build_node_outcome_decision_event(
+        outcome,
+        event_id=decision_event_id or f"event-{outcome.outcome_id}-decision",
+        mission_id=workflow.mission_id,
+        workflow_id=workflow.workflow_id,
+        actor=actor,
+        disposition=disposition,
+        accepted_event_types=accepted_event_types,
+        validation_rule=validation_rule,
+        created_at=record.finished_at,
+    )
+    return append_ledger_event(updated, decision_event, workflow)
+
+
 def _run_shell_dummy_session(
     spec: SessionSpec,
     assignment: AssignmentPacket,
@@ -371,6 +477,8 @@ def _run_shell_dummy_session(
     source_root.mkdir(parents=True, exist_ok=True)
     workspace = _prepare_session_workspace(spec, source_root)
     workdir = Path(_as_string(workspace, "path"))
+    baseline = _capture_workspace_baseline(workdir)
+    _set_workspace_state_refs(workspace, baseline.files)
     try:
         completed = subprocess.run(
             ["bash", "-lc", spec.shell_command or ""],
@@ -383,6 +491,7 @@ def _run_shell_dummy_session(
     except subprocess.TimeoutExpired as exc:
         finished_at = _now()
         native_logs = _persist_native_logs(workspace, exc.stdout or "", exc.stderr or "")
+        _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
         outcome_metrics = _base_outcome_metrics(
             wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
         )
@@ -411,6 +520,7 @@ def _run_shell_dummy_session(
     except OSError as exc:
         finished_at = _now()
         native_logs = _persist_native_logs(workspace, "", str(exc))
+        _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
         outcome_metrics = _base_outcome_metrics(
             wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
         )
@@ -442,10 +552,14 @@ def _run_shell_dummy_session(
     status = "completed" if completed.returncode == 0 else "failed"
     native_logs = _persist_native_logs(workspace, completed.stdout, completed.stderr)
     extraction = _extract_shell_dummy_output(spec, assignment, completed.stdout)
+    baseline_metrics, baseline_diff_refs = _collect_workspace_delta(workdir, baseline)
+    _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
     outcome_metrics = _merge_outcome_metrics(
-        _base_outcome_metrics(wall_time_ms=wall_time_ms),
+        _merge_outcome_metrics(_base_outcome_metrics(wall_time_ms=wall_time_ms), baseline_metrics),
         _as_mapping(extraction, "outcome_metrics", default={}),
     )
+    if not extraction["diff_refs"] and baseline_diff_refs:
+        extraction["diff_refs"] = baseline_diff_refs
     result_proposal = None
     if completed.returncode == 0:
         result = ResultProposal(
@@ -485,8 +599,200 @@ def _run_shell_dummy_session(
     )
 
 
+def _run_codex_cli_session(
+    spec: SessionSpec,
+    assignment: AssignmentPacket,
+    started_at: str,
+    started_monotonic: float,
+    *,
+    command_runner: CommandRunner | None = None,
+) -> SessionRecord:
+    source_root = Path(spec.workdir).resolve()
+    source_root.mkdir(parents=True, exist_ok=True)
+    workspace = _prepare_session_workspace(spec, source_root)
+    workdir = Path(_as_string(workspace, "path"))
+    baseline = _capture_workspace_baseline(workdir)
+    _set_workspace_state_refs(workspace, baseline.files)
+    binding = resolve_agent_binding(
+        spec.agent_id,
+        target_model=_as_string({"target_model": spec.target_model}, "target_model"),
+        target_provider=_as_string({"target_provider": spec.target_provider}, "target_provider"),
+        provider_base_url=spec.provider_base_url,
+        provider_api_key_env=spec.provider_api_key_env,
+        provider_wire_api=spec.provider_wire_api,
+    )
+    env = _build_codex_environment(binding)
+    codex_home = _prepare_codex_home(workspace, binding, env)
+    command = _build_codex_command(spec, binding, workdir)
+    prompt = _render_codex_assignment_prompt(assignment)
+
+    try:
+        try:
+            completed = _run_command_runner(
+                command_runner,
+                command,
+                cwd=workdir,
+                env=env,
+                timeout=spec.timeout_seconds,
+                input_text=prompt,
+            )
+        finally:
+            _cleanup_codex_home(codex_home)
+    except subprocess.TimeoutExpired as exc:
+        finished_at = _now()
+        native_logs = _persist_native_logs(workspace, exc.stdout or "", exc.stderr or "")
+        _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
+        outcome_metrics = _base_outcome_metrics(
+            wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
+        )
+        extraction = _empty_agent_extraction("timed_out", [])
+        extraction["contract"] = "codex_exec_v1"
+        return SessionRecord(
+            session_id=spec.session_id,
+            assignment_id=spec.assignment_id,
+            agent_id=spec.agent_id,
+            status="timed_out",
+            started_at=started_at,
+            finished_at=finished_at,
+            exit={"code": None, "reason": "timed_out"},
+            native_logs=native_logs,
+            diff_refs=[],
+            artifacts=[],
+            workspace=workspace,
+            outcome_metrics=outcome_metrics,
+            extraction=extraction,
+            result_proposal=None,
+        )
+    except OSError as exc:
+        finished_at = _now()
+        native_logs = _persist_native_logs(workspace, "", str(exc))
+        _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
+        outcome_metrics = _base_outcome_metrics(
+            wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
+        )
+        extraction = _empty_agent_extraction("launch_failed", [str(exc)])
+        extraction["contract"] = "codex_exec_v1"
+        return SessionRecord(
+            session_id=spec.session_id,
+            assignment_id=spec.assignment_id,
+            agent_id=spec.agent_id,
+            status="failed",
+            started_at=started_at,
+            finished_at=finished_at,
+            exit={"code": 1, "reason": "launch_failed"},
+            native_logs=native_logs,
+            diff_refs=[],
+            artifacts=[],
+            workspace=workspace,
+            outcome_metrics=outcome_metrics,
+            extraction=extraction,
+            result_proposal=None,
+        )
+
+    finished_at = _now()
+    wall_time_ms = max(1, int((time.monotonic() - started_monotonic) * 1000))
+    status = "completed" if completed.returncode == 0 else "failed"
+    native_logs = _persist_native_logs(workspace, completed.stdout, completed.stderr)
+    diff_metrics, diff_refs = _collect_workspace_delta(workdir, baseline)
+    _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
+    codex_metrics, codex_extraction = _extract_codex_jsonl(completed.stdout)
+    outcome_metrics = _merge_outcome_metrics(
+        _merge_outcome_metrics(_base_outcome_metrics(wall_time_ms=wall_time_ms), diff_metrics),
+        codex_metrics,
+    )
+    extraction = _empty_agent_extraction("native_stream_captured", [])
+    extraction["contract"] = "codex_exec_v1"
+    extraction["parsed_fields"] = ["effective_model", "effective_provider"]
+    extraction["effective_model"] = binding.model
+    extraction["effective_provider"] = binding.provider_id
+    extraction["warnings"].extend(codex_extraction.get("warnings", []))
+    extraction["parsed_fields"].extend(_string_list_value(codex_extraction.get("parsed_fields")))
+    assistant_text = _string_or_none(codex_extraction.get("assistant_text"))
+    if assistant_text is not None:
+        extraction["assistant_text"] = assistant_text
+    for field in (
+        "result_status",
+        "review_status",
+        "emitted_events",
+        "artifacts",
+        "verification",
+        "native_log_refs",
+        "mutation_proposal_refs",
+    ):
+        if field in codex_extraction:
+            extraction[field] = codex_extraction[field]
+    extraction["diff_refs"] = diff_refs
+    extraction["outcome_metrics"] = outcome_metrics
+    extraction["missing_fields"] = _missing_usage_fields(outcome_metrics)
+    result_proposal = None
+    if completed.returncode == 0:
+        result_status = _string_or_none(codex_extraction.get("result_status")) or "completed"
+        review_status = _string_or_none(codex_extraction.get("review_status"))
+        result_proposal = ResultProposal(
+            result_id=f"result-{spec.session_id}",
+            assignment_id=assignment.assignment_id,
+            agent_id=spec.agent_id,
+            status=result_status,
+            effective_model=binding.model,
+            effective_provider=binding.provider_id,
+            emitted_events=_string_list_value(codex_extraction.get("emitted_events")),
+            artifacts=_mapping_list_value(codex_extraction.get("artifacts")),
+            outcome_metrics=outcome_metrics,
+            verification=_mapping_value(
+                codex_extraction.get("verification"),
+                default={"status": "not_run"},
+            ),
+            native_log_refs=_mapping_list_value(codex_extraction.get("native_log_refs")),
+            mutation_proposal_refs=_string_list_value(
+                codex_extraction.get("mutation_proposal_refs")
+            ),
+            review_status=review_status,
+        ).to_dict()
+
+    return SessionRecord(
+        session_id=spec.session_id,
+        assignment_id=spec.assignment_id,
+        agent_id=spec.agent_id,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        exit={"code": completed.returncode, "reason": status},
+        native_logs=native_logs,
+        diff_refs=diff_refs,
+        artifacts=[],
+        workspace=workspace,
+        outcome_metrics=outcome_metrics,
+        extraction=extraction,
+        result_proposal=result_proposal,
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _render_codex_assignment_prompt(assignment: AssignmentPacket) -> str:
+    return "\n\n".join(
+        [
+            render_assignment_prompt(assignment),
+            "\n".join(
+                [
+                    "## Output Contract",
+                    "Return a YAML object as your final answer.",
+                    "Required fields:",
+                    "- status: completed | blocked | completed_with_proposal",
+                    "- emitted_events: list of workflow events you actually satisfied",
+                    "- verification: object with at least status",
+                    "Optional fields:",
+                    "- review_status",
+                    "- mutation_proposal_refs",
+                    "- artifacts",
+                    "Use plain YAML scalars only. Do not use markdown backticks or code fences inside values.",
+                    "Do not wrap the YAML in code fences.",
+                ]
+            ),
+        ]
+    )
 
 
 def _terminal_event_type(status: str) -> str | None:
@@ -511,19 +817,47 @@ def _extract_shell_dummy_output(
     if not _looks_structured(stripped):
         return _empty_shell_dummy_extraction("agent_does_not_emit_usage", [])
 
-    try:
-        payload = yaml.safe_load(stripped)
-    except yaml.YAMLError as exc:
-        return _empty_shell_dummy_extraction("wrapper_failed_to_extract", [str(exc)])
+    extraction = _extract_structured_output(
+        stripped,
+        extracted_status="extracted",
+        contract_name="shell_dummy_v1",
+    )
+    outcome_metrics = _mapping_value(extraction.get("outcome_metrics"))
+    if (
+        extraction["status"] == "extracted"
+        and not any(field in outcome_metrics for field in ("input_tokens", "output_tokens", "total_tokens"))
+    ):
+        extraction["warnings"].append(
+            f"{spec.agent_id} output for {assignment.assignment_id} omitted token usage fields"
+        )
+    return extraction
+
+
+def _extract_structured_output(
+    text: str,
+    *,
+    extracted_status: str,
+    contract_name: str,
+) -> dict[str, Any]:
+    payload, parse_error = _parse_structured_yaml(text)
+    if parse_error is not None:
+        extraction = _empty_shell_dummy_extraction(
+            "wrapper_failed_to_extract",
+            [str(parse_error)],
+        )
+        extraction["contract"] = contract_name
+        return extraction
 
     if not isinstance(payload, dict):
-        return _empty_shell_dummy_extraction(
+        extraction = _empty_shell_dummy_extraction(
             "wrapper_failed_to_extract",
             ["structured output must decode to a YAML object"],
         )
+        extraction["contract"] = contract_name
+        return extraction
 
-    extraction = _empty_shell_dummy_extraction("extracted", [])
-    extraction["contract"] = "shell_dummy_v1"
+    extraction = _empty_shell_dummy_extraction(extracted_status, [])
+    extraction["contract"] = contract_name
     extraction["parsed_fields"] = []
 
     result_status = _string_or_none(payload.get("status"))
@@ -617,14 +951,20 @@ def _extract_shell_dummy_output(
 
     extraction["outcome_metrics"] = outcome_metrics
     extraction["missing_fields"] = _missing_usage_fields(outcome_metrics)
-    if (
-        extraction["status"] == "extracted"
-        and not any(field in outcome_metrics for field in ("input_tokens", "output_tokens", "total_tokens"))
-    ):
-        extraction["warnings"].append(
-            f"{spec.agent_id} output for {assignment.assignment_id} omitted token usage fields"
-        )
     return extraction
+
+
+def _parse_structured_yaml(text: str) -> tuple[dict[str, Any] | Any, yaml.YAMLError | None]:
+    try:
+        return yaml.safe_load(text), None
+    except yaml.YAMLError as exc:
+        sanitized = text.replace("`", "'")
+        if sanitized != text:
+            try:
+                return yaml.safe_load(sanitized), None
+            except yaml.YAMLError:
+                pass
+        return None, exc
 
 
 def _prepare_session_workspace(spec: SessionSpec, source_root: Path) -> dict[str, Any]:
@@ -690,16 +1030,18 @@ def _prepare_git_worktree(source_root: Path, workspace_path: Path) -> dict[str, 
 
 def _persist_native_logs(
     workspace: dict[str, Any],
-    stdout: str,
-    stderr: str,
+    stdout: str | bytes,
+    stderr: str | bytes,
 ) -> dict[str, str]:
     session_root = Path(_as_string(workspace, "session_root"))
     logs_dir = session_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = logs_dir / "stdout.log"
     stderr_path = logs_dir / "stderr.log"
-    stdout_path.write_text(stdout, encoding="utf-8")
-    stderr_path.write_text(stderr, encoding="utf-8")
+    stdout_text = _text_value(stdout)
+    stderr_text = _text_value(stderr)
+    stdout_path.write_text(stdout_text, encoding="utf-8")
+    stderr_path.write_text(stderr_text, encoding="utf-8")
 
     retained_paths = list(_string_list_value(workspace.get("retained_paths")))
     for path in (str(stdout_path), str(stderr_path)):
@@ -707,8 +1049,8 @@ def _persist_native_logs(
             retained_paths.append(path)
     workspace["retained_paths"] = retained_paths
     return {
-        "stdout": stdout,
-        "stderr": stderr,
+        "stdout": stdout_text,
+        "stderr": stderr_text,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
@@ -717,6 +1059,27 @@ def _persist_native_logs(
 def _empty_shell_dummy_extraction(status: str, warnings: list[str]) -> dict[str, Any]:
     return {
         "contract": "shell_dummy_v1",
+        "status": status,
+        "warnings": warnings,
+        "parsed_fields": [],
+        "missing_fields": [
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cost_usd",
+        ],
+        "emitted_events": [],
+        "artifacts": [],
+        "verification": {"status": "not_run"},
+        "native_log_refs": [],
+        "diff_refs": [],
+        "outcome_metrics": {},
+    }
+
+
+def _empty_agent_extraction(status: str, warnings: list[str]) -> dict[str, Any]:
+    return {
+        "contract": "agent_session_v1",
         "status": status,
         "warnings": warnings,
         "parsed_fields": [],
@@ -758,6 +1121,308 @@ def _merge_outcome_metrics(
     ):
         merged["total_tokens"] = merged["input_tokens"] + merged["output_tokens"]
     return merged
+
+
+def _build_codex_environment(binding: Any) -> dict[str, str]:
+    env = os.environ.copy()
+    if binding.api_key_env:
+        value = env.get(binding.api_key_env)
+        if value is None:
+            raise ProtocolError(
+                f"Session provider_api_key_env is not set in the environment: {binding.api_key_env}"
+            )
+        env["OPENAI_API_KEY"] = value
+    return env
+
+
+def _prepare_codex_home(
+    workspace: dict[str, Any],
+    binding: Any,
+    env: dict[str, str],
+) -> Path:
+    session_root = Path(_as_string(workspace, "session_root"))
+    codex_home = session_root / "codex-home"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    auth_payload = {"OPENAI_API_KEY": env.get("OPENAI_API_KEY")}
+    (codex_home / "auth.json").write_text(
+        json.dumps(auth_payload),
+        encoding="utf-8",
+    )
+    env["CODEX_HOME"] = str(codex_home)
+    return codex_home
+
+
+def _cleanup_codex_home(codex_home: Path) -> None:
+    shutil.rmtree(codex_home, ignore_errors=True)
+
+
+def _toml_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(value)
+
+
+def _build_codex_command(spec: SessionSpec, binding: Any, workdir: Path) -> list[str]:
+    command = [
+        "codex",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--ignore-user-config",
+        "--ephemeral",
+        "--cd",
+        str(workdir),
+        "--sandbox",
+        "workspace-write",
+        "--model",
+        binding.model,
+    ]
+    for key, value in binding.codex_config_overrides.items():
+        command.extend(["-c", f"{key}={_toml_literal(value)}"])
+    return command
+
+
+def _run_command_runner(
+    command_runner: CommandRunner | None,
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+    input_text: str,
+) -> subprocess.CompletedProcess[str]:
+    runner = command_runner or subprocess.run
+    return runner(
+        command,
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+        input=input_text,
+    )
+
+
+def _collect_workspace_diff(workdir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    changed_files_count = 0
+    patch_bytes = 0
+    diff_refs: list[dict[str, Any]] = []
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=workdir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode == 0:
+        changed_files_count = len([line for line in status.stdout.splitlines() if line.strip()])
+
+    patch = subprocess.run(
+        ["git", "diff", "--binary", "--no-ext-diff"],
+        cwd=workdir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if patch.returncode == 0 and patch.stdout:
+        patch_bytes = len(patch.stdout.encode("utf-8"))
+        diff_refs.append({"kind": "inline_patch", "bytes": patch_bytes})
+
+    metrics: dict[str, Any] = {"changed_files_count": changed_files_count}
+    if patch_bytes:
+        metrics["patch_bytes"] = patch_bytes
+    return metrics, diff_refs
+
+
+@dataclass(frozen=True)
+class WorkspaceBaseline:
+    files: dict[str, str]
+    git_dirty: bool
+
+
+def _capture_workspace_baseline(workdir: Path) -> WorkspaceBaseline:
+    return WorkspaceBaseline(
+        files=_snapshot_workspace_files(workdir),
+        git_dirty=_workspace_git_dirty(workdir),
+    )
+
+
+def _set_workspace_state_refs(
+    workspace: dict[str, Any],
+    pre_files: dict[str, str],
+    post_files: dict[str, str] | None = None,
+) -> None:
+    workspace["pre_state_ref"] = _workspace_state_ref(pre_files)
+    workspace["post_state_ref"] = _workspace_state_ref(post_files or pre_files)
+
+
+def _workspace_state_ref(files: dict[str, str]) -> str:
+    digest = hashlib.sha256()
+    for path, file_hash in sorted(files.items()):
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_hash.encode("utf-8"))
+        digest.update(b"\0")
+    return f"workspace:{digest.hexdigest()}"
+
+
+def _collect_workspace_delta(
+    workdir: Path,
+    baseline: WorkspaceBaseline,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    current_files = _snapshot_workspace_files(workdir)
+    changed_files = {
+        path
+        for path in set(baseline.files) | set(current_files)
+        if baseline.files.get(path) != current_files.get(path)
+    }
+    metrics: dict[str, Any] = {"changed_files_count": len(changed_files)}
+    if baseline.git_dirty:
+        return metrics, []
+
+    diff_metrics, diff_refs = _collect_workspace_diff(workdir)
+    patch_bytes = diff_metrics.get("patch_bytes", 0)
+
+    added_files = sorted(set(current_files) - set(baseline.files))
+    if added_files:
+        added_patch_bytes = _collect_untracked_patch_bytes(workdir, added_files)
+        patch_bytes += added_patch_bytes
+
+    if patch_bytes:
+        metrics["patch_bytes"] = patch_bytes
+        if not diff_refs:
+            diff_refs = [{"kind": "inline_patch", "bytes": patch_bytes}]
+        elif added_files:
+            diff_refs = [{"kind": "inline_patch", "bytes": patch_bytes}]
+    return metrics, diff_refs
+
+
+def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    metrics: dict[str, Any] = {}
+    extraction: dict[str, Any] = {"warnings": [], "parsed_fields": []}
+    assistant_text: str | None = None
+
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            extraction["warnings"].append("codex_jsonl_line_unparseable")
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        item = payload.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = _string_or_none(item.get("text"))
+            if text is not None:
+                assistant_text = text
+
+        if payload.get("type") != "turn.completed":
+            continue
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        if isinstance(usage.get("input_tokens"), int):
+            metrics["input_tokens"] = usage["input_tokens"]
+            extraction["parsed_fields"].append("usage.input_tokens")
+        if isinstance(usage.get("output_tokens"), int):
+            metrics["output_tokens"] = usage["output_tokens"]
+            extraction["parsed_fields"].append("usage.output_tokens")
+        if isinstance(usage.get("cached_input_tokens"), int):
+            metrics["cached_input_tokens"] = usage["cached_input_tokens"]
+            extraction["parsed_fields"].append("usage.cached_input_tokens")
+        if isinstance(usage.get("reasoning_output_tokens"), int):
+            metrics["reasoning_output_tokens"] = usage["reasoning_output_tokens"]
+            extraction["parsed_fields"].append("usage.reasoning_output_tokens")
+
+    if "input_tokens" in metrics or "output_tokens" in metrics:
+        metrics["usage_confidence"] = "high"
+    if assistant_text is not None:
+        extraction["assistant_text"] = assistant_text
+        extraction["parsed_fields"].append("item.agent_message.text")
+        if _looks_structured(assistant_text.strip()):
+            structured = _extract_structured_output(
+                assistant_text.strip(),
+                extracted_status="extracted",
+                contract_name="codex_exec_v1",
+            )
+            extraction["warnings"].extend(_string_list_value(structured.get("warnings")))
+            extraction["parsed_fields"].extend(_string_list_value(structured.get("parsed_fields")))
+            for field in (
+                "result_status",
+                "review_status",
+                "emitted_events",
+                "artifacts",
+                "verification",
+                "native_log_refs",
+                "mutation_proposal_refs",
+            ):
+                if field in structured:
+                    extraction[field] = structured[field]
+            structured_metrics = _mapping_value(structured.get("outcome_metrics"))
+            if structured_metrics:
+                extraction["outcome_metrics"] = structured_metrics
+                for key, value in structured_metrics.items():
+                    metrics.setdefault(key, value)
+    return metrics, extraction
+
+
+def _snapshot_workspace_files(workdir: Path) -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    for root, dirnames, filenames in os.walk(workdir):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(workdir)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if (rel_root / name).as_posix() not in {".git", ".bureauless"}
+        ]
+        for filename in filenames:
+            rel_path = (rel_root / filename).as_posix()
+            if rel_path.startswith(".git/") or rel_path.startswith(".bureauless/"):
+                continue
+            file_path = root_path / filename
+            if file_path.is_symlink() or not file_path.is_file():
+                continue
+            snapshot[rel_path] = sha256_file(file_path)
+    return snapshot
+
+
+def _workspace_git_dirty(workdir: Path) -> bool:
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=workdir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode != 0:
+        return False
+    return any(line.strip() for line in status.stdout.splitlines())
+
+
+def _collect_untracked_patch_bytes(workdir: Path, added_files: list[str]) -> int:
+    total = 0
+    for rel_path in added_files:
+        file_path = workdir / rel_path
+        diff = subprocess.run(
+            ["git", "diff", "--no-index", "--binary", "--no-ext-diff", "--", "/dev/null", str(file_path)],
+            cwd=workdir,
+            check=False,
+            capture_output=True,
+            text=False,
+        )
+        if diff.stdout:
+            total += len(diff.stdout)
+    return total
 
 
 def _missing_usage_fields(outcome_metrics: dict[str, Any]) -> list[str]:
@@ -809,6 +1474,42 @@ def _packaging_roots(record: SessionRecord, artifact_root: Path | None) -> tuple
         root = Path(source_root).resolve()
         return root, root
     raise ProtocolError("Packaging requires an artifact_root or a session workspace path")
+
+
+def _accepted_workspace_ref_for_node(ledger: Any, node_id: str) -> str | None:
+    projection = ledger.projection if hasattr(ledger, "projection") else {}
+    projected_cursor = _string_or_none(projection.get("through_event_id"))
+    event_log = getattr(ledger, "event_log", [])
+    last_event_id = (
+        _string_or_none(event_log[-1].get("event_id")) if event_log else None
+    )
+    projected = _string_or_none(projection.get("accepted_workspace_ref"))
+    if projected is not None and projected_cursor == last_event_id:
+        latest_node_event = next(
+            (
+                event
+                for event in reversed(event_log)
+                if event.get("event_type") == "node_outcome_decided"
+                and event.get("node_id") == node_id
+                and event.get("disposition") in {"accepted", "partially_accepted"}
+            ),
+            None,
+        )
+        if latest_node_event is not None:
+            post_state_ref = _string_or_none(latest_node_event.get("post_state_ref"))
+            if post_state_ref is not None:
+                return post_state_ref
+    for event in reversed(event_log):
+        if event.get("event_type") != "node_outcome_decided":
+            continue
+        if event.get("node_id") != node_id:
+            continue
+        if event.get("disposition") not in {"accepted", "partially_accepted"}:
+            continue
+        post_state_ref = _string_or_none(event.get("post_state_ref"))
+        if post_state_ref is not None:
+            return post_state_ref
+    return None
 
 
 def _normalize_packaged_artifact(
@@ -936,6 +1637,14 @@ def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _text_value(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
 def _string_value(value: Any, default: str) -> str:
     return value if isinstance(value, str) and value else default
 
@@ -954,3 +1663,13 @@ def _mapping_list_or_none(value: Any) -> list[dict[str, Any]] | None:
     if isinstance(value, list) and all(isinstance(item, dict) for item in value):
         return value
     return None
+
+
+def _mapping_value(value: Any, default: dict[str, Any] | None = None) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return default or {}
+
+
+def _mapping_list_value(value: Any) -> list[dict[str, Any]]:
+    return value if isinstance(value, list) and all(isinstance(item, dict) for item in value) else []

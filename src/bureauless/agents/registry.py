@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Callable
+from typing import Any, Callable
 
 from ..core import ProtocolError
 from ..runtime_workspace import WorkspaceReadiness, assess_workspace_isolation
@@ -36,6 +36,48 @@ class AgentSpec:
             "version_args": self.version_args,
             "cancellation": self.cancellation,
             "metrics_capability": self.metrics_capability,
+        }
+
+
+@dataclass(frozen=True)
+class ProviderProfile:
+    provider_id: str
+    kind: str
+    default_api_key_env: str | None
+    requires_base_url: bool
+    supports_base_url_override: bool
+    default_wire_api: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider_id": self.provider_id,
+            "kind": self.kind,
+            "default_api_key_env": self.default_api_key_env,
+            "requires_base_url": self.requires_base_url,
+            "supports_base_url_override": self.supports_base_url_override,
+            "default_wire_api": self.default_wire_api,
+        }
+
+
+@dataclass(frozen=True)
+class AgentBinding:
+    agent_id: str
+    provider_id: str
+    model: str
+    api_key_env: str | None
+    base_url: str | None
+    wire_api: str | None
+    codex_config_overrides: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "provider_id": self.provider_id,
+            "model": self.model,
+            "api_key_env": self.api_key_env,
+            "base_url": self.base_url,
+            "wire_api": self.wire_api,
+            "codex_config_overrides": self.codex_config_overrides,
         }
 
 
@@ -213,6 +255,28 @@ AGENT_SPECS: dict[str, AgentSpec] = {
     ),
 }
 
+PROVIDER_PROFILES: dict[str, ProviderProfile] = {
+    "openai": ProviderProfile(
+        provider_id="openai",
+        kind="codex_builtin_openai",
+        default_api_key_env="OPENAI_API_KEY",
+        requires_base_url=False,
+        supports_base_url_override=True,
+    ),
+    "openai-compatible": ProviderProfile(
+        provider_id="openai-compatible",
+        kind="codex_custom_openai_compatible",
+        default_api_key_env=None,
+        requires_base_url=True,
+        supports_base_url_override=True,
+        default_wire_api="responses",
+    ),
+}
+
+AGENT_PROVIDER_BINDINGS: dict[str, set[str]] = {
+    "codex-cli": {"openai", "openai-compatible"},
+}
+
 
 def list_agent_specs() -> list[AgentSpec]:
     return [AGENT_SPECS[agent_id] for agent_id in sorted(AGENT_SPECS)]
@@ -223,6 +287,81 @@ def get_agent_spec(agent_id: str) -> AgentSpec:
         return AGENT_SPECS[agent_id]
     except KeyError as exc:
         raise ProtocolError(f"Unknown agent id: {agent_id}") from exc
+
+
+def list_provider_profiles() -> list[ProviderProfile]:
+    return [PROVIDER_PROFILES[provider_id] for provider_id in sorted(PROVIDER_PROFILES)]
+
+
+def get_provider_profile(provider_id: str) -> ProviderProfile:
+    try:
+        return PROVIDER_PROFILES[provider_id]
+    except KeyError as exc:
+        raise ProtocolError(f"Unknown provider id: {provider_id}") from exc
+
+
+def resolve_agent_binding(
+    agent_id: str,
+    *,
+    target_model: str,
+    target_provider: str,
+    provider_base_url: str | None = None,
+    provider_api_key_env: str | None = None,
+    provider_wire_api: str | None = None,
+) -> AgentBinding:
+    model = target_model.strip()
+    if not model:
+        raise ProtocolError("target_model must be a non-empty string")
+
+    supported_providers = AGENT_PROVIDER_BINDINGS.get(agent_id)
+    if supported_providers is None:
+        raise ProtocolError(f"Agent does not support runtime provider bindings: {agent_id}")
+
+    if target_provider not in supported_providers:
+        allowed = ", ".join(sorted(supported_providers))
+        raise ProtocolError(
+            f"Provider {target_provider!r} is not supported for agent {agent_id!r}; allowed: {allowed}"
+        )
+
+    profile = get_provider_profile(target_provider)
+    base_url = provider_base_url.strip() if isinstance(provider_base_url, str) else None
+    if profile.requires_base_url and not base_url:
+        raise ProtocolError(f"Provider {target_provider!r} requires provider_base_url")
+
+    api_key_env = provider_api_key_env.strip() if isinstance(provider_api_key_env, str) else None
+    if api_key_env is None:
+        api_key_env = profile.default_api_key_env
+    if target_provider == "openai-compatible" and not api_key_env:
+        raise ProtocolError("Provider 'openai-compatible' requires provider_api_key_env")
+
+    wire_api = provider_wire_api.strip() if isinstance(provider_wire_api, str) else None
+    if wire_api is None:
+        wire_api = profile.default_wire_api
+
+    config_overrides: dict[str, Any] = {"model_provider": "openai"}
+    if target_provider == "openai":
+        if base_url:
+            config_overrides["openai_base_url"] = base_url
+    else:
+        custom_provider_id = "bureauless"
+        config_overrides = {
+            "model_provider": custom_provider_id,
+            f"model_providers.{custom_provider_id}.name": custom_provider_id,
+            f"model_providers.{custom_provider_id}.base_url": base_url,
+            f"model_providers.{custom_provider_id}.requires_openai_auth": True,
+        }
+        if wire_api:
+            config_overrides[f"model_providers.{custom_provider_id}.wire_api"] = wire_api
+
+    return AgentBinding(
+        agent_id=agent_id,
+        provider_id=profile.provider_id,
+        model=model,
+        api_key_env=api_key_env,
+        base_url=base_url,
+        wire_api=wire_api,
+        codex_config_overrides=config_overrides,
+    )
 
 
 def doctor_agent(

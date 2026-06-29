@@ -53,9 +53,9 @@ Within this document, `milestone` names the user-visible delivery target and
 Goal: launch one bounded real agent path for the Milestone 3 demo without
 expanding into a full provider abstraction platform.
 
-### [ ] RM3-00: Codex CLI Binding Spine
+### [x] RM3-00: Codex CLI Binding Spine
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high
@@ -228,9 +228,9 @@ compilable.
 Goal: preserve full execution evidence while committing only the minimum facts
 needed for safe continuation, replay, and targeted context delivery.
 
-### [ ] RM3-07: Node Outcome And Workspace Delta Protocol
+### [x] RM3-07: Node Outcome And Workspace Delta Protocol
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high

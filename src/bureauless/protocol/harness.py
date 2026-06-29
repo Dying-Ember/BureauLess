@@ -60,6 +60,7 @@ class Ledger:
     ledger_version: int
     current_goal: str
     current_plan_ref: str
+    projection: dict[str, Any]
     public_findings: list[dict[str, Any]]
     decisions: list[dict[str, Any]]
     risks: list[dict[str, Any]]
@@ -75,6 +76,7 @@ class Ledger:
             ledger_version=_as_int(data, "ledger_version"),
             current_goal=_as_string(data, "current_goal"),
             current_plan_ref=_as_string(data, "current_plan_ref"),
+            projection=_as_mapping(data, "projection", default={}),
             public_findings=_as_mapping_list(data, "public_findings", default=[]),
             decisions=_as_mapping_list(data, "decisions", default=[]),
             risks=_as_mapping_list(data, "risks", default=[]),
@@ -272,7 +274,9 @@ def load_mission(path: Path) -> Mission:
 
 
 def load_ledger(path: Path) -> Ledger:
-    return Ledger.from_dict(_load_yaml_mapping(path, "Ledger"))
+    from .ledger import rebuild_ledger_projection
+
+    return rebuild_ledger_projection(Ledger.from_dict(_load_yaml_mapping(path, "Ledger")))
 
 
 def load_workflow(path: Path) -> Workflow:

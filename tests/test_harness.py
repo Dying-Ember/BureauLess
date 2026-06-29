@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 import subprocess
 
 import pytest
@@ -11,12 +12,14 @@ from bureauless.agents import (
     doctor_agent,
     list_agent_compatibility,
     list_agent_specs,
+    resolve_agent_binding,
 )
 from bureauless.cli import main
-from bureauless.cli.main import prepare_mutation_demo_workspace
+from bureauless.cli.main import prepare_mutation_demo_workspace, run_live_demo
 from bureauless.core import ProtocolError
 from bureauless.protocol import (
     append_ledger_event,
+    build_node_outcome_decision_event,
     estimate_cost_from_snapshot,
     evaluate_pre_dispatch_policy,
     export_assignment,
@@ -24,7 +27,9 @@ from bureauless.protocol import (
     load_assignment,
     load_price_snapshot,
     load_result_proposal,
+    load_node_outcome,
     materialize_current_workflow,
+    node_outcome_from_session,
     render_assignment_prompt,
     sha256_file,
     validate_artifact_record,
@@ -52,6 +57,7 @@ from bureauless.runtime.sessions import (
     build_session_terminal_event,
     cancel_session_record,
     create_session_spec,
+    import_session_record,
     load_session_record,
     package_session_result,
     run_session,
@@ -1179,6 +1185,64 @@ def test_ledger_findings_require_provenance() -> None:
         raise AssertionError("Expected ProtocolError")
 
 
+def test_load_ledger_rebuilds_projection_when_cursor_missing(tmp_path) -> None:
+    ledger_path = tmp_path / "ledger.yaml"
+    ledger_path.write_text(
+        yaml.safe_dump(
+            {
+                "mission_id": "demo",
+                "ledger_version": 1,
+                "current_goal": "Goal",
+                "current_plan_ref": "workflow.yaml",
+                "public_findings": [
+                    {
+                        "finding_id": "finding-001",
+                        "content": "obsolete",
+                        "source_event": "event-001",
+                        "source_agent": "worker",
+                        "accepted_by": "harness",
+                    }
+                ],
+                "decisions": [{"decision_id": "decision-001"}],
+                "risks": [{"risk_id": "risk-001"}],
+                "artifacts": [],
+                "broadcasts": [],
+                "open_questions": [{"question_id": "question-001"}],
+                "event_log": [
+                    {
+                        "event_id": "event-001",
+                        "event_type": "node_outcome_decided",
+                        "mission_id": "demo",
+                        "workflow_id": "test-workflow",
+                        "assignment_id": "assign-001",
+                        "node_id": "implement",
+                        "role": "coder",
+                        "agent_id": "codex-cli",
+                        "session_id": "session-001",
+                        "source_outcome_id": "outcome-001",
+                        "outcome_status": "completed",
+                        "actor": "harness",
+                        "disposition": "accepted",
+                        "accepted_event_types": ["patch_ready"],
+                        "post_state_ref": "workspace:abc123",
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_ledger(ledger_path)
+
+    assert loaded.public_findings == []
+    assert loaded.decisions == []
+    assert loaded.risks == []
+    assert loaded.open_questions == []
+    assert loaded.projection["through_event_id"] == "event-001"
+    assert loaded.projection["accepted_workspace_ref"] == "workspace:abc123"
+
+
 def test_appends_valid_workflow_event() -> None:
     workflow = _workflow()
     ledger = Ledger.from_dict(
@@ -1187,6 +1251,7 @@ def test_appends_valid_workflow_event() -> None:
             "ledger_version": 1,
             "current_goal": "Goal",
             "current_plan_ref": "workflow.yaml",
+            "projection": {},
             "public_findings": [],
             "decisions": [],
             "risks": [],
@@ -2003,6 +2068,105 @@ def test_cli_result_import(tmp_path) -> None:
     assert updated.event_log[1]["event_type"] == "patch_ready"
 
 
+def test_cli_session_import(tmp_path, capsys) -> None:
+    workflow_path = Path("examples/missions/demo/workflows/coder_reviewer_committer.yaml")
+    ledger_path = tmp_path / "ledger.yaml"
+    assignment_path = tmp_path / "assignment.yaml"
+    session_path = tmp_path / "session.yaml"
+    ledger_path.write_text(
+        yaml.safe_dump(
+            {
+                "mission_id": "demo",
+                "ledger_version": 1,
+                "current_goal": "Goal",
+                "current_plan_ref": "workflow.yaml",
+                "public_findings": [],
+                "decisions": [],
+                "risks": [],
+                "artifacts": [],
+                "broadcasts": [],
+                "open_questions": [],
+                "event_log": [],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    assignment = export_assignment(
+        load_workflow(workflow_path),
+        load_ledger(ledger_path),
+        "implement",
+        assignment_id="assign-001",
+    )
+    assignment_path.write_text(yaml.safe_dump(assignment.to_dict(), sort_keys=False), encoding="utf-8")
+    session_path.write_text(
+        yaml.safe_dump(
+            {
+                "session_id": "session-001",
+                "assignment_id": "assign-001",
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+                "exit": {"code": 0, "reason": "completed"},
+                "native_logs": {"stdout": "", "stderr": ""},
+                "diff_refs": [],
+                "artifacts": [],
+                "workspace": {
+                    "path": str(tmp_path),
+                    "source_root": str(tmp_path),
+                    "session_root": str(tmp_path),
+                },
+                "outcome_metrics": {
+                    "wall_time_ms": 1000,
+                    "changed_files_count": 0,
+                },
+                "extraction": {"status": "native_stream_captured"},
+                "result_proposal": {
+                    "result_id": "result-session-001",
+                    "assignment_id": "assign-001",
+                    "agent_id": "codex-cli",
+                    "status": "completed",
+                    "effective_model": "gpt-5.4-mini",
+                    "effective_provider": "openai-compatible",
+                    "emitted_events": ["patch_ready"],
+                    "artifacts": [],
+                    "outcome_metrics": {
+                        "wall_time_ms": 1000,
+                        "changed_files_count": 0,
+                    },
+                    "verification": {"status": "passed"},
+                    "native_log_refs": [],
+                    "mutation_proposal_refs": [],
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "session",
+            "import",
+            str(workflow_path),
+            str(ledger_path),
+            str(assignment_path),
+            str(session_path),
+        ]
+    )
+    updated = load_ledger(ledger_path)
+    payload = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert [event["event_type"] for event in updated.event_log] == [
+        "result_submitted",
+        "patch_ready",
+        "node_outcome_decided",
+    ]
+    assert payload[-1]["event_type"] == "node_outcome_decided"
+
+
 def test_result_import_advances_gatekeeper_and_replay_state() -> None:
     workflow = _workflow()
     ledger = Ledger.from_dict(
@@ -2045,6 +2209,372 @@ def test_result_import_advances_gatekeeper_and_replay_state() -> None:
     assert gatekeeper.ready == ["review"]
     assert replay.nodes["implement"].state == "completed"
     assert replay.nodes["review"].state == "runnable"
+
+
+def test_builds_node_outcome_from_session_record() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    session_record = {
+        "session_id": "session-001",
+        "assignment_id": "assign-001",
+        "agent_id": "codex-cli",
+        "status": "completed",
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+        "exit": {"code": 0, "reason": "completed"},
+        "native_logs": {"stdout": "", "stderr": ""},
+        "diff_refs": [{"kind": "inline_patch", "bytes": 12}],
+        "artifacts": [],
+        "workspace": {
+            "pre_state_ref": "workspace:before",
+            "post_state_ref": "workspace:after",
+        },
+        "outcome_metrics": {
+            "wall_time_ms": 1000,
+            "changed_files_count": 1,
+            "patch_bytes": 12,
+            "input_tokens": 100,
+            "output_tokens": 20,
+        },
+        "extraction": {"status": "native_stream_captured"},
+        "result_proposal": {
+            "result_id": "result-001",
+            "assignment_id": "assign-001",
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "effective_model": "gpt-5.4-mini",
+            "effective_provider": "openai-compatible",
+            "emitted_events": [],
+            "artifacts": [],
+            "outcome_metrics": {},
+            "verification": {"status": "not_run"},
+            "native_log_refs": [],
+            "mutation_proposal_refs": [],
+        },
+    }
+
+    outcome = node_outcome_from_session(assignment, session_record, outcome_id="outcome-001")
+    loaded = load_node_outcome(outcome.to_dict())
+
+    assert loaded.outcome_id == "outcome-001"
+    assert loaded.status == "completed"
+    assert loaded.node_id == "implement"
+    assert loaded.effective_model == "gpt-5.4-mini"
+    assert loaded.pre_state_ref == "workspace:before"
+    assert loaded.post_state_ref == "workspace:after"
+    assert loaded.observed_delta["changed_files_count"] == 1
+    assert loaded.observed_delta["patch_bytes"] == 12
+
+
+def test_appends_node_outcome_decision_event() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    outcome = node_outcome_from_session(
+        assignment,
+        {
+            "session_id": "session-001",
+            "assignment_id": "assign-001",
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:00:01Z",
+            "exit": {"code": 0, "reason": "completed"},
+            "native_logs": {"stdout": "", "stderr": ""},
+            "diff_refs": [],
+            "artifacts": [],
+            "workspace": {},
+            "outcome_metrics": {"wall_time_ms": 1000, "changed_files_count": 0},
+            "extraction": {"status": "native_stream_captured"},
+            "result_proposal": {
+                "result_id": "result-001",
+                "assignment_id": "assign-001",
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "effective_model": "gpt-5.4-mini",
+                "effective_provider": "openai-compatible",
+                "emitted_events": [],
+                "artifacts": [],
+                "outcome_metrics": {},
+                "verification": {"status": "not_run"},
+                "native_log_refs": [],
+                "mutation_proposal_refs": [],
+            },
+        },
+        outcome_id="outcome-001",
+    )
+    event = build_node_outcome_decision_event(
+        outcome,
+        event_id="event-outcome-001",
+        mission_id=workflow.mission_id,
+        workflow_id=workflow.workflow_id,
+        actor="harness",
+        disposition="accepted",
+        accepted_event_types=["patch_ready"],
+        validation_rule="manual_test_v1",
+        created_at="2026-01-01T00:00:02Z",
+    )
+
+    updated = append_ledger_event(ledger, event, workflow)
+
+    assert updated.event_log[0]["event_type"] == "node_outcome_decided"
+    assert updated.event_log[0]["source_outcome_id"] == "outcome-001"
+    assert updated.event_log[0]["accepted_event_types"] == ["patch_ready"]
+
+
+def test_import_session_record_appends_result_and_outcome_decision(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    payload = yaml.safe_dump(
+        {
+            "status": "completed",
+            "effective_model": "gpt-5.4-mini",
+            "effective_provider": "openai-compatible",
+            "emitted_events": ["patch_ready"],
+            "verification": {"status": "passed"},
+        },
+        sort_keys=False,
+    ).strip()
+    record = run_session(
+        create_session_spec(
+            assignment=assignment,
+            agent_id="shell-dummy",
+            workdir=source_root,
+            shell_command=f"cat <<'EOF'\n{payload}\nEOF",
+            session_id="session-001",
+        ),
+        assignment,
+    )
+
+    updated = import_session_record(workflow, ledger, assignment, record)
+    replay = replay_workflow(workflow, updated)
+
+    assert [event["event_type"] for event in updated.event_log] == [
+        "result_submitted",
+        "patch_ready",
+        "node_outcome_decided",
+    ]
+    assert updated.event_log[-1]["source_outcome_id"] == "outcome-session-001"
+    assert updated.event_log[-1]["accepted_event_types"] == ["patch_ready"]
+    assert replay.nodes["implement"].state == "completed"
+    assert replay.nodes["review"].state == "runnable"
+
+
+def test_import_session_record_marks_outcome_stale_when_pre_state_is_outdated(
+    tmp_path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-outcome-old",
+            "event_type": "node_outcome_decided",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "assignment_id": "assign-old",
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "codex-cli",
+            "session_id": "session-old",
+            "source_outcome_id": "outcome-old",
+            "outcome_status": "completed",
+            "actor": "harness",
+            "disposition": "accepted",
+            "accepted_event_types": [],
+            "post_state_ref": "workspace:accepted-current",
+        },
+        workflow,
+    )
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001", force=True)
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            session_id="session-001",
+            agent_id="shell-dummy",
+        ),
+        workflow,
+    )
+    payload = yaml.safe_dump(
+        {
+            "status": "completed",
+            "effective_model": "gpt-5.4-mini",
+            "effective_provider": "openai-compatible",
+            "emitted_events": ["patch_ready"],
+            "verification": {"status": "passed"},
+        },
+        sort_keys=False,
+    ).strip()
+    record = run_session(
+        create_session_spec(
+            assignment=assignment,
+            agent_id="shell-dummy",
+            workdir=source_root,
+            shell_command=f"cat <<'EOF'\n{payload}\nEOF",
+            session_id="session-001",
+        ),
+        assignment,
+    )
+    record = replace(
+        record,
+        workspace={
+            **record.workspace,
+            "pre_state_ref": "workspace:older-pre-state",
+            "post_state_ref": "workspace:new-post-state",
+        },
+    )
+
+    updated = import_session_record(workflow, ledger, assignment, record)
+    replay = replay_workflow(workflow, updated)
+
+    assert updated.event_log[-1]["event_type"] == "node_outcome_decided"
+    assert updated.event_log[-1]["outcome_status"] == "stale"
+    assert updated.event_log[-1]["accepted_event_types"] == []
+    assert replay.nodes["implement"].state == "blocked"
+    assert replay.nodes["review"].state == "blocked"
+
+
+def test_replay_accepts_outcome_decision_without_raw_workflow_event() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            session_id="session-001",
+            agent_id="codex-cli",
+        ),
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-result-001",
+            "event_type": "result_submitted",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "assignment_id": "assign-001",
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "codex-cli",
+            "result": {
+                "result_id": "result-001",
+                "assignment_id": "assign-001",
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "emitted_events": [],
+                "artifacts": [],
+                "outcome_metrics": {},
+                "verification": {"status": "passed"},
+                "native_log_refs": [],
+                "mutation_proposal_refs": [],
+            },
+        },
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-outcome-001",
+            "event_type": "node_outcome_decided",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "assignment_id": "assign-001",
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "codex-cli",
+            "session_id": "session-001",
+            "source_outcome_id": "outcome-001",
+            "outcome_status": "completed",
+            "actor": "harness",
+            "disposition": "accepted",
+            "accepted_event_types": ["patch_ready"],
+        },
+        workflow,
+    )
+
+    replay = replay_workflow(workflow, ledger)
+    gatekeeper = evaluate_gatekeeper(workflow, ledger)
+
+    assert replay.nodes["implement"].state == "completed"
+    assert replay.nodes["review"].state == "runnable"
+    assert gatekeeper.ready == ["review"]
+
+
+def test_replay_rejects_raw_workflow_event_when_outcome_decision_rejects_it() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            session_id="session-001",
+            agent_id="codex-cli",
+        ),
+        workflow,
+    )
+    result = load_result_proposal(
+        {
+            "result_id": "result-001",
+            "assignment_id": "assign-001",
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "emitted_events": ["patch_ready"],
+            "artifacts": [],
+            "outcome_metrics": {
+                "wall_time_ms": 1000,
+                "changed_files_count": 1,
+            },
+            "verification": {"status": "passed"},
+            "native_log_refs": [],
+        }
+    )
+    ledger = import_result_proposal(
+        workflow,
+        ledger,
+        assignment,
+        result,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-outcome-001",
+            "event_type": "node_outcome_decided",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "assignment_id": "assign-001",
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "codex-cli",
+            "session_id": "session-001",
+            "source_outcome_id": "outcome-001",
+            "outcome_status": "completed",
+            "actor": "harness",
+            "disposition": "rejected",
+            "accepted_event_types": [],
+        },
+        workflow,
+    )
+
+    replay = replay_workflow(workflow, ledger)
+    gatekeeper = evaluate_gatekeeper(workflow, ledger)
+
+    assert replay.nodes["implement"].state == "blocked"
+    assert replay.nodes["review"].state == "blocked"
+    assert gatekeeper.ready == []
+    assert replay.nodes["review"].blocked_reasons[0].missing_ref == "patch_ready"
 
 
 def test_cli_mission_golden_path_prepares_manifest_and_executes_end_to_end(
@@ -2124,6 +2654,58 @@ def test_cli_mission_golden_path_prepares_manifest_and_executes_end_to_end(
         "result_submitted",
         "commit_created",
     ]
+
+
+def test_run_live_demo_executes_three_node_session_path(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        prompt = kwargs["input"]
+        if "Node: implement" in prompt:
+            event_name = "patch_ready"
+        elif "Node: review" in prompt:
+            event_name = "review_approved"
+        elif "Node: commit" in prompt:
+            event_name = "commit_created"
+        else:
+            raise AssertionError(prompt)
+        stdout = (
+            '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'
+            f'status: completed\\nemitted_events:\\n  - {event_name}\\nverification:\\n  status: passed'
+            '"}}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20}}\n'
+        )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        timeout_seconds=10.0,
+        command_runner=fake_runner,
+    )
+
+    assert manifest["terminal_complete"] is True
+    assert manifest["ready"] == []
+    assert manifest["node_states"] == {
+        "implement": "completed",
+        "review": "completed",
+        "commit": "completed",
+    }
+    assert [step["node_id"] for step in manifest["steps"]] == [
+        "implement",
+        "review",
+        "commit",
+    ]
+    assert manifest["steps"][0]["ready_after"] == ["review"]
+    assert manifest["steps"][1]["ready_after"] == ["commit"]
+    assert manifest["steps"][2]["ready_after"] == []
 
 
 def test_lists_agent_specs() -> None:
@@ -2357,6 +2939,60 @@ def test_dispatch_readiness_reports_blocked_when_worktree_is_unavailable(tmp_pat
     assert readiness.isolation.reasons == ["worktree_unavailable"]
 
 
+def test_resolve_codex_openai_binding_defaults_to_codex_api_key() -> None:
+    binding = resolve_agent_binding(
+        "codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+    )
+
+    assert binding.agent_id == "codex-cli"
+    assert binding.provider_id == "openai"
+    assert binding.model == "gpt-5"
+    assert binding.api_key_env == "OPENAI_API_KEY"
+    assert binding.codex_config_overrides == {"model_provider": "openai"}
+
+
+def test_resolve_codex_openai_compatible_binding_requires_base_url_and_api_key_env() -> None:
+    with pytest.raises(ProtocolError, match="requires provider_base_url"):
+        resolve_agent_binding(
+            "codex-cli",
+            target_model="gpt-5",
+            target_provider="openai-compatible",
+        )
+
+    with pytest.raises(ProtocolError, match="requires provider_api_key_env"):
+        resolve_agent_binding(
+            "codex-cli",
+            target_model="gpt-5",
+            target_provider="openai-compatible",
+            provider_base_url="https://proxy.example.com/v1",
+        )
+
+    binding = resolve_agent_binding(
+        "codex-cli",
+        target_model="gpt-5-mini",
+        target_provider="openai-compatible",
+        provider_base_url="https://proxy.example.com/v1",
+        provider_api_key_env="OPENAI_API_KEY",
+    )
+
+    assert binding.provider_id == "openai-compatible"
+    assert binding.base_url == "https://proxy.example.com/v1"
+    assert binding.api_key_env == "OPENAI_API_KEY"
+    assert binding.codex_config_overrides["model_provider"] == "bureauless"
+    assert (
+        binding.codex_config_overrides["model_providers.bureauless.base_url"]
+        == "https://proxy.example.com/v1"
+    )
+    assert (
+        binding.codex_config_overrides[
+            "model_providers.bureauless.requires_openai_auth"
+        ]
+        is True
+    )
+
+
 def test_cli_agent_list(capsys) -> None:
     exit_code = main(["agent", "list"])
     captured = capsys.readouterr()
@@ -2523,6 +3159,35 @@ def test_shell_dummy_session_timeout(tmp_path) -> None:
     assert record.exit["reason"] == "timed_out"
     assert record.extraction["status"] == "timed_out"
     assert record.result_proposal is None
+
+
+def test_shell_dummy_failed_run_reports_partial_workspace_effects(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    tracked = source_root / "tracked.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="shell-dummy",
+        workdir=source_root,
+        shell_command=(
+            "python3 -c \"from pathlib import Path; "
+            "Path('tracked.txt').write_text('changed\\n', encoding='utf-8'); "
+            "raise SystemExit(3)\""
+        ),
+        session_id="session-001",
+    )
+
+    record = run_session(spec, assignment)
+
+    assert record.status == "failed"
+    assert record.result_proposal is None
+    assert record.outcome_metrics["changed_files_count"] == 1
+    assert record.workspace["pre_state_ref"] != record.workspace["post_state_ref"]
 
 
 def test_shell_dummy_extracts_structured_native_output(tmp_path) -> None:
@@ -2720,6 +3385,56 @@ def test_shell_dummy_copy_isolation_preserves_source_root(tmp_path) -> None:
     assert str(workspace_file.parent) in record.workspace["retained_paths"]
 
 
+def test_shell_dummy_ignores_preexisting_dirty_workspace_in_delta_metrics(tmp_path) -> None:
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    tracked = source_root / "tracked.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "tracked.txt"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    tracked.write_text("dirty-before-session\n", encoding="utf-8")
+
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="shell-dummy",
+        workdir=source_root,
+        isolation_mode="copy",
+        shell_command="printf 'plain text output only\\n'",
+        session_id="session-001",
+    )
+
+    record = run_session(spec, assignment)
+
+    assert record.status == "completed"
+    assert record.outcome_metrics["changed_files_count"] == 0
+    assert "patch_bytes" not in record.outcome_metrics
+    assert record.diff_refs == []
+
+
 def test_shell_dummy_worktree_isolation_when_git_available(tmp_path) -> None:
     source_root = tmp_path / "repo"
     source_root.mkdir()
@@ -2784,6 +3499,361 @@ def test_shell_dummy_worktree_isolation_when_git_available(tmp_path) -> None:
     assert record.workspace["mode"] == "worktree"
     assert tracked.read_text(encoding="utf-8") == "original\n"
     assert workspace_file.read_text(encoding="utf-8") == "changed\n"
+
+
+def test_codex_session_requires_target_model_and_provider(tmp_path) -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+
+    with pytest.raises(ProtocolError, match="requires target_model and target_provider"):
+        create_session_spec(
+            assignment=assignment,
+            agent_id="codex-cli",
+            workdir=tmp_path,
+            session_id="session-001",
+        )
+
+
+def test_codex_session_produces_importable_result_from_completed_run(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    tracked = source_root / "tracked.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "tracked.txt"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="codex-cli",
+        workdir=source_root,
+        target_model="gpt-5",
+        target_provider="openai",
+        session_id="session-001",
+    )
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        assert command[:4] == ["codex", "--ask-for-approval", "never", "exec"]
+        assert "--json" in command
+        assert "--ignore-user-config" in command
+        assert "--ephemeral" in command
+        assert "--model" in command
+        assert "gpt-5" in command
+        assert '-c' in command
+        assert 'model_provider="openai"' in command
+        assert kwargs["env"]["OPENAI_API_KEY"] == "test-key"
+        assert "CODEX_HOME" in kwargs["env"]
+        auth_path = Path(kwargs["env"]["CODEX_HOME"]) / "auth.json"
+        assert auth_path.exists()
+        auth_payload = yaml.safe_load(auth_path.read_text(encoding="utf-8"))
+        assert auth_payload["OPENAI_API_KEY"] == "test-key"
+        Path(kwargs["cwd"]) .joinpath("tracked.txt").write_text("changed\n", encoding="utf-8")
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='{"type":"message","role":"assistant","content":"done"}\n',
+            stderr="",
+        )
+
+    record = run_session(spec, assignment, command_runner=fake_runner)
+
+    assert record.status == "completed"
+    assert record.result_proposal is not None
+    assert record.result_proposal["effective_model"] == "gpt-5"
+    assert record.result_proposal["effective_provider"] == "openai"
+    assert record.outcome_metrics["changed_files_count"] == 1
+    assert record.outcome_metrics["patch_bytes"] > 0
+    assert record.diff_refs[0]["kind"] == "inline_patch"
+
+
+def test_codex_session_ignores_preexisting_dirty_workspace_in_delta_metrics(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    tracked = source_root / "tracked.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "tracked.txt"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    tracked.write_text("dirty-before-session\n", encoding="utf-8")
+
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="codex-cli",
+        workdir=source_root,
+        target_model="gpt-5",
+        target_provider="openai",
+        session_id="session-001",
+    )
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout='{"type":"message","role":"assistant","content":"OK"}\n',
+            stderr="",
+        )
+
+    record = run_session(spec, assignment, command_runner=fake_runner)
+
+    assert record.status == "completed"
+    assert record.outcome_metrics["changed_files_count"] == 0
+    assert "patch_bytes" not in record.outcome_metrics
+    assert record.diff_refs == []
+
+
+def test_codex_session_extracts_usage_from_jsonl(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    tracked = source_root / "tracked.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "tracked.txt"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="codex-cli",
+        workdir=source_root,
+        target_model="gpt-5",
+        target_provider="openai",
+        session_id="session-001",
+    )
+
+    stdout = (
+        '{"type":"thread.started","thread_id":"x"}\n'
+        '{"type":"turn.started"}\n'
+        '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"OK"}}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":25,"output_tokens":20,"reasoning_output_tokens":10}}\n'
+    )
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    record = run_session(spec, assignment, command_runner=fake_runner)
+
+    assert record.outcome_metrics["input_tokens"] == 100
+    assert record.outcome_metrics["output_tokens"] == 20
+    assert record.outcome_metrics["total_tokens"] == 120
+    assert record.outcome_metrics["cached_input_tokens"] == 25
+    assert record.outcome_metrics["reasoning_output_tokens"] == 10
+    assert record.outcome_metrics["usage_confidence"] == "high"
+    assert record.extraction["assistant_text"] == "OK"
+    assert not Path(record.workspace["session_root"]).joinpath("codex-home").exists()
+
+
+def test_codex_session_extracts_structured_result_from_assistant_text(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    tracked = source_root / "tracked.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "tracked.txt"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="codex-cli",
+        workdir=source_root,
+        target_model="gpt-5",
+        target_provider="openai",
+        session_id="session-001",
+    )
+
+    stdout = (
+        '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"status: completed\\n'
+        'emitted_events:\\n  - patch_ready\\nverification:\\n  status: passed"}}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20}}\n'
+    )
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        assert "Output Contract" in kwargs["input"]
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    record = run_session(spec, assignment, command_runner=fake_runner)
+
+    assert record.result_proposal is not None
+    assert record.result_proposal["status"] == "completed"
+    assert record.result_proposal["emitted_events"] == ["patch_ready"]
+    assert record.result_proposal["verification"] == {"status": "passed"}
+    assert record.extraction["emitted_events"] == ["patch_ready"]
+    assert record.extraction["verification"] == {"status": "passed"}
+    assert record.outcome_metrics["input_tokens"] == 100
+    assert record.outcome_metrics["total_tokens"] == 120
+
+
+def test_codex_session_tolerates_backticks_in_structured_assistant_text(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    tracked = source_root / "tracked.txt"
+    tracked.write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "add", "tracked.txt"], cwd=source_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=source_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-001")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="codex-cli",
+        workdir=source_root,
+        target_model="gpt-5",
+        target_provider="openai",
+        session_id="session-001",
+    )
+
+    stdout = (
+        '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"status: completed\\n'
+        'emitted_events:\\n  - patch_ready\\nverification:\\n  status: passed\\n  details:\\n'
+        '  - updated `src/demo.py`"}}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20}}\n'
+    )
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    record = run_session(spec, assignment, command_runner=fake_runner)
+
+    assert record.result_proposal is not None
+    assert record.result_proposal["emitted_events"] == ["patch_ready"]
+    assert record.result_proposal["verification"]["status"] == "passed"
 
 
 def test_package_session_result_normalizes_artifacts_and_native_logs(tmp_path) -> None:

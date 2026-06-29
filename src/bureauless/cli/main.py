@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import shutil
 import sys
+from typing import Any
 
 import yaml
 
@@ -45,11 +46,14 @@ from ..runtime import (
     summarize_metrics,
 )
 from ..runtime.sessions import (
+    build_assignment_created_event,
     cancel_session_record,
     create_session_spec,
+    import_session_record,
     load_session_record,
     package_session_result,
     run_session,
+    CommandRunner,
 )
 
 
@@ -75,6 +79,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Prepare an isolated controlled-mutation workbench demo",
     )
     mission_mutation_demo_parser.add_argument("workspace")
+    mission_live_demo_parser = mission_subparsers.add_parser(
+        "live-demo",
+        help="Run the demo mission end-to-end through real session wrappers",
+    )
+    mission_live_demo_parser.add_argument("workspace")
+    mission_live_demo_parser.add_argument("--agent", default="codex-cli")
+    mission_live_demo_parser.add_argument("--target-model", required=True)
+    mission_live_demo_parser.add_argument("--target-provider", required=True)
+    mission_live_demo_parser.add_argument("--provider-base-url")
+    mission_live_demo_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY")
+    mission_live_demo_parser.add_argument("--provider-wire-api")
+    mission_live_demo_parser.add_argument("--timeout-seconds", type=float, default=120.0)
 
     workflow_parser = subparsers.add_parser("workflow", help="Workflow operations")
     workflow_subparsers = workflow_parser.add_subparsers(dest="workflow_command", required=True)
@@ -153,14 +169,38 @@ def main(argv: list[str] | None = None) -> int:
     session_subparsers = session_parser.add_subparsers(dest="session_command", required=True)
     session_run_parser = session_subparsers.add_parser("run", help="Run an assignment in a local session wrapper")
     session_run_parser.add_argument("assignment")
-    session_run_parser.add_argument("--agent", required=True, choices=["fake", "shell-dummy"])
+    session_run_parser.add_argument("--agent", required=True, choices=["fake", "shell-dummy", "codex-cli"])
     session_run_parser.add_argument("--workdir", default=".")
     session_run_parser.add_argument("--timeout-seconds", type=float, default=30.0)
     session_run_parser.add_argument("--isolation-mode", choices=["copy", "worktree"], default="copy")
     session_run_parser.add_argument("--cleanup-policy", default="retain_session_root")
     session_run_parser.add_argument("--dry-run", action="store_true")
     session_run_parser.add_argument("--shell-command")
+    session_run_parser.add_argument("--target-model")
+    session_run_parser.add_argument("--target-provider")
+    session_run_parser.add_argument("--provider-base-url")
+    session_run_parser.add_argument("--provider-api-key-env")
+    session_run_parser.add_argument("--provider-wire-api")
     session_run_parser.add_argument("--session-id")
+    session_import_parser = session_subparsers.add_parser(
+        "import",
+        help="Package a completed session, import the result, and append a node outcome decision",
+    )
+    session_import_parser.add_argument("workflow")
+    session_import_parser.add_argument("ledger")
+    session_import_parser.add_argument("assignment")
+    session_import_parser.add_argument("session_record")
+    session_import_parser.add_argument("--artifact-root")
+    session_import_parser.add_argument("--result-id")
+    session_import_parser.add_argument("--outcome-id")
+    session_import_parser.add_argument("--decision-event-id")
+    session_import_parser.add_argument("--actor", default="harness")
+    session_import_parser.add_argument(
+        "--disposition",
+        choices=["accepted", "partially_accepted", "rejected"],
+        default="accepted",
+    )
+    session_import_parser.add_argument("--validation-rule")
     session_cancel_parser = session_subparsers.add_parser("cancel", help="Mark a session record as cancelled")
     session_cancel_parser.add_argument("session_record")
     session_cancel_parser.add_argument("--reason", default="cancelled")
@@ -232,6 +272,20 @@ def main(argv: list[str] | None = None) -> int:
                     sort_keys=False,
                 )
             )
+            return 0
+
+        if args.command == "mission" and args.mission_command == "live-demo":
+            manifest = run_live_demo(
+                Path(args.workspace),
+                agent_id=args.agent,
+                target_model=args.target_model,
+                target_provider=args.target_provider,
+                provider_base_url=args.provider_base_url,
+                provider_api_key_env=args.provider_api_key_env,
+                provider_wire_api=args.provider_wire_api,
+                timeout_seconds=args.timeout_seconds,
+            )
+            print(yaml.safe_dump(manifest, sort_keys=False))
             return 0
 
         if args.command == "workflow" and args.workflow_command == "compile":
@@ -356,6 +410,11 @@ def main(argv: list[str] | None = None) -> int:
                 isolation_mode=args.isolation_mode,
                 cleanup_policy=args.cleanup_policy,
                 shell_command=args.shell_command,
+                target_model=args.target_model,
+                target_provider=args.target_provider,
+                provider_base_url=args.provider_base_url,
+                provider_api_key_env=args.provider_api_key_env,
+                provider_wire_api=args.provider_wire_api,
                 session_id=args.session_id,
             )
             record = run_session(spec, assignment)
@@ -369,6 +428,30 @@ def main(argv: list[str] | None = None) -> int:
             with session_path.open("w", encoding="utf-8") as handle:
                 yaml.safe_dump(cancelled.to_dict(), handle, sort_keys=False)
             print(f"cancelled: {cancelled.session_id}")
+            return 0
+
+        if args.command == "session" and args.session_command == "import":
+            workflow = load_workflow(Path(args.workflow))
+            ledger_path = Path(args.ledger)
+            ledger = load_ledger(ledger_path)
+            assignment = load_assignment(_load_yaml_mapping(Path(args.assignment), "Assignment"))
+            record = load_session_record(_load_yaml_mapping(Path(args.session_record), "Session"))
+            artifact_root = Path(args.artifact_root) if args.artifact_root else None
+            updated = import_session_record(
+                workflow,
+                ledger,
+                assignment,
+                record,
+                artifact_root=artifact_root,
+                result_id=args.result_id,
+                outcome_id=args.outcome_id,
+                decision_event_id=args.decision_event_id,
+                actor=args.actor,
+                disposition=args.disposition,
+                validation_rule=args.validation_rule,
+            )
+            write_ledger(ledger_path, updated)
+            print(yaml.safe_dump(updated.event_log[-2:], sort_keys=False))
             return 0
 
         if args.command == "metrics" and args.metrics_command == "summarize":
@@ -707,6 +790,136 @@ def prepare_demo_workspace(workspace: Path) -> dict[str, Path]:
         "assignments_dir": assignments_dir,
         "sessions_dir": sessions_dir,
         "packaged_results_dir": packaged_results_dir,
+    }
+
+
+def run_live_demo(
+    workspace: Path,
+    *,
+    agent_id: str,
+    target_model: str,
+    target_provider: str,
+    provider_base_url: str | None = None,
+    provider_api_key_env: str | None = None,
+    provider_wire_api: str | None = None,
+    timeout_seconds: float = 120.0,
+    command_runner: CommandRunner | None = None,
+) -> dict[str, Any]:
+    paths = prepare_demo_workspace(workspace)
+    workflow_path = paths["workflow"]
+    ledger_path = paths["ledger"]
+    assignments_dir = paths["assignments_dir"]
+    sessions_dir = paths["sessions_dir"]
+    results_dir = paths["packaged_results_dir"]
+    artifact_root = workspace
+
+    node_ids = ["implement", "review", "commit"]
+    steps: list[dict[str, Any]] = []
+    for node_id in node_ids:
+        workflow = load_workflow(workflow_path)
+        ledger = load_ledger(ledger_path)
+        assignment_id = f"assign-{node_id}-live"
+        session_id = f"session-{node_id}-live"
+        result_id = f"result-{node_id}-live"
+
+        assignment = export_assignment(
+            workflow,
+            ledger,
+            node_id,
+            assignment_id=assignment_id,
+        )
+        assignment_path = assignments_dir / f"{node_id}_assignment.yaml"
+        with assignment_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(assignment.to_dict(), handle, sort_keys=False)
+
+        created_event = build_assignment_created_event(
+            workflow,
+            assignment,
+            session_id,
+            agent_id,
+        )
+        ledger = append_ledger_event(ledger, created_event, workflow)
+        write_ledger(ledger_path, ledger)
+
+        spec = create_session_spec(
+            assignment=assignment,
+            agent_id=agent_id,
+            workdir=workspace,
+            timeout_seconds=timeout_seconds,
+            isolation_mode="copy",
+            cleanup_policy="retain_session_root",
+            target_model=target_model,
+            target_provider=target_provider,
+            provider_base_url=provider_base_url,
+            provider_api_key_env=provider_api_key_env,
+            provider_wire_api=provider_wire_api,
+            session_id=session_id,
+        )
+        record = run_session(spec, assignment, command_runner=command_runner)
+        session_path = sessions_dir / f"{node_id}_session.yaml"
+        with session_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(record.to_dict(), handle, sort_keys=False)
+
+        packaged = package_session_result(
+            record,
+            assignment,
+            artifact_root=artifact_root,
+            result_id=result_id,
+        )
+        result_path = results_dir / f"{node_id}_result.yaml"
+        with result_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(packaged.to_dict(), handle, sort_keys=False)
+
+        ledger = import_session_record(
+            workflow,
+            load_ledger(ledger_path),
+            assignment,
+            record,
+            artifact_root=artifact_root,
+            result_id=result_id,
+            outcome_id=f"outcome-{session_id}",
+            decision_event_id=f"event-outcome-{session_id}-decision",
+        )
+        write_ledger(ledger_path, ledger)
+
+        replay = replay_workflow(workflow, ledger)
+        gatekeeper = evaluate_gatekeeper(workflow, ledger)
+        steps.append(
+            {
+                "node_id": node_id,
+                "assignment_path": str(assignment_path),
+                "session_path": str(session_path),
+                "result_path": str(result_path),
+                "record_status": record.status,
+                "emitted_events": (
+                    packaged.emitted_events if record.status == "completed" else []
+                ),
+                "ready_after": gatekeeper.ready,
+                "node_state_after": replay.nodes[node_id].state,
+            }
+        )
+
+    workflow = load_workflow(workflow_path)
+    ledger = load_ledger(ledger_path)
+    replay = replay_workflow(workflow, ledger)
+    gatekeeper = evaluate_gatekeeper(workflow, ledger)
+    return {
+        "milestone": "runtime-milestone-3",
+        "flow_id": "demo-live-session-path",
+        "workspace": str(workspace.resolve()),
+        "mission_path": str(paths["mission"]),
+        "workflow_path": str(workflow_path),
+        "ledger_path": str(ledger_path),
+        "agent": agent_id,
+        "target_model": target_model,
+        "target_provider": target_provider,
+        "steps": steps,
+        "terminal_complete": replay.terminal_complete,
+        "ready": gatekeeper.ready,
+        "node_states": {
+            node_id: node_state.state
+            for node_id, node_state in replay.nodes.items()
+        },
     }
 
 

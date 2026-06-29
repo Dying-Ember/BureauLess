@@ -23,6 +23,7 @@ LIFECYCLE_EVENT_TYPES = {
     "budget_soft_limit_reached",
     "budget_hard_limit_reached",
     "artifact_invalidated",
+    "node_outcome_decided",
     "gate_expired",
     "tool_call_failed",
     "partial_result_submitted",
@@ -69,6 +70,8 @@ def validate_ledger_event(
         _validate_mutation_decision_event(ledger, event, event_type)
     elif event_type == "assignment_superseded":
         _validate_mutation_supersession_event(ledger, event)
+    elif event_type == "node_outcome_decided":
+        _validate_node_outcome_decision_event(event)
 
     mission_id = event.get("mission_id")
     if mission_id is not None and mission_id != ledger.mission_id:
@@ -250,7 +253,45 @@ def _validate_mutation_supersession_event(
         )
 
 
+def _validate_node_outcome_decision_event(event: dict[str, Any]) -> None:
+    _required_string(event, "source_outcome_id")
+    _required_string(event, "actor")
+    disposition = _required_string(event, "disposition")
+    if disposition not in {"accepted", "partially_accepted", "rejected"}:
+        raise ProtocolError(
+            "node_outcome_decided disposition must be accepted, partially_accepted, or rejected"
+        )
+    outcome_status = _required_string(event, "outcome_status")
+    if outcome_status not in {
+        "completed",
+        "failed",
+        "timed_out",
+        "cancelled",
+        "partial",
+        "superseded",
+        "stale",
+        "needs_review",
+    }:
+        raise ProtocolError(
+            "node_outcome_decided outcome_status must be a valid node outcome status"
+        )
+    accepted_event_types = event.get("accepted_event_types", [])
+    if not isinstance(accepted_event_types, list) or not all(
+        isinstance(item, str) and item for item in accepted_event_types
+    ):
+        raise ProtocolError(
+            "node_outcome_decided accepted_event_types must be a list of strings"
+        )
+    for field in ("pre_state_ref", "post_state_ref"):
+        value = event.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ProtocolError(
+                f"node_outcome_decided {field} must be a non-empty string when present"
+            )
+
+
 def write_ledger(path: Path, ledger: Ledger) -> None:
+    ledger = rebuild_ledger_projection(ledger)
     with path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(ledger_to_dict(ledger), handle, sort_keys=False)
 
@@ -261,6 +302,7 @@ def ledger_to_dict(ledger: Ledger) -> dict[str, Any]:
         "ledger_version": ledger.ledger_version,
         "current_goal": ledger.current_goal,
         "current_plan_ref": ledger.current_plan_ref,
+        "projection": ledger.projection,
         "public_findings": ledger.public_findings,
         "decisions": ledger.decisions,
         "risks": ledger.risks,
@@ -271,8 +313,64 @@ def ledger_to_dict(ledger: Ledger) -> dict[str, Any]:
     }
 
 
+def rebuild_ledger_projection(ledger: Ledger) -> Ledger:
+    derived_projection = _derive_projection(ledger)
+    persisted_cursor = _string_or_none(ledger.projection.get("through_event_id"))
+    derived_cursor = _string_or_none(derived_projection.get("through_event_id"))
+    has_persisted_projection = bool(ledger.projection)
+    has_projected_state = any(
+        (
+            ledger.public_findings,
+            ledger.decisions,
+            ledger.risks,
+            ledger.open_questions,
+        )
+    )
+
+    if persisted_cursor != derived_cursor or (
+        not has_persisted_projection and has_projected_state
+    ):
+        return replace(
+            ledger,
+            projection=derived_projection,
+            public_findings=[],
+            decisions=[],
+            risks=[],
+            open_questions=[],
+        )
+    return replace(ledger, projection=derived_projection)
+
+
+def _derive_projection(ledger: Ledger) -> dict[str, Any]:
+    projection: dict[str, Any] = {}
+    if ledger.event_log:
+        last_event_id = _string_or_none(ledger.event_log[-1].get("event_id"))
+        if last_event_id is not None:
+            projection["through_event_id"] = last_event_id
+    accepted_workspace_ref = _accepted_workspace_ref(ledger)
+    if accepted_workspace_ref is not None:
+        projection["accepted_workspace_ref"] = accepted_workspace_ref
+    return projection
+
+
+def _accepted_workspace_ref(ledger: Ledger) -> str | None:
+    for event in reversed(ledger.event_log):
+        if event.get("event_type") != "node_outcome_decided":
+            continue
+        if event.get("disposition") not in {"accepted", "partially_accepted"}:
+            continue
+        post_state_ref = _string_or_none(event.get("post_state_ref"))
+        if post_state_ref is not None:
+            return post_state_ref
+    return None
+
+
 def _required_string(data: dict[str, Any], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value:
         raise ProtocolError(f"Ledger event field {key!r} must be a non-empty string")
     return value
+
+
+def _string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None

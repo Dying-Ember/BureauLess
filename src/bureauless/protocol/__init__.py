@@ -35,6 +35,12 @@ from .mutations import (
     materialize_current_workflow,
     validate_workflow_mutation_proposal,
 )
+from .outcomes import (
+    NodeOutcome,
+    build_node_outcome_decision_event,
+    load_node_outcome,
+    node_outcome_from_session,
+)
 from .results import ResultProposal, import_result_proposal, load_result_proposal
 
 __all__ = [
@@ -51,6 +57,7 @@ __all__ = [
     "MutationSource",
     "MutationValidationError",
     "MutationValidationResult",
+    "NodeOutcome",
     "PreDispatchPolicyDecision",
     "ResultProposal",
     "RoleSpec",
@@ -59,6 +66,7 @@ __all__ = [
     "WorkflowNode",
     "WorkflowMutationProposal",
     "append_ledger_event",
+    "build_node_outcome_decision_event",
     "compile_workflow",
     "estimate_cost_from_snapshot",
     "evaluate_pre_dispatch_policy",
@@ -67,11 +75,13 @@ __all__ = [
     "load_assignment",
     "load_ledger",
     "load_mission",
+    "load_node_outcome",
     "load_workflow_mutation_proposal",
     "materialize_current_workflow",
     "load_price_snapshot",
     "load_result_proposal",
     "load_workflow",
+    "node_outcome_from_session",
     "render_assignment_prompt",
     "sha256_file",
     "validate_artifact_record",

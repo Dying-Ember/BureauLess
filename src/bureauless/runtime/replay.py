@@ -132,6 +132,14 @@ class MutationReplayState:
 
 
 @dataclass(frozen=True)
+class _AcceptedWorkflowEvent:
+    event_type: str
+    node_id: str | None
+    assignment_id: str | None
+    log_index: int
+
+
+@dataclass(frozen=True)
 class ReplayState:
     workflow_id: str
     terminal_complete: bool
@@ -640,16 +648,21 @@ def _derive_assignment_attempts(
     }
     raw_attempts: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    accepted_events_by_index = _accepted_workflow_events_by_log_index(ledger)
 
-    for event in ledger.event_log:
+    for index, event in enumerate(ledger.event_log):
         event_type = event.get("event_type")
         assignment_id = _string_or_none(event.get("assignment_id"))
         if assignment_id is None:
+            for accepted_event in accepted_events_by_index.get(index, []):
+                _mark_assignment_completed(workflow, raw_attempts, accepted_event)
             continue
 
         if event_type == "assignment_created":
             node_id = _string_or_none(event.get("node_id"))
             if node_id is None:
+                for accepted_event in accepted_events_by_index.get(index, []):
+                    _mark_assignment_completed(workflow, raw_attempts, accepted_event)
                 continue
             raw_attempts[assignment_id] = {
                 "assignment_id": assignment_id,
@@ -662,6 +675,8 @@ def _derive_assignment_attempts(
                 "superseded_by": None,
             }
             order.append(assignment_id)
+            for accepted_event in accepted_events_by_index.get(index, []):
+                _mark_assignment_completed(workflow, raw_attempts, accepted_event)
             continue
 
         if event_type == "assignment_retry_requested":
@@ -681,6 +696,8 @@ def _derive_assignment_attempts(
             attempt = raw_attempts.get(assignment_id)
             if attempt is not None:
                 attempt["retry_of"] = _string_or_none(event.get("retry_of"))
+            for accepted_event in accepted_events_by_index.get(index, []):
+                _mark_assignment_completed(workflow, raw_attempts, accepted_event)
             continue
 
         attempt = raw_attempts.get(assignment_id)
@@ -707,12 +724,8 @@ def _derive_assignment_attempts(
             attempt["terminal_event_type"] = event_type
             if event_type == "assignment_superseded":
                 attempt["superseded_by"] = _string_or_none(event.get("superseded_by"))
-            continue
-
-        if _event_completes_assignment(workflow, attempt["node_id"], event):
-            attempt["state"] = "completed"
-            attempt["terminal_event_id"] = _string_or_none(event.get("event_id"))
-            attempt["terminal_event_type"] = _string_or_none(event.get("event_type"))
+        for accepted_event in accepted_events_by_index.get(index, []):
+            _mark_assignment_completed(workflow, raw_attempts, accepted_event)
 
     return [
         AssignmentAttemptState(
@@ -729,21 +742,36 @@ def _derive_assignment_attempts(
     ]
 
 
-def _event_completes_assignment(
+def _mark_assignment_completed(
+    workflow: Workflow,
+    raw_attempts: dict[str, dict[str, Any]],
+    event: _AcceptedWorkflowEvent,
+) -> None:
+    assignment_id = event.assignment_id
+    if assignment_id is None:
+        return
+    attempt = raw_attempts.get(assignment_id)
+    if attempt is None:
+        return
+    if not _workflow_event_completes_assignment(workflow, attempt["node_id"], event):
+        return
+    attempt["state"] = "completed"
+    attempt["terminal_event_type"] = event.event_type
+
+
+def _workflow_event_completes_assignment(
     workflow: Workflow,
     node_id: str,
-    event: dict[str, Any],
+    event: _AcceptedWorkflowEvent,
 ) -> bool:
-    event_type = _string_or_none(event.get("event_type"))
-    if event_type is None or event_type not in workflow.events:
+    if event.event_type not in workflow.events:
         return False
     node = workflow.nodes.get(node_id)
     if node is None:
         return False
-    if event_type not in node.emits:
+    if event.event_type not in node.emits:
         return False
-    event_node_id = _string_or_none(event.get("node_id"))
-    return event_node_id in {None, node_id}
+    return event.node_id in {None, node_id}
 
 
 def _gate_satisfied(gate: WorkflowGate, ledger: Ledger) -> tuple[bool, list[str]]:
@@ -782,15 +810,106 @@ def _event_ref_satisfied(event_ref: str, ledger: Ledger) -> bool:
         if event.get("event_type") == "assignment_superseded"
         and isinstance(event.get("assignment_id"), str)
     }
-    for event in ledger.event_log:
-        if event.get("event_type") != event_type:
+    for event in _accepted_workflow_events(ledger):
+        if event.event_type != event_type:
             continue
-        if node_id is not None and event.get("node_id") != node_id:
+        if node_id is not None and event.node_id != node_id:
             continue
-        if event.get("assignment_id") in superseded_assignments:
+        if event.assignment_id in superseded_assignments:
             continue
         return True
     return False
+
+
+def _accepted_workflow_events(
+    ledger: Ledger,
+) -> list[_AcceptedWorkflowEvent]:
+    events_by_index = _accepted_workflow_events_by_log_index(ledger)
+    return [
+        event
+        for index in sorted(events_by_index)
+        for event in events_by_index[index]
+    ]
+
+
+def _accepted_workflow_events_by_log_index(
+    ledger: Ledger,
+) -> dict[int, list[_AcceptedWorkflowEvent]]:
+    decisions_by_assignment: dict[str, dict[str, Any]] = {}
+    for event in ledger.event_log:
+        if event.get("event_type") != "node_outcome_decided":
+            continue
+        assignment_id = _string_or_none(event.get("assignment_id"))
+        if assignment_id is None:
+            continue
+        decisions_by_assignment[assignment_id] = event
+
+    raw_workflow_keys: set[tuple[str | None, str | None, str]] = set()
+    accepted_by_index: dict[int, list[_AcceptedWorkflowEvent]] = {}
+    for index, event in enumerate(ledger.event_log):
+        event_type = _string_or_none(event.get("event_type"))
+        if event_type is None:
+            continue
+        assignment_id = _string_or_none(event.get("assignment_id"))
+        node_id = _string_or_none(event.get("node_id"))
+        if assignment_id is not None:
+            raw_workflow_keys.add((assignment_id, node_id, event_type))
+        if not _workflow_event_is_accepted(event, decisions_by_assignment.get(assignment_id)):
+            continue
+        accepted_by_index.setdefault(index, []).append(
+            _AcceptedWorkflowEvent(
+                event_type=event_type,
+                node_id=node_id,
+                assignment_id=assignment_id,
+                log_index=index,
+            )
+        )
+
+    for index, event in enumerate(ledger.event_log):
+        if event.get("event_type") != "node_outcome_decided":
+            continue
+        if event.get("disposition") not in {"accepted", "partially_accepted"}:
+            continue
+        assignment_id = _string_or_none(event.get("assignment_id"))
+        node_id = _string_or_none(event.get("node_id"))
+        accepted_event_types = event.get("accepted_event_types", [])
+        if assignment_id is None or node_id is None:
+            continue
+        if not isinstance(accepted_event_types, list):
+            continue
+        for accepted_event_type in accepted_event_types:
+            if not isinstance(accepted_event_type, str) or not accepted_event_type:
+                continue
+            key = (assignment_id, node_id, accepted_event_type)
+            if key in raw_workflow_keys:
+                continue
+            accepted_by_index.setdefault(index, []).append(
+                _AcceptedWorkflowEvent(
+                    event_type=accepted_event_type,
+                    node_id=node_id,
+                    assignment_id=assignment_id,
+                    log_index=index,
+                )
+            )
+    return accepted_by_index
+
+
+def _workflow_event_is_accepted(
+    event: dict[str, Any],
+    decision: dict[str, Any] | None,
+) -> bool:
+    event_type = _string_or_none(event.get("event_type"))
+    if event_type is None:
+        return False
+    if decision is None:
+        return True
+    if decision.get("disposition") not in {"accepted", "partially_accepted"}:
+        return False
+    accepted_event_types = decision.get("accepted_event_types", [])
+    return (
+        isinstance(accepted_event_types, list)
+        and event_type in accepted_event_types
+    )
 
 
 def _missing_event_reason(event_ref: str, ledger: Ledger) -> BlockedReason:
