@@ -92,9 +92,9 @@ expanding into a full provider abstraction platform.
 
 Goal: record whether advisor invocations and skips were actually worth it.
 
-### [ ] RM3-01: Advisor Outcome Event Model
+### [x] RM3-01: Advisor Outcome Event Model
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: medium
@@ -115,9 +115,9 @@ Goal: record whether advisor invocations and skips were actually worth it.
   - Advisor outcome records are append-only and replayable.
   - Missing provenance or invalid outcome types are rejected.
 
-### [ ] RM3-02: Budget Snapshot Attribution
+### [x] RM3-02: Budget Snapshot Attribution
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -136,9 +136,9 @@ Goal: record whether advisor invocations and skips were actually worth it.
   - Outcome review can explain which price basis was in force.
   - Cost comparisons survive replay and metrics export.
 
-### [ ] RM3-03: Advisor Outcome Scoring Pass
+### [x] RM3-03: Advisor Outcome Scoring Pass
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high
@@ -160,9 +160,9 @@ Goal: record whether advisor invocations and skips were actually worth it.
 Goal: make orchestrator proposals machine-readable, reviewable, and
 compilable.
 
-### [ ] RM3-04: Routing Decision Artifact
+### [x] RM3-04: Routing Decision Artifact
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: high
@@ -182,9 +182,9 @@ compilable.
   - A routing artifact can be validated before dispatch.
   - Complex routing without explicit selection rationale is rejected.
 
-### [ ] RM3-05: Review Decision Artifact
+### [x] RM3-05: Review Decision Artifact
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -203,9 +203,9 @@ compilable.
   - Review decisions can be validated independently of worker result payloads.
   - Public findings cannot appear without review provenance.
 
-### [ ] RM3-06: Turn Report And Dispatch Packet Compiler
+### [x] RM3-06: Turn Report And Dispatch Packet Compiler
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high
@@ -237,7 +237,7 @@ needed for safe continuation, replay, and targeted context delivery.
 - Labels: runtime, protocol, ledger, replay
 - Target docs:
   - `docs/protocol/harness_protocol.md`
-  - `docs/rfcs/ledger_evidence_and_context.md`
+  - `docs/rfcs/002-ledger-evidence-and-progressive-context.md`
 - Target code:
   - `src/bureauless/protocol/`
   - `src/bureauless/runtime/sessions.py`
@@ -264,9 +264,9 @@ needed for safe continuation, replay, and targeted context delivery.
     than creating a second source of truth.
   - Normal replay does not read native trace artifacts.
 
-### [ ] RM3-08: Deterministic Context Capsule Compiler
+### [x] RM3-08: Deterministic Context Capsule Compiler
 
-- Status: pending
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high
@@ -293,9 +293,9 @@ needed for safe continuation, replay, and targeted context delivery.
     referenced artifacts without prior transcript access.
   - Low-risk single-node assignments require no summarizer model.
 
-### [ ] RM3-09: Scoped Context Requests And Progressive Disclosure
+### [x] RM3-09: Scoped Context Requests And Progressive Disclosure
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -321,9 +321,9 @@ needed for safe continuation, replay, and targeted context delivery.
   - Context requests remain telemetry unless they expose a mission blocker,
     risk, or accepted decision.
 
-### [ ] RM3-10: Context Telemetry And Policy Feedback
+### [x] RM3-10: Context Telemetry And Policy Feedback
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4
 - Risk: medium
@@ -354,9 +354,9 @@ needed for safe continuation, replay, and targeted context delivery.
 Goal: make Milestone 3 reviewable through one documented path instead of a set
 of isolated unit tests.
 
-### [ ] RM3-11: M3 Integrated Demo Fixture
+### [x] RM3-11: M3 Integrated Demo Fixture
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -378,10 +378,12 @@ of isolated unit tests.
   - The demo can be inspected through the normal API and workbench surfaces.
   - The milestone is not considered complete if the path still depends solely
     on `fake` or `shell-dummy` execution.
+  - A real `codex-cli` run has been exercised end to end and verified through
+    the workbench against the emitted mission/workflow/ledger artifacts.
 
-### [ ] RM3-12: M3 Runtime API Coverage
+### [x] RM3-12: M3 Runtime API Coverage
 
-- Status: pending
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -393,6 +395,8 @@ of isolated unit tests.
   - Expose minimal API endpoints needed to inspect routing decisions, advisor
     outcomes, node outcomes, context delivery, and compiled dispatch packets.
   - Keep response shapes stable enough for the next workbench milestone.
+  - Reuse protocol loaders/compilers in the API layer so the frontend reads
+    canonical runtime shapes instead of re-deriving them.
 - Acceptance criteria:
   - The workbench can inspect M3 artifacts without file scraping.
   - API responses avoid duplicating runtime business rules in the frontend.

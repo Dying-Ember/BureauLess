@@ -3,8 +3,11 @@ from pathlib import Path
 import yaml
 
 from bureauless.core import ProtocolError, create_run_record, load_dag, write_run_record
+from bureauless.protocol import export_assignment, load_ledger, load_workflow
 from bureauless.api.server import (
     CreateNodeRequest,
+    ContextResolveRequest,
+    DispatchCompileRequest,
     MutationDecisionRequest,
     NodeDependenciesUpdateRequest,
     NodeMetadataUpdateRequest,
@@ -261,6 +264,213 @@ def test_runtime_demo_api_creates_reviewable_workspace(tmp_path: Path) -> None:
     assert replay["nodes"]["review"]["state"] == "runnable"
     assert gatekeeper["ready"] == ["review"]
     assert metrics["entries"][0]["assignment_id"] == "assign-implement-demo"
+
+
+def test_m3_artifact_api_endpoints(tmp_path: Path) -> None:
+    endpoints = _api_endpoints()
+    mission_path = "examples/missions/demo/mission.yaml"
+    workflow_path = "examples/missions/demo/workflows/coder_reviewer_committer.yaml"
+    base_ledger_path = Path("examples/missions/demo/ledger.yaml")
+    ledger_path = tmp_path / "ledger.yaml"
+    ledger_payload = yaml.safe_load(base_ledger_path.read_text(encoding="utf-8"))
+    ledger_payload["artifacts"] = [
+        {
+            "artifact_id": "artifact-shared-context",
+            "path": "artifacts/shared_context.md",
+            "kind": "note",
+            "summary": "Shared accepted context for later nodes.",
+        }
+    ]
+    ledger_path.write_text(
+        yaml.safe_dump(ledger_payload, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    assignment = export_assignment(
+        load_workflow(Path(workflow_path)),
+        load_ledger(ledger_path),
+        "implement",
+        assignment_id="assign-api-m3",
+    ).to_dict()
+    assignment["artifact_refs"] = [
+        {
+            "artifact_id": "artifact-shared-context",
+            "path": "artifacts/shared_context.md",
+        }
+    ]
+    assignment_path = tmp_path / "assignment.yaml"
+    assignment_path.write_text(
+        yaml.safe_dump(assignment, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    routing_decision_path = tmp_path / "routing_decision.yaml"
+    routing_decision_path.write_text(
+        yaml.safe_dump(
+            {
+                "decision_type": "routing_decision",
+                "mission_id": "demo",
+                "workflow_id": "coder-reviewer-committer-001",
+                "selected_mode": "small_dag",
+                "selection_policy_version": "0.1",
+                "triggered_rules": ["explicit_review_step_required"],
+                "rejected_modes": [
+                    {
+                        "mode": "single_agent",
+                        "rejected_because": "Need explicit handoff boundaries.",
+                    }
+                ],
+                "estimated_coordination_ratio": 0.18,
+                "budget_confidence": "high",
+                "reason": "Separate implement, review, and commit steps remain inspectable.",
+                "advisor_gate_decision": {
+                    "invoked": False,
+                    "policy_version": "0.1",
+                    "reason": ["parallel_width < 3"],
+                    "decision_basis": "first_run_heuristic",
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    context_request_path = tmp_path / "context_request.yaml"
+    context_request_path.write_text(
+        yaml.safe_dump(
+            {
+                "context_request_id": "ctxreq-001",
+                "assignment_id": "assign-api-m3",
+                "missing_information": "Need the accepted shared context artifact.",
+                "requested_refs": ["artifact-shared-context"],
+                "expected_value": "Use the accepted artifact instead of re-deriving context.",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    advisor_outcome_path = tmp_path / "advisor_outcome.yaml"
+    advisor_outcome_path.write_text(
+        yaml.safe_dump(
+            {
+                "decision_type": "advisor_outcome",
+                "outcome_id": "advisor-outcome-001",
+                "mission_id": "demo",
+                "workflow_id": "coder-reviewer-committer-001",
+                "status": "scored",
+                "source_decision_type": "routing_decision",
+                "source_decision_ref": "decisions/routing_decision.yaml",
+                "advisor_decision_ref": "decisions/advisor_gate_decision.yaml",
+                "classification": "good_skip",
+                "actual_advisor_tokens": 120,
+                "actual_total_tokens": 1800,
+                "rework_count": 0,
+                "broadcast_tokens": 80,
+                "duplicate_context_observed": False,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    node_outcome_path = tmp_path / "node_outcome.yaml"
+    node_outcome_path.write_text(
+        yaml.safe_dump(
+            {
+                "outcome_id": "outcome-001",
+                "assignment_id": "assign-api-m3",
+                "session_id": "session-001",
+                "workflow_id": "coder-reviewer-committer-001",
+                "node_id": "implement",
+                "role": "coder",
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "effective_model": "gpt-5.5",
+                "effective_provider": "custom",
+                "pre_state_ref": "workspace-pre",
+                "post_state_ref": "workspace-post",
+                "observed_delta": {"changed_files_count": 1},
+                "verification": {"status": "passed"},
+                "native_log_refs": [],
+                "diff_refs": [],
+                "outcome_metrics": {"wall_time_ms": 1000},
+                "extraction": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    turn_report_path = tmp_path / "turn_report.yaml"
+    turn_report_path.write_text(
+        yaml.safe_dump(
+            {
+                "report_id": "report-001",
+                "assignment_id": "assign-api-m3",
+                "agent_id": "codex-cli",
+                "status": "in_progress",
+                "tool_calls_since_last_report": 2,
+                "summary": "Validated the current implementation path.",
+                "new_findings": [{"finding_id": "finding-001", "summary": "One issue found."}],
+                "artifact_refs": [],
+                "blockers": [],
+                "suggested_ledger_updates": [],
+                "token_usage": {"input_tokens": 100, "output_tokens": 60, "total_tokens": 160},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    routing = endpoints["/api/routing-decision"](path=str(routing_decision_path))
+    assignment_response = endpoints["/api/assignment"](path=str(assignment_path))
+    compiled_capsule = endpoints["/api/context-capsule"](
+        workflow_path=workflow_path,
+        ledger_path=str(ledger_path),
+        node_id="implement",
+        assignment_id="assign-api-m3",
+    )
+    context_request = endpoints["/api/context-request"](path=str(context_request_path))
+    context_resolution = endpoints["/api/context-request/resolve"](
+        ContextResolveRequest(
+            assignment_path=str(assignment_path),
+            ledger_path=str(ledger_path),
+            context_request_path=str(context_request_path),
+        )
+    )
+    dispatch_packet = endpoints["/api/dispatch-packet/compile"](
+        DispatchCompileRequest(
+            mission_path=mission_path,
+            workflow_path=workflow_path,
+            routing_decision_path=str(routing_decision_path),
+            assignment_path=str(assignment_path),
+            packet_id="packet-001",
+        )
+    )
+    dispatch_packet_path = tmp_path / "dispatch_packet.yaml"
+    dispatch_packet_path.write_text(
+        yaml.safe_dump(dispatch_packet, sort_keys=False),
+        encoding="utf-8",
+    )
+    fetched_dispatch_packet = endpoints["/api/dispatch-packet"](path=str(dispatch_packet_path))
+    advisor_outcome = endpoints["/api/advisor-outcome"](path=str(advisor_outcome_path))
+    node_outcome = endpoints["/api/node-outcome"](path=str(node_outcome_path))
+    turn_report = endpoints["/api/turn-report"](path=str(turn_report_path))
+
+    assert routing["selected_mode"] == "small_dag"
+    assert assignment_response["assignment_id"] == "assign-api-m3"
+    assert compiled_capsule["assignment_id"] == "assign-api-m3"
+    assert compiled_capsule["node_id"] == "implement"
+    assert context_request["context_request_id"] == "ctxreq-001"
+    assert context_resolution["status"] == "granted"
+    assert context_resolution["granted_artifacts"][0]["artifact_id"] == "artifact-shared-context"
+    assert dispatch_packet["packet_id"] == "packet-001"
+    assert dispatch_packet["assignment"]["assignment_id"] == "assign-api-m3"
+    assert fetched_dispatch_packet["packet_id"] == "packet-001"
+    assert advisor_outcome["classification"] == "good_skip"
+    assert node_outcome["status"] == "completed"
+    assert turn_report["report_id"] == "report-001"
 
 
 def test_validate_api_returns_ok_for_valid_dag() -> None:

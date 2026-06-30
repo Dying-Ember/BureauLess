@@ -240,13 +240,21 @@ input_scope:
 
 ```yaml
 decision_type: review_decision
+decision_id: review-014
 mission_id: example-mission
+workflow_id: workflow-001
 reviewed_event: event-014
+actor: orchestrator
 verdict: approved
 reason: >
   The worker result satisfies the node acceptance criteria and required
   verification passed.
-ledger_updates: []
+evidence_refs:
+  - artifacts/results/result-014.yaml
+accepted_findings:
+  - finding_id: finding-014
+    content: The exported patch includes the requested cancellation guard.
+rejected_findings: []
 next_action: continue
 ```
 

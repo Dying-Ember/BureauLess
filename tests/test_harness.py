@@ -1,5 +1,6 @@
 from pathlib import Path
 from dataclasses import replace
+import shutil
 import subprocess
 
 import pytest
@@ -15,26 +16,40 @@ from bureauless.agents import (
     resolve_agent_binding,
 )
 from bureauless.cli import main
-from bureauless.cli.main import prepare_mutation_demo_workspace, run_live_demo
+from bureauless.cli.main import prepare_demo_workspace, prepare_mutation_demo_workspace, run_live_demo
 from bureauless.core import ProtocolError
 from bureauless.protocol import (
     append_ledger_event,
+    apply_advisor_outcome,
+    apply_review_decision,
     build_node_outcome_decision_event,
+    compile_context_capsule,
+    compile_dispatch_packet,
     estimate_cost_from_snapshot,
     evaluate_pre_dispatch_policy,
     export_assignment,
     import_result_proposal,
+    load_advisor_outcome,
+    load_context_request,
+    load_dispatch_packet,
     load_assignment,
     load_price_snapshot,
-    load_result_proposal,
     load_node_outcome,
+    load_result_proposal,
+    load_review_decision,
+    load_routing_decision,
+    load_turn_report,
     materialize_current_workflow,
     node_outcome_from_session,
     render_assignment_prompt,
+    resolve_context_request,
     sha256_file,
+    validate_dispatch_packet,
+    validate_routing_decision,
     validate_artifact_record,
     validate_workflow_mutation_proposal,
     verify_ledger_artifacts,
+    write_ledger,
 )
 from bureauless.protocol.harness import (
     Ledger,
@@ -49,6 +64,7 @@ from bureauless.runtime import (
     evaluate_assignment_impacts,
     evaluate_gatekeeper,
     replay_workflow,
+    summarize_advisor_scores,
     summarize_metrics,
 )
 from bureauless.runtime.sessions import (
@@ -109,6 +125,64 @@ def _workflow(overrides: dict | None = None) -> Workflow:
     if overrides:
         data.update(overrides)
     return Workflow.from_dict(data)
+
+
+def _context_workflow() -> Workflow:
+    return Workflow.from_dict(
+        {
+            "workflow_id": "context-workflow",
+            "mission_id": "demo",
+            "mode": "small_dag",
+            "roles": {
+                "inventory": {
+                    "can_emit": ["inventory_ready"],
+                    "can_consume": [],
+                },
+                "coder": {
+                    "can_emit": ["patch_ready"],
+                    "can_consume": [],
+                },
+                "reviewer": {
+                    "can_emit": ["review_approved"],
+                    "can_consume": ["patch_ready"],
+                },
+                "committer": {
+                    "can_emit": ["commit_created"],
+                    "can_consume": ["patch_ready", "review_approved"],
+                },
+            },
+            "events": {
+                "inventory_ready": {"producer_roles": ["inventory"]},
+                "patch_ready": {"producer_roles": ["coder"]},
+                "review_approved": {"producer_roles": ["reviewer"]},
+                "commit_created": {"producer_roles": ["committer"]},
+            },
+            "nodes": [
+                {"id": "inventory", "role": "inventory", "emits": ["inventory_ready"]},
+                {"id": "implement", "role": "coder", "emits": ["patch_ready"]},
+                {
+                    "id": "review",
+                    "role": "reviewer",
+                    "waits_for": {"all_of": ["patch_ready"]},
+                    "emits": ["review_approved"],
+                },
+                {
+                    "id": "commit",
+                    "role": "committer",
+                    "waits_for": {"all_of": ["patch_ready", "review_approved"]},
+                    "emits": ["commit_created"],
+                },
+            ],
+            "gates": [
+                {
+                    "id": "commit-gate",
+                    "node_id": "commit",
+                    "requires": {"all_of": ["patch_ready", "review_approved"]},
+                }
+            ],
+            "terminal_events": ["commit_created"],
+        }
+    )
 
 
 def _mutation_proposal(overrides: dict | None = None) -> dict:
@@ -1185,6 +1259,1148 @@ def test_ledger_findings_require_provenance() -> None:
         raise AssertionError("Expected ProtocolError")
 
 
+def test_load_review_decision_validates_independently() -> None:
+    decision = load_review_decision(
+        {
+            "decision_type": "review_decision",
+            "decision_id": "review-001",
+            "mission_id": "demo",
+            "workflow_id": "test-workflow",
+            "reviewed_event": "event-result-001",
+            "actor": "human",
+            "verdict": "approved",
+            "reason": "Verification passed.",
+            "evidence_refs": ["artifact-report-001"],
+            "accepted_findings": [
+                {"finding_id": "finding-001", "content": "Patch is safe to land."}
+            ],
+            "rejected_findings": [
+                {"finding_id": "finding-002", "reason": "Claim not supported."}
+            ],
+            "next_action": "continue",
+        }
+    )
+
+    assert decision.decision_id == "review-001"
+    assert decision.accepted_findings[0]["finding_id"] == "finding-001"
+
+
+def test_load_review_decision_rejects_overlapping_findings() -> None:
+    with pytest.raises(
+        ProtocolError,
+        match="must not accept and reject the same finding_id",
+    ):
+        load_review_decision(
+            {
+                "decision_type": "review_decision",
+                "decision_id": "review-001",
+                "mission_id": "demo",
+                "workflow_id": "test-workflow",
+                "reviewed_event": "event-result-001",
+                "actor": "human",
+                "verdict": "approved",
+                "reason": "Verification passed.",
+                "evidence_refs": [],
+                "accepted_findings": [
+                    {"finding_id": "finding-001", "content": "Patch is safe to land."}
+                ],
+                "rejected_findings": [
+                    {"finding_id": "finding-001", "reason": "Actually unsupported."}
+                ],
+                "next_action": "continue",
+            }
+        )
+
+
+def test_load_advisor_outcome_validates_pending_and_scored_states() -> None:
+    pending = load_advisor_outcome(
+        {
+            "decision_type": "advisor_outcome",
+            "outcome_id": "advisor-outcome-001",
+            "mission_id": "demo",
+            "workflow_id": "test-workflow",
+            "status": "pending",
+            "source_decision_type": "routing_decision",
+            "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+            "advisor_decision_ref": "artifacts/decisions/advisor-gate-001.yaml",
+            "pending_reason": "The mission has not completed yet.",
+        }
+    )
+    scored = load_advisor_outcome(
+        {
+            "decision_type": "advisor_outcome",
+            "outcome_id": "advisor-outcome-002",
+            "mission_id": "demo",
+            "workflow_id": "test-workflow",
+            "status": "scored",
+            "source_decision_type": "review_decision",
+            "source_decision_ref": "artifacts/reviews/review-001.yaml",
+            "advisor_decision_ref": "artifacts/decisions/advisor-gate-002.yaml",
+            "classification": "good_skip",
+            "actual_advisor_tokens": 0,
+            "actual_total_tokens": 18400,
+            "rework_count": 0,
+            "broadcast_tokens": 1200,
+            "duplicate_context_observed": False,
+        }
+    )
+
+    assert pending.status == "pending"
+    assert pending.pending_reason == "The mission has not completed yet."
+    assert scored.classification == "good_skip"
+    assert scored.actual_total_tokens == 18400
+
+
+def test_load_advisor_outcome_rejects_missing_pending_reason() -> None:
+    with pytest.raises(ProtocolError, match="pending_reason"):
+        load_advisor_outcome(
+            {
+                "decision_type": "advisor_outcome",
+                "outcome_id": "advisor-outcome-001",
+                "mission_id": "demo",
+                "status": "pending",
+                "source_decision_type": "routing_decision",
+                "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+                "advisor_decision_ref": "artifacts/decisions/advisor-gate-001.yaml",
+            }
+        )
+
+
+def test_apply_advisor_outcome_appends_replayable_event() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    outcome = load_advisor_outcome(
+        {
+            "decision_type": "advisor_outcome",
+            "outcome_id": "advisor-outcome-002",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "status": "scored",
+            "source_decision_type": "routing_decision",
+            "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+            "advisor_decision_ref": "artifacts/decisions/advisor-gate-002.yaml",
+            "classification": "good_skip",
+            "actual_advisor_tokens": 0,
+            "actual_total_tokens": 18400,
+            "rework_count": 0,
+            "broadcast_tokens": 1200,
+            "duplicate_context_observed": False,
+            "price_snapshot_attribution": {
+                "snapshot_id": "price-snapshot-2026-06-20",
+                "snapshot_source": "manual",
+                "model": "gpt-5-mini",
+                "pricing_model": "token",
+                "predicted_cost_usd": 0.02,
+                "predicted_cost_basis": "recorded_cost",
+                "actual_cost_usd": 0.018,
+                "actual_cost_basis": "recorded_cost",
+                "cost_delta_usd": -0.002,
+            },
+        }
+    )
+
+    updated = apply_advisor_outcome(
+        ledger,
+        outcome,
+        workflow=workflow,
+        outcome_ref="artifacts/outcomes/advisor-outcome-002.yaml",
+    )
+
+    assert updated.event_log[-1] == {
+        "event_id": "event-advisor-outcome-002",
+        "event_type": "advisor_outcome_recorded",
+        "mission_id": "demo",
+        "advisor_outcome_id": "advisor-outcome-002",
+        "workflow_id": "test-workflow",
+        "status": "scored",
+        "source_decision_type": "routing_decision",
+        "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+        "advisor_decision_ref": "artifacts/decisions/advisor-gate-002.yaml",
+        "outcome_ref": "artifacts/outcomes/advisor-outcome-002.yaml",
+        "classification": "good_skip",
+        "actual_advisor_tokens": 0,
+        "actual_total_tokens": 18400,
+        "rework_count": 0,
+        "broadcast_tokens": 1200,
+        "duplicate_context_observed": False,
+        "price_snapshot_attribution": {
+            "snapshot_id": "price-snapshot-2026-06-20",
+            "snapshot_source": "manual",
+            "model": "gpt-5-mini",
+            "pricing_model": "token",
+            "predicted_cost_usd": 0.02,
+            "predicted_cost_basis": "recorded_cost",
+            "actual_cost_usd": 0.018,
+            "actual_cost_basis": "recorded_cost",
+            "cost_delta_usd": -0.002,
+        },
+    }
+
+
+def test_cli_import_advisor_outcome_updates_ledger(tmp_path, capsys) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    ledger_path = tmp_path / "ledger.yaml"
+    outcome_path = tmp_path / "advisor_outcome.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow_id": "test-workflow",
+                "mission_id": "demo",
+                "mode": "small_dag",
+                "roles": {
+                    "coder": {"can_emit": ["patch_ready"], "can_consume": []},
+                    "reviewer": {"can_emit": ["review_approved"], "can_consume": ["patch_ready"]},
+                    "committer": {
+                        "can_emit": ["commit_created"],
+                        "can_consume": ["patch_ready", "review_approved"],
+                    },
+                },
+                "events": {
+                    "patch_ready": {"producer_roles": ["coder"]},
+                    "review_approved": {"producer_roles": ["reviewer"]},
+                    "commit_created": {"producer_roles": ["committer"]},
+                },
+                "nodes": [
+                    {"id": "implement", "role": "coder", "emits": ["patch_ready"]},
+                    {
+                        "id": "review",
+                        "role": "reviewer",
+                        "waits_for": {"all_of": ["patch_ready"]},
+                        "emits": ["review_approved"],
+                    },
+                    {
+                        "id": "commit",
+                        "role": "committer",
+                        "waits_for": {"all_of": ["patch_ready", "review_approved"]},
+                        "emits": ["commit_created"],
+                    },
+                ],
+                "terminal_events": ["commit_created"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    write_ledger(
+        ledger_path,
+        Ledger.from_dict(
+            {
+                "mission_id": "demo",
+                "ledger_version": 1,
+                "current_goal": "Goal",
+                "current_plan_ref": "workflow.yaml",
+                "public_findings": [],
+                "decisions": [],
+                "risks": [],
+                "artifacts": [],
+                "broadcasts": [],
+                "open_questions": [],
+                "event_log": [],
+            }
+        ),
+    )
+    outcome_path.write_text(
+        yaml.safe_dump(
+            {
+                "decision_type": "advisor_outcome",
+                "outcome_id": "advisor-outcome-002",
+                "mission_id": "demo",
+                "workflow_id": "test-workflow",
+                "status": "scored",
+                "source_decision_type": "routing_decision",
+                "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+                "advisor_decision_ref": "artifacts/decisions/advisor-gate-002.yaml",
+                "classification": "good_skip",
+                "actual_advisor_tokens": 0,
+                "actual_total_tokens": 18400,
+                "rework_count": 0,
+                "broadcast_tokens": 1200,
+                "duplicate_context_observed": False,
+                "price_snapshot_attribution": {
+                    "snapshot_id": "price-snapshot-2026-06-20",
+                    "snapshot_source": "manual",
+                    "model": "gpt-5-mini",
+                    "pricing_model": "token",
+                    "predicted_cost_usd": 0.02,
+                    "predicted_cost_basis": "recorded_cost",
+                    "actual_cost_usd": 0.018,
+                    "actual_cost_basis": "recorded_cost",
+                    "cost_delta_usd": -0.002,
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "decision",
+            "import-advisor-outcome",
+            str(workflow_path),
+            str(ledger_path),
+            str(outcome_path),
+            "--outcome-ref",
+            "artifacts/outcomes/advisor-outcome-002.yaml",
+        ]
+    )
+    payload = yaml.safe_load(capsys.readouterr().out)
+    updated = load_ledger(ledger_path)
+
+    assert exit_code == 0
+    assert payload["event_type"] == "advisor_outcome_recorded"
+    assert payload["classification"] == "good_skip"
+    assert updated.event_log[-1]["advisor_outcome_id"] == "advisor-outcome-002"
+    assert updated.event_log[-1]["price_snapshot_attribution"]["snapshot_id"] == "price-snapshot-2026-06-20"
+
+
+def test_summarize_advisor_scores_classifies_good_skip(tmp_path) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    decision_path = tmp_path / "advisor_gate_decision.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow_id": "test-workflow",
+                "mission_id": "demo",
+                "mode": "small_dag",
+                "roles": {
+                    "coder": {"can_emit": ["patch_ready"], "can_consume": []},
+                    "reviewer": {"can_emit": ["review_approved"], "can_consume": ["patch_ready"]},
+                    "committer": {
+                        "can_emit": ["commit_created"],
+                        "can_consume": ["patch_ready", "review_approved"],
+                    },
+                },
+                "events": {
+                    "patch_ready": {"producer_roles": ["coder"]},
+                    "review_approved": {"producer_roles": ["reviewer"]},
+                    "commit_created": {"producer_roles": ["committer"]},
+                },
+                "nodes": [
+                    {"id": "implement", "role": "coder", "emits": ["patch_ready"]},
+                    {
+                        "id": "review",
+                        "role": "reviewer",
+                        "waits_for": {"all_of": ["patch_ready"]},
+                        "emits": ["review_approved"],
+                    },
+                    {
+                        "id": "commit",
+                        "role": "committer",
+                        "waits_for": {"all_of": ["patch_ready", "review_approved"]},
+                        "emits": ["commit_created"],
+                    },
+                ],
+                "gates": [
+                    {
+                        "id": "commit_gate",
+                        "node_id": "commit",
+                        "requires": {"all_of": ["patch_ready", "review_approved"]},
+                    }
+                ],
+                "terminal_events": ["commit_created"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    decision_path.write_text(
+        yaml.safe_dump(
+            {
+                "advisor_gate_decision": {
+                    "invoked": False,
+                    "policy_version": "0.1",
+                    "reason": ["parallel_width < 3"],
+                    "decision_basis": "first_run_heuristic",
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Goal",
+            "current_plan_ref": "workflow.yaml",
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [
+                {
+                    "event_id": "event-terminal",
+                    "event_type": "commit_created",
+                    "mission_id": "demo",
+                    "workflow_id": "test-workflow",
+                    "assignment_id": "assign-commit",
+                    "node_id": "commit",
+                    "role": "committer",
+                    "agent_id": "codex-cli",
+                },
+                {
+                    "event_id": "event-advisor-outcome-001",
+                    "event_type": "advisor_outcome_recorded",
+                    "mission_id": "demo",
+                    "advisor_outcome_id": "advisor-outcome-001",
+                    "workflow_id": "test-workflow",
+                    "status": "pending",
+                    "source_decision_type": "routing_decision",
+                    "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+                    "advisor_decision_ref": "advisor_gate_decision.yaml",
+                    "outcome_ref": "artifacts/outcomes/advisor-outcome-001.yaml",
+                    "actual_advisor_tokens": 0,
+                    "actual_total_tokens": 18400,
+                    "rework_count": 0,
+                    "broadcast_tokens": 1200,
+                    "duplicate_context_observed": False,
+                    "price_snapshot_attribution": {
+                        "cost_delta_usd": -0.002,
+                    },
+                    "pending_reason": "Awaiting post-run scoring.",
+                },
+            ],
+        }
+    )
+
+    summary = summarize_advisor_scores(
+        ledger,
+        artifact_root=tmp_path,
+    )
+
+    assert summary["classification_counts"]["good_skip"] == 1
+    assert summary["scores"][0]["classification"] == "good_skip"
+    assert summary["scores"][0]["score_status"] == "scored"
+
+
+def test_summarize_advisor_scores_classifies_missed_call_from_negative_signals(tmp_path) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    decision_path = tmp_path / "advisor_gate_decision.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow_id": "test-workflow",
+                "mission_id": "demo",
+                "mode": "small_dag",
+                "roles": {"coder": {"can_emit": ["done"], "can_consume": []}},
+                "events": {"done": {"producer_roles": ["coder"]}},
+                "nodes": [{"id": "implement", "role": "coder", "emits": ["done"]}],
+                "terminal_events": ["done"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    decision_path.write_text(
+        yaml.safe_dump(
+            {
+                "advisor_gate_decision": {
+                    "invoked": False,
+                    "policy_version": "0.1",
+                    "reason": ["estimated_total_tokens < 30000"],
+                    "decision_basis": "first_run_heuristic",
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Goal",
+            "current_plan_ref": "workflow.yaml",
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [
+                {
+                    "event_id": "event-terminal",
+                    "event_type": "done",
+                    "mission_id": "demo",
+                    "workflow_id": "test-workflow",
+                    "assignment_id": "assign-001",
+                    "node_id": "implement",
+                    "role": "coder",
+                    "agent_id": "codex-cli",
+                },
+                {
+                    "event_id": "event-advisor-outcome-002",
+                    "event_type": "advisor_outcome_recorded",
+                    "mission_id": "demo",
+                    "advisor_outcome_id": "advisor-outcome-002",
+                    "workflow_id": "test-workflow",
+                    "status": "pending",
+                    "source_decision_type": "routing_decision",
+                    "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+                    "advisor_decision_ref": "advisor_gate_decision.yaml",
+                    "outcome_ref": "artifacts/outcomes/advisor-outcome-002.yaml",
+                    "actual_advisor_tokens": 0,
+                    "actual_total_tokens": 18400,
+                    "rework_count": 1,
+                    "broadcast_tokens": 1200,
+                    "duplicate_context_observed": True,
+                    "pending_reason": "Awaiting post-run scoring.",
+                },
+            ],
+        }
+    )
+
+    summary = summarize_advisor_scores(
+        ledger,
+        artifact_root=tmp_path,
+    )
+
+    assert summary["classification_counts"]["missed_call"] == 1
+    assert summary["scores"][0]["classification"] == "missed_call"
+
+
+def test_summarize_advisor_scores_reports_insufficient_evidence_without_decision_artifact(
+    tmp_path,
+) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow_id": "test-workflow",
+                "mission_id": "demo",
+                "mode": "single_agent",
+                "roles": {"coder": {"can_emit": ["done"], "can_consume": []}},
+                "events": {"done": {"producer_roles": ["coder"]}},
+                "nodes": [{"id": "implement", "role": "coder", "emits": ["done"]}],
+                "terminal_events": ["done"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Goal",
+            "current_plan_ref": "workflow.yaml",
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [
+                {
+                    "event_id": "event-terminal",
+                    "event_type": "done",
+                    "mission_id": "demo",
+                    "workflow_id": "test-workflow",
+                    "assignment_id": "assign-001",
+                    "node_id": "implement",
+                    "role": "coder",
+                    "agent_id": "codex-cli",
+                },
+                {
+                    "event_id": "event-advisor-outcome-003",
+                    "event_type": "advisor_outcome_recorded",
+                    "mission_id": "demo",
+                    "advisor_outcome_id": "advisor-outcome-003",
+                    "workflow_id": "test-workflow",
+                    "status": "pending",
+                    "source_decision_type": "routing_decision",
+                    "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+                    "advisor_decision_ref": "missing.yaml",
+                    "outcome_ref": "artifacts/outcomes/advisor-outcome-003.yaml",
+                    "pending_reason": "Awaiting post-run scoring.",
+                },
+            ],
+        }
+    )
+
+    summary = summarize_advisor_scores(
+        ledger,
+        artifact_root=tmp_path,
+    )
+
+    assert summary["insufficient_evidence_count"] == 1
+    assert summary["scores"][0]["score_status"] == "insufficient_evidence"
+    assert "advisor_decision_unavailable" in summary["scores"][0]["reasons"]
+
+
+def test_load_routing_decision_validates_complex_mode_rationale() -> None:
+    mission = load_mission(Path("examples/missions/demo/mission.yaml"))
+    workflow = load_workflow(Path("examples/missions/demo/workflows/coder_reviewer_committer.yaml"))
+    decision = load_routing_decision(
+        {
+            "decision_type": "routing_decision",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "selected_mode": "small_dag",
+            "selection_policy_version": "0.1",
+            "triggered_rules": ["staged_review_required"],
+            "rejected_modes": [
+                {
+                    "mode": "single_agent_with_review",
+                    "rejected_because": "A separate commit node keeps the final gate inspectable.",
+                }
+            ],
+            "estimated_coordination_ratio": 0.18,
+            "budget_confidence": "high",
+            "reason": "The workflow separates implementation, review, and commit.",
+            "budget_reason": "The graph stays within the coordination ratio target.",
+            "risk_reason": "The commit step remains explicitly gated.",
+            "advisor_gate_decision": {
+                "invoked": False,
+                "policy_version": "0.1",
+                "reason": [
+                    "parallel_width < 3",
+                    "review_or_human_gate_count == 1",
+                ],
+                "decision_basis": "first_run_heuristic",
+            },
+        }
+    )
+
+    validate_routing_decision(mission, decision, workflow=workflow)
+
+    assert decision.selected_mode == "small_dag"
+    assert decision.rejected_modes[0]["mode"] == "single_agent_with_review"
+
+
+def test_validate_routing_decision_rejects_complex_mode_without_simpler_rejection() -> None:
+    mission = load_mission(Path("examples/missions/demo/mission.yaml"))
+    decision = load_routing_decision(
+        {
+            "decision_type": "routing_decision",
+            "mission_id": "demo",
+            "selected_mode": "parallel_swarm",
+            "selection_policy_version": "0.1",
+            "triggered_rules": ["independent_subtasks >= 4"],
+            "rejected_modes": [],
+            "estimated_coordination_ratio": 0.2,
+            "budget_confidence": "high",
+            "reason": "Use many workers.",
+            "advisor_gate_decision": {
+                "invoked": True,
+                "policy_version": "0.1",
+                "reason": ["parallel_width >= 3"],
+                "decision_basis": "first_run_heuristic",
+            },
+        }
+    )
+
+    with pytest.raises(
+        ProtocolError,
+        match="Complex routing requires rejected simpler modes",
+    ):
+        validate_routing_decision(mission, decision)
+
+
+def test_cli_validate_routing_decision(tmp_path, capsys) -> None:
+    mission_path = tmp_path / "mission.yaml"
+    workflow_path = tmp_path / "workflow.yaml"
+    decision_path = tmp_path / "routing_decision.yaml"
+    shutil.copy2("examples/missions/demo/mission.yaml", mission_path)
+    shutil.copy2("examples/missions/demo/workflows/coder_reviewer_committer.yaml", workflow_path)
+    decision_path.write_text(
+        yaml.safe_dump(
+            {
+                "decision_type": "routing_decision",
+                "mission_id": "demo",
+                "workflow_id": "coder-reviewer-committer-001",
+                "selected_mode": "small_dag",
+                "selection_policy_version": "0.1",
+                "triggered_rules": ["staged_review_required"],
+                "rejected_modes": [
+                    {
+                        "mode": "single_agent_with_review",
+                        "rejected_because": "A separate commit node keeps the gate explicit.",
+                    }
+                ],
+                "estimated_coordination_ratio": 0.18,
+                "budget_confidence": "high",
+                "reason": "The workflow separates implementation, review, and commit.",
+                "budget_reason": "The graph stays within the coordination ratio target.",
+                "risk_reason": "The commit step remains explicitly gated.",
+                "advisor_gate_decision": {
+                    "invoked": False,
+                    "policy_version": "0.1",
+                    "reason": [
+                        "parallel_width < 3",
+                        "review_or_human_gate_count == 1",
+                    ],
+                    "decision_basis": "first_run_heuristic",
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "decision",
+            "validate-routing",
+            str(mission_path),
+            str(decision_path),
+            "--workflow",
+            str(workflow_path),
+        ]
+    )
+    payload = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["decision_type"] == "routing_decision"
+    assert payload["selected_mode"] == "small_dag"
+
+
+def test_load_turn_report_validates_bounded_progress_packet() -> None:
+    report = load_turn_report(
+        {
+            "report_id": "report-001",
+            "assignment_id": "assign-001",
+            "agent_id": "codex-cli",
+            "status": "in_progress",
+            "tool_calls_since_last_report": 1,
+            "summary": "Inspected the implementation entry point.",
+            "new_findings": [],
+            "artifact_refs": [],
+            "blockers": [],
+            "suggested_ledger_updates": [],
+            "token_usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+            },
+        }
+    )
+
+    assert report.status == "in_progress"
+    assert report.token_usage["input_tokens"] == 100
+
+
+def test_compile_dispatch_packet_produces_canonical_handoff() -> None:
+    mission = load_mission(Path("examples/missions/demo/mission.yaml"))
+    workflow = load_workflow(Path("examples/missions/demo/workflows/coder_reviewer_committer.yaml"))
+    ledger = load_ledger(Path("examples/missions/demo/ledger.yaml"))
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "review",
+        assignment_id="assign-review",
+        force=True,
+    )
+    routing_decision = load_routing_decision(
+        {
+            "decision_type": "routing_decision",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "selected_mode": "small_dag",
+            "selection_policy_version": "0.1",
+            "triggered_rules": ["staged_review_required"],
+            "rejected_modes": [
+                {
+                    "mode": "single_agent_with_review",
+                    "rejected_because": "A separate commit node keeps the gate explicit.",
+                }
+            ],
+            "estimated_coordination_ratio": 0.18,
+            "budget_confidence": "high",
+            "reason": "The workflow separates implementation, review, and commit.",
+            "budget_reason": "The graph stays within the coordination ratio target.",
+            "risk_reason": "The commit step remains explicitly gated.",
+            "advisor_gate_decision": {
+                "invoked": False,
+                "policy_version": "0.1",
+                "reason": [
+                    "parallel_width < 3",
+                    "review_or_human_gate_count == 1",
+                ],
+                "decision_basis": "first_run_heuristic",
+            },
+        }
+    )
+
+    packet = compile_dispatch_packet(
+        mission,
+        workflow,
+        routing_decision,
+        assignment,
+        packet_id="packet-001",
+    )
+    validate_dispatch_packet(mission, workflow, load_dispatch_packet(packet.to_dict()))
+
+    assert packet.packet_id == "packet-001"
+    assert packet.assignment.assignment_id == "assign-review"
+    assert packet.turn_report_policy == {
+        "after_each_tool_call": True,
+        "max_report_tokens": 600,
+    }
+
+
+def test_compile_dispatch_packet_rejects_commit_without_review_constraint() -> None:
+    mission = load_mission(Path("examples/missions/demo/mission.yaml"))
+    workflow = load_workflow(Path("examples/missions/demo/workflows/coder_reviewer_committer.yaml"))
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Goal",
+            "current_plan_ref": "workflow.yaml",
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [
+                {
+                    "event_id": "event-result-implement",
+                    "event_type": "patch_ready",
+                    "mission_id": "demo",
+                    "workflow_id": workflow.workflow_id,
+                    "assignment_id": "assign-implement",
+                    "node_id": "implement",
+                    "role": "coder",
+                    "agent_id": "codex-cli",
+                },
+                {
+                    "event_id": "event-result-review",
+                    "event_type": "review_approved",
+                    "mission_id": "demo",
+                    "workflow_id": workflow.workflow_id,
+                    "assignment_id": "assign-review",
+                    "node_id": "review",
+                    "role": "reviewer",
+                    "agent_id": "codex-cli",
+                },
+            ],
+        }
+    )
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "commit",
+        assignment_id="assign-commit",
+    )
+    routing_decision = load_routing_decision(
+        {
+            "decision_type": "routing_decision",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "selected_mode": "small_dag",
+            "selection_policy_version": "0.1",
+            "triggered_rules": ["staged_review_required"],
+            "rejected_modes": [
+                {
+                    "mode": "single_agent_with_review",
+                    "rejected_because": "A separate commit node keeps the gate explicit.",
+                }
+            ],
+            "estimated_coordination_ratio": 0.18,
+            "budget_confidence": "high",
+            "reason": "The workflow separates implementation, review, and commit.",
+            "advisor_gate_decision": {
+                "invoked": False,
+                "policy_version": "0.1",
+                "reason": [
+                    "parallel_width < 3",
+                    "review_or_human_gate_count == 1",
+                ],
+                "decision_basis": "first_run_heuristic",
+            },
+        }
+    )
+
+    with pytest.raises(
+        ProtocolError,
+        match="Commit-like dispatch packets must require an explicit review decision",
+    ):
+        compile_dispatch_packet(
+            mission,
+            workflow,
+            routing_decision,
+            assignment,
+            packet_id="packet-commit",
+            review_constraints={
+                "required_gate_ids": ["commit_gate"],
+                "requires_review_decision": False,
+                "forbid_scope_expansion": True,
+                "forbid_new_agents": True,
+            },
+        )
+
+
+def test_cli_compile_dispatch_packet(tmp_path, capsys) -> None:
+    mission_path = tmp_path / "mission.yaml"
+    workflow_path = tmp_path / "workflow.yaml"
+    ledger_path = tmp_path / "ledger.yaml"
+    assignment_path = tmp_path / "assignment.yaml"
+    decision_path = tmp_path / "routing_decision.yaml"
+    packet_path = tmp_path / "dispatch_packet.yaml"
+    shutil.copy2("examples/missions/demo/mission.yaml", mission_path)
+    shutil.copy2("examples/missions/demo/workflows/coder_reviewer_committer.yaml", workflow_path)
+    shutil.copy2("examples/missions/demo/ledger.yaml", ledger_path)
+
+    workflow = load_workflow(workflow_path)
+    ledger = load_ledger(ledger_path)
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "implement",
+        assignment_id="assign-implement",
+    )
+    assignment_path.write_text(
+        yaml.safe_dump(assignment.to_dict(), sort_keys=False),
+        encoding="utf-8",
+    )
+    decision_path.write_text(
+        yaml.safe_dump(
+            {
+                "decision_type": "routing_decision",
+                "mission_id": "demo",
+                "workflow_id": workflow.workflow_id,
+                "selected_mode": "small_dag",
+                "selection_policy_version": "0.1",
+                "triggered_rules": ["staged_review_required"],
+                "rejected_modes": [
+                    {
+                        "mode": "single_agent_with_review",
+                        "rejected_because": "A separate commit node keeps the gate explicit.",
+                    }
+                ],
+                "estimated_coordination_ratio": 0.18,
+                "budget_confidence": "high",
+                "reason": "The workflow separates implementation, review, and commit.",
+                "advisor_gate_decision": {
+                    "invoked": False,
+                    "policy_version": "0.1",
+                    "reason": [
+                        "parallel_width < 3",
+                        "review_or_human_gate_count == 1",
+                    ],
+                    "decision_basis": "first_run_heuristic",
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "decision",
+            "compile-dispatch",
+            str(mission_path),
+            str(workflow_path),
+            str(decision_path),
+            str(assignment_path),
+            "--packet-id",
+            "packet-001",
+            "--dispatch-packet",
+            str(packet_path),
+        ]
+    )
+    payload = yaml.safe_load(capsys.readouterr().out)
+    persisted = yaml.safe_load(packet_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["packet_id"] == "packet-001"
+    assert payload["assignment"]["assignment_id"] == "assign-implement"
+    assert persisted["packet_id"] == "packet-001"
+
+
+def test_apply_review_decision_projects_public_findings_with_review_provenance() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-result-001",
+            "event_type": "result_submitted",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "assignment_id": "assign-001",
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "codex-cli",
+            "result": {
+                "result_id": "result-001",
+                "assignment_id": "assign-001",
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "emitted_events": [],
+                "artifacts": [],
+                "outcome_metrics": {},
+                "verification": {"status": "passed"},
+                "native_log_refs": [],
+                "mutation_proposal_refs": [],
+            },
+        },
+        workflow,
+    )
+    decision = load_review_decision(
+        {
+            "decision_type": "review_decision",
+            "decision_id": "review-001",
+            "mission_id": "demo",
+            "workflow_id": "test-workflow",
+            "reviewed_event": "event-result-001",
+            "actor": "human",
+            "verdict": "approved",
+            "reason": "Verification passed.",
+            "evidence_refs": ["artifact-report-001"],
+            "accepted_findings": [
+                {"finding_id": "finding-001", "content": "Patch is safe to land."}
+            ],
+            "rejected_findings": [],
+            "next_action": "continue",
+        }
+    )
+
+    updated = apply_review_decision(
+        ledger,
+        decision,
+        workflow=workflow,
+        decision_ref="artifacts/reviews/review-001.yaml",
+    )
+
+    assert updated.event_log[-1]["event_type"] == "review_decision_recorded"
+    assert updated.event_log[-1]["decision_ref"] == "artifacts/reviews/review-001.yaml"
+    assert updated.public_findings == [
+        {
+            "finding_id": "finding-001",
+            "content": "Patch is safe to land.",
+            "source_event": "event-result-001",
+            "source_agent": "codex-cli",
+            "accepted_by": "human",
+            "review_decision_id": "review-001",
+        }
+    ]
+    assert updated.decisions[0]["decision_id"] == "review-001"
+
+
+def test_cli_import_review_decision_updates_ledger_projection(tmp_path, capsys) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    ledger_path = tmp_path / "ledger.yaml"
+    decision_path = tmp_path / "review-decision.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow_id": "test-workflow",
+                "mission_id": "demo",
+                "mode": "small_dag",
+                "roles": {
+                    "coder": {"can_emit": ["patch_ready"], "can_consume": []},
+                    "reviewer": {
+                        "can_emit": ["review_approved"],
+                        "can_consume": ["patch_ready"],
+                    },
+                    "committer": {
+                        "can_emit": ["commit_created"],
+                        "can_consume": ["patch_ready", "review_approved"],
+                    },
+                },
+                "events": {
+                    "patch_ready": {"producer_roles": ["coder"]},
+                    "review_approved": {"producer_roles": ["reviewer"]},
+                    "commit_created": {"producer_roles": ["committer"]},
+                },
+                "nodes": [
+                    {"id": "implement", "role": "coder", "emits": ["patch_ready"]},
+                    {
+                        "id": "review",
+                        "role": "reviewer",
+                        "waits_for": {"all_of": ["patch_ready"]},
+                        "emits": ["review_approved"],
+                    },
+                    {
+                        "id": "commit",
+                        "role": "committer",
+                        "waits_for": {"all_of": ["patch_ready", "review_approved"]},
+                        "emits": ["commit_created"],
+                    },
+                ],
+                "terminal_events": ["commit_created"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    ledger = _empty_ledger()
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-result-001",
+            "event_type": "result_submitted",
+            "mission_id": "demo",
+            "workflow_id": "test-workflow",
+            "assignment_id": "assign-001",
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "codex-cli",
+            "result": {
+                "result_id": "result-001",
+                "assignment_id": "assign-001",
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "emitted_events": [],
+                "artifacts": [],
+                "outcome_metrics": {},
+                "verification": {"status": "passed"},
+                "native_log_refs": [],
+                "mutation_proposal_refs": [],
+            },
+        },
+        _workflow(),
+    )
+    write_ledger(ledger_path, ledger)
+    decision_path.write_text(
+        yaml.safe_dump(
+            {
+                "decision_type": "review_decision",
+                "decision_id": "review-001",
+                "mission_id": "demo",
+                "workflow_id": "test-workflow",
+                "reviewed_event": "event-result-001",
+                "actor": "human",
+                "verdict": "approved",
+                "reason": "Verification passed.",
+                "evidence_refs": ["artifact-report-001"],
+                "accepted_findings": [
+                    {"finding_id": "finding-001", "content": "Patch is safe to land."}
+                ],
+                "rejected_findings": [],
+                "next_action": "continue",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "decision",
+            "import-review",
+            str(workflow_path),
+            str(ledger_path),
+            str(decision_path),
+            "--decision-ref",
+            "artifacts/reviews/review-001.yaml",
+        ]
+    )
+    payload = yaml.safe_load(capsys.readouterr().out)
+    updated = load_ledger(ledger_path)
+
+    assert exit_code == 0
+    assert payload["event_type"] == "review_decision_recorded"
+    assert updated.public_findings[0]["review_decision_id"] == "review-001"
+    assert updated.decisions[0]["decision_type"] == "review_decision"
+
+
 def test_load_ledger_rebuilds_projection_when_cursor_missing(tmp_path) -> None:
     ledger_path = tmp_path / "ledger.yaml"
     ledger_path.write_text(
@@ -1195,14 +2411,15 @@ def test_load_ledger_rebuilds_projection_when_cursor_missing(tmp_path) -> None:
                 "current_goal": "Goal",
                 "current_plan_ref": "workflow.yaml",
                 "public_findings": [
-                    {
-                        "finding_id": "finding-001",
-                        "content": "obsolete",
-                        "source_event": "event-001",
-                        "source_agent": "worker",
-                        "accepted_by": "harness",
-                    }
-                ],
+                        {
+                            "finding_id": "finding-001",
+                            "content": "obsolete",
+                            "source_event": "event-001",
+                            "source_agent": "worker",
+                            "accepted_by": "harness",
+                            "review_decision_id": "review-001",
+                        }
+                    ],
                 "decisions": [{"decision_id": "decision-001"}],
                 "risks": [{"risk_id": "risk-001"}],
                 "artifacts": [],
@@ -1850,6 +3067,486 @@ def test_cli_assignment_export(tmp_path, capsys) -> None:
     assert payload["node_id"] == "implement"
     assert "visible_context" in payload
     assert "update_canonical_ledger" in payload["forbidden_actions"]
+
+
+def test_compile_context_capsule_scopes_dependency_closure_deterministically() -> None:
+    workflow = _context_workflow()
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Ship the reviewed patch",
+            "current_plan_ref": "workflow.yaml",
+            "projection": {},
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [],
+        }
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-outcome-001",
+            "event_type": "node_outcome_decided",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "implement",
+            "source_outcome_id": "outcome-001",
+            "actor": "harness",
+            "disposition": "accepted",
+            "outcome_status": "completed",
+            "accepted_event_types": ["patch_ready"],
+            "pre_state_ref": "workspace:abc123",
+            "post_state_ref": "workspace:def456",
+        },
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-inventory",
+            "event_type": "inventory_ready",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "inventory",
+            "role": "inventory",
+            "agent_id": "inventory-agent",
+        },
+        workflow,
+    )
+    ledger = apply_review_decision(
+        ledger,
+        load_review_decision(
+            {
+                "decision_type": "review_decision",
+                "decision_id": "review-inventory",
+                "mission_id": "demo",
+                "workflow_id": workflow.workflow_id,
+                "reviewed_event": "event-inventory",
+                "actor": "orchestrator",
+                "verdict": "approved",
+                "reason": "Inventory fact accepted.",
+                "evidence_refs": ["artifact-inventory-report"],
+                "accepted_findings": [
+                    {
+                        "finding_id": "finding-inventory",
+                        "content": "Inventory branch found a separate issue.",
+                    }
+                ],
+                "rejected_findings": [],
+                "next_action": "continue",
+            }
+        ),
+        workflow=workflow,
+        decision_ref="artifacts/reviews/review-inventory.yaml",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-patch",
+            "event_type": "patch_ready",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "coder-agent",
+        },
+        workflow,
+    )
+    ledger = apply_review_decision(
+        ledger,
+        load_review_decision(
+            {
+                "decision_type": "review_decision",
+                "decision_id": "review-implement",
+                "mission_id": "demo",
+                "workflow_id": workflow.workflow_id,
+                "reviewed_event": "event-patch",
+                "actor": "orchestrator",
+                "verdict": "approved",
+                "reason": "Patch fact accepted.",
+                "evidence_refs": ["artifact-patch-report"],
+                "accepted_findings": [
+                    {
+                        "finding_id": "finding-implement",
+                        "content": "Implementation produced the requested patch.",
+                    }
+                ],
+                "rejected_findings": [],
+                "next_action": "continue",
+            }
+        ),
+        workflow=workflow,
+        decision_ref="artifacts/reviews/review-implement.yaml",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-review",
+            "event_type": "review_approved",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "review",
+            "role": "reviewer",
+            "agent_id": "reviewer-agent",
+        },
+        workflow,
+    )
+    ledger = apply_review_decision(
+        ledger,
+        load_review_decision(
+            {
+                "decision_type": "review_decision",
+                "decision_id": "review-review",
+                "mission_id": "demo",
+                "workflow_id": workflow.workflow_id,
+                "reviewed_event": "event-review",
+                "actor": "human",
+                "verdict": "approved",
+                "reason": "Review fact accepted.",
+                "evidence_refs": ["artifact-review-report"],
+                "accepted_findings": [
+                    {
+                        "finding_id": "finding-review",
+                        "content": "Human review approved the patch.",
+                    }
+                ],
+                "rejected_findings": [],
+                "next_action": "continue",
+            }
+        ),
+        workflow=workflow,
+        decision_ref="artifacts/reviews/review-review.yaml",
+    )
+
+    first = compile_context_capsule(
+        workflow,
+        ledger,
+        "commit",
+        assignment_id="assign-commit",
+    )
+    second = compile_context_capsule(
+        workflow,
+        ledger,
+        "commit",
+        assignment_id="assign-commit",
+    )
+
+    assert first == second
+    assert first.workspace_ref == "workspace:def456"
+    assert first.dependency_node_ids == ["commit", "implement", "review"]
+    assert [item["finding_id"] for item in first.accepted_facts] == [
+        "finding-implement",
+        "finding-review",
+    ]
+    assert [item["decision_id"] for item in first.accepted_decisions] == [
+        "review-implement",
+        "review-review",
+    ]
+    assert all(ref.get("ref") != "artifact-inventory-report" for ref in first.artifact_refs)
+    assert [ref["ref"] for ref in first.artifact_refs] == [
+        "artifact-patch-report",
+        "artifact-review-report",
+    ]
+
+
+def test_export_assignment_embeds_context_capsule_and_artifact_refs() -> None:
+    workflow = _context_workflow()
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Ship the reviewed patch",
+            "current_plan_ref": "workflow.yaml",
+            "projection": {},
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [],
+        }
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-outcome-001",
+            "event_type": "node_outcome_decided",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "implement",
+            "source_outcome_id": "outcome-001",
+            "actor": "harness",
+            "disposition": "accepted",
+            "outcome_status": "completed",
+            "accepted_event_types": ["patch_ready"],
+            "pre_state_ref": "workspace:abc123",
+            "post_state_ref": "workspace:def456",
+        },
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-patch",
+            "event_type": "patch_ready",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "coder-agent",
+        },
+        workflow,
+    )
+    ledger = apply_review_decision(
+        ledger,
+        load_review_decision(
+            {
+                "decision_type": "review_decision",
+                "decision_id": "review-implement",
+                "mission_id": "demo",
+                "workflow_id": workflow.workflow_id,
+                "reviewed_event": "event-patch",
+                "actor": "orchestrator",
+                "verdict": "approved",
+                "reason": "Patch fact accepted.",
+                "evidence_refs": ["artifact-patch-report"],
+                "accepted_findings": [
+                    {
+                        "finding_id": "finding-implement",
+                        "content": "Implementation produced the requested patch.",
+                    }
+                ],
+                "rejected_findings": [],
+                "next_action": "continue",
+            }
+        ),
+        workflow=workflow,
+        decision_ref="artifacts/reviews/review-implement.yaml",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-review",
+            "event_type": "review_approved",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "review",
+            "role": "reviewer",
+            "agent_id": "reviewer-agent",
+        },
+        workflow,
+    )
+
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "commit",
+        assignment_id="assign-commit",
+        force=True,
+    )
+    capsule = assignment.visible_context["context_capsule"]
+
+    assert assignment.artifact_refs == [{"ref": "artifact-patch-report"}]
+    assert capsule["context_capsule_id"] == "context-assign-commit"
+    assert capsule["dependency_node_ids"] == ["commit", "implement", "review"]
+    assert capsule["role_permissions"]["can_consume"] == ["patch_ready", "review_approved"]
+    assert capsule["accepted_facts"][0]["finding_id"] == "finding-implement"
+    assert "## Artifact Refs" in render_assignment_prompt(assignment)
+
+
+def test_resolve_context_request_grants_scoped_artifact() -> None:
+    workflow = _context_workflow()
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Ship the reviewed patch",
+            "current_plan_ref": "workflow.yaml",
+            "projection": {},
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [
+                {
+                    "artifact_id": "artifact-patch-report",
+                    "path": "artifacts/patch-report.md",
+                    "sha256": "abc123",
+                    "source_event": "event-patch",
+                }
+            ],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [],
+        }
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-patch",
+            "event_type": "patch_ready",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "coder-agent",
+        },
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-review",
+            "event_type": "review_approved",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "review",
+            "role": "reviewer",
+            "agent_id": "reviewer-agent",
+        },
+        workflow,
+    )
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "commit",
+        assignment_id="assign-commit",
+        force=True,
+    )
+    request = load_context_request(
+        {
+            "context_request_id": "context-request-001",
+            "assignment_id": "assign-commit",
+            "missing_information": "Need the exact patch report body.",
+            "requested_refs": ["artifact-patch-report"],
+            "expected_value": "Validate whether the patch satisfies the commit gate.",
+        }
+    )
+
+    resolution = resolve_context_request(assignment, ledger, request)
+
+    assert resolution.status == "granted"
+    assert resolution.policy_version == "context-v1"
+    assert resolution.denied_refs == []
+    assert resolution.unavailable_refs == []
+    assert resolution.granted_artifacts == [
+        {
+            "artifact_id": "artifact-patch-report",
+            "path": "artifacts/patch-report.md",
+            "sha256": "abc123",
+            "source_event": "event-patch",
+        }
+    ]
+
+
+def test_resolve_context_request_reports_denied_and_unavailable_refs() -> None:
+    workflow = _context_workflow()
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 1,
+            "current_goal": "Ship the reviewed patch",
+            "current_plan_ref": "workflow.yaml",
+            "projection": {},
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [],
+        }
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-patch",
+            "event_type": "patch_ready",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "coder-agent",
+        },
+        workflow,
+    )
+    ledger = apply_review_decision(
+        ledger,
+        load_review_decision(
+            {
+                "decision_type": "review_decision",
+                "decision_id": "review-implement",
+                "mission_id": "demo",
+                "workflow_id": workflow.workflow_id,
+                "reviewed_event": "event-patch",
+                "actor": "orchestrator",
+                "verdict": "approved",
+                "reason": "Patch fact accepted.",
+                "evidence_refs": ["artifact-patch-report"],
+                "accepted_findings": [
+                    {
+                        "finding_id": "finding-implement",
+                        "content": "Implementation produced the requested patch.",
+                    }
+                ],
+                "rejected_findings": [],
+                "next_action": "continue",
+            }
+        ),
+        workflow=workflow,
+        decision_ref="artifacts/reviews/review-implement.yaml",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-review",
+            "event_type": "review_approved",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "node_id": "review",
+            "role": "reviewer",
+            "agent_id": "reviewer-agent",
+        },
+        workflow,
+    )
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "commit",
+        assignment_id="assign-commit",
+        force=True,
+    )
+    request = load_context_request(
+        {
+            "context_request_id": "context-request-002",
+            "assignment_id": "assign-commit",
+            "missing_information": "Need more evidence.",
+            "requested_refs": ["artifact-patch-report", "artifact-inventory-report"],
+            "expected_value": "Decide whether to continue or escalate.",
+        }
+    )
+
+    resolution = resolve_context_request(assignment, ledger, request)
+
+    assert resolution.status == "partially_granted" or resolution.status == "unavailable"
+    assert resolution.granted_artifacts == []
+    assert resolution.denied_refs == [
+        {
+            "requested_ref": "artifact-inventory-report",
+            "reason": "not_in_assignment_scope",
+        }
+    ]
+    assert resolution.unavailable_refs == [
+        {
+            "requested_ref": "artifact-patch-report",
+            "reason": "artifact_payload_unavailable",
+        }
+    ]
 
 
 def test_cli_assignment_prompt_export(capsys) -> None:
@@ -2692,6 +4389,7 @@ def test_run_live_demo_executes_three_node_session_path(tmp_path, monkeypatch) -
     )
 
     assert manifest["terminal_complete"] is True
+    assert manifest["failure"] is None
     assert manifest["ready"] == []
     assert manifest["node_states"] == {
         "implement": "completed",
@@ -2706,6 +4404,128 @@ def test_run_live_demo_executes_three_node_session_path(tmp_path, monkeypatch) -
     assert manifest["steps"][0]["ready_after"] == ["review"]
     assert manifest["steps"][1]["ready_after"] == ["commit"]
     assert manifest["steps"][2]["ready_after"] == []
+    assert Path(manifest["routing_decision_path"]).exists()
+    assert Path(manifest["advisor_gate_decision_path"]).exists()
+    assert Path(manifest["advisor_gate_outcome_path"]).exists()
+    assert Path(manifest["metrics_summary_path"]).exists()
+    assert Path(manifest["manifest_path"]).exists()
+    assert Path(manifest["steps"][0]["context_capsule_path"]).exists()
+    assert Path(manifest["steps"][0]["node_outcome_path"]).exists()
+    assert Path(manifest["steps"][0]["review_decision_path"]).exists()
+
+    metrics_summary = yaml.safe_load(Path(manifest["metrics_summary_path"]).read_text(encoding="utf-8"))
+    assert metrics_summary["context_summary"]["fit_counts"]["well_provisioned"] == 3
+    assert metrics_summary["policy_recommendations"] == []
+
+    routing_decision = yaml.safe_load(
+        Path(manifest["routing_decision_path"]).read_text(encoding="utf-8")
+    )
+    assert routing_decision["decision_type"] == "routing_decision"
+    assert routing_decision["selected_mode"] == "small_dag"
+
+    ledger = load_ledger(Path(manifest["ledger_path"]))
+    assert [
+        event["event_type"]
+        for event in ledger.event_log
+        if event["event_type"] == "review_decision_recorded"
+    ] == [
+        "review_decision_recorded",
+        "review_decision_recorded",
+        "review_decision_recorded",
+    ]
+    assert [finding["finding_id"] for finding in ledger.public_findings] == [
+        "finding-implement-live",
+        "finding-review-live",
+        "finding-commit-live",
+    ]
+
+
+def test_run_live_demo_returns_partial_manifest_when_session_times_out(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, timeout=kwargs["timeout"])
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo-timeout",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        timeout_seconds=1.0,
+        command_runner=fake_runner,
+    )
+
+    assert manifest["terminal_complete"] is False
+    assert manifest["failure"] == {
+        "node_id": "implement",
+        "session_id": "session-implement-live",
+        "status": "timed_out",
+        "reason": "timed_out",
+        "session_path": str(
+            tmp_path
+            / "live-demo-timeout"
+            / "generated"
+            / "sessions"
+            / "implement_session.yaml"
+        ),
+    }
+    assert manifest["steps"] == [
+        {
+            "node_id": "implement",
+            "assignment_path": str(
+                tmp_path
+                / "live-demo-timeout"
+                / "generated"
+                / "assignments"
+                / "implement_assignment.yaml"
+            ),
+            "context_capsule_path": str(
+                tmp_path
+                / "live-demo-timeout"
+                / "generated"
+                / "capsules"
+                / "implement_context_capsule.yaml"
+            ),
+            "session_path": str(
+                tmp_path
+                / "live-demo-timeout"
+                / "generated"
+                / "sessions"
+                / "implement_session.yaml"
+            ),
+            "record_status": "timed_out",
+            "failure_reason": "timed_out",
+            "ready_after": [],
+            "node_state_after": "blocked",
+        }
+    ]
+
+
+def test_prepare_demo_workspace_initializes_clean_git_repo(tmp_path) -> None:
+    workspace = prepare_demo_workspace(tmp_path / "demo-workspace")
+    git_root = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=tmp_path / "demo-workspace",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=tmp_path / "demo-workspace",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert workspace["ledger"].exists()
+    assert git_root.returncode == 0
+    assert Path(git_root.stdout.strip()) == (tmp_path / "demo-workspace").resolve()
+    assert status.returncode == 0
+    assert status.stdout.strip() == ""
 
 
 def test_lists_agent_specs() -> None:
@@ -3591,6 +5411,30 @@ def test_codex_session_produces_importable_result_from_completed_run(tmp_path, m
     assert record.diff_refs[0]["kind"] == "inline_patch"
 
 
+def test_create_session_spec_accepts_explicit_sandbox_mode() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "commit",
+        assignment_id="assign-commit",
+        force=True,
+    )
+
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="codex-cli",
+        workdir=Path("."),
+        target_model="gpt-5",
+        target_provider="openai",
+        sandbox_mode="danger-full-access",
+        session_id="session-commit",
+    )
+
+    assert spec.sandbox_mode == "danger-full-access"
+
+
 def test_codex_session_ignores_preexisting_dirty_workspace_in_delta_metrics(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "repo"
     source_root.mkdir()
@@ -3967,6 +5811,40 @@ def test_session_packages_mutation_proposal_artifact_ref(tmp_path) -> None:
     )
     assert len(packaged.artifacts[0]["sha256"]) == 64
     assert packaged.artifacts[0]["mutable"] is False
+
+
+def test_package_session_result_ignores_non_ref_artifact_metadata(tmp_path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow, ledger, "commit", assignment_id="assign-001", force=True
+    )
+    payload = yaml.safe_dump(
+        {
+            "status": "completed",
+            "emitted_events": ["commit_created"],
+            "artifacts": [
+                {"commit": "abc123"},
+                {"message": "Apply approved demo patch"},
+            ],
+            "verification": {"status": "passed"},
+        },
+        sort_keys=False,
+    ).strip()
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="shell-dummy",
+        workdir=source_root,
+        shell_command=f"cat <<'EOF'\n{payload}\nEOF",
+        session_id="session-001",
+    )
+
+    record = run_session(spec, assignment)
+    packaged = package_session_result(record, assignment)
+
+    assert packaged.artifacts == []
 
 
 def test_package_session_result_rejects_missing_artifact_or_assignment_mismatch(tmp_path) -> None:
@@ -4721,6 +6599,383 @@ def test_metrics_summarize_can_apply_price_snapshot(tmp_path) -> None:
     assert summary["entries"][0]["cost_usd"] == 0.0025
     assert summary["entries"][0]["cost_source"] == "manual"
     assert summary["entries"][0]["cost_confidence"] == "high"
+
+
+def test_pre_dispatch_policy_attaches_price_snapshot_attribution() -> None:
+    snapshot = {
+        "snapshot_id": "price-snapshot-2026-06-20",
+        "source": "manual",
+        "models": {
+            "gpt-5-mini": {
+                "pricing_model": "token",
+            }
+        },
+    }
+
+    decision = evaluate_pre_dispatch_policy(
+        mission_budget={
+            "max_total_tokens": 100000,
+            "max_coordination_ratio": 0.25,
+            "max_usd": 10.0,
+        },
+        routing_facts={
+            "selected_mode": "small_dag",
+            "target_model": "gpt-5-mini",
+            "predicted_total_tokens": 1000,
+            "predicted_cost_usd": 0.02,
+            "coordination_ratio_prediction": 0.1,
+        },
+        observed_budget={
+            "total_tokens_used": 900,
+            "known_cost_usd_total": 0.018,
+            "observed_coordination_ratio": 0.1,
+        },
+        price_snapshot=snapshot,
+    )
+
+    assert decision.price_snapshot_attribution == {
+        "snapshot_id": "price-snapshot-2026-06-20",
+        "snapshot_source": "manual",
+        "model": "gpt-5-mini",
+        "pricing_model": "token",
+        "predicted_cost_usd": 0.02,
+        "predicted_cost_basis": "recorded_cost",
+        "actual_cost_usd": 0.018,
+        "actual_cost_basis": "recorded_cost",
+        "cost_delta_usd": -0.002,
+    }
+
+
+def test_metrics_summarize_exports_advisor_outcome_price_snapshot_attribution(tmp_path) -> None:
+    ledger_path = tmp_path / "ledger.yaml"
+    ledger_path.write_text(
+        yaml.safe_dump(
+            {
+                "mission_id": "demo",
+                "ledger_version": 1,
+                "current_goal": "Goal",
+                "current_plan_ref": "workflow.yaml",
+                "public_findings": [],
+                "decisions": [],
+                "risks": [],
+                "artifacts": [],
+                "broadcasts": [],
+                "open_questions": [],
+                "event_log": [
+                    {
+                        "event_id": "event-advisor-outcome-002",
+                        "event_type": "advisor_outcome_recorded",
+                        "mission_id": "demo",
+                        "advisor_outcome_id": "advisor-outcome-002",
+                        "status": "scored",
+                        "source_decision_type": "routing_decision",
+                        "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+                        "advisor_decision_ref": "artifacts/decisions/advisor-gate-002.yaml",
+                        "outcome_ref": "artifacts/outcomes/advisor-outcome-002.yaml",
+                        "classification": "good_skip",
+                        "actual_advisor_tokens": 0,
+                        "actual_total_tokens": 18400,
+                        "rework_count": 0,
+                        "broadcast_tokens": 1200,
+                        "duplicate_context_observed": False,
+                        "price_snapshot_attribution": {
+                            "snapshot_id": "price-snapshot-2026-06-20",
+                            "snapshot_source": "manual",
+                            "model": "gpt-5-mini",
+                            "pricing_model": "token",
+                            "predicted_cost_usd": 0.02,
+                            "predicted_cost_basis": "recorded_cost",
+                            "actual_cost_usd": 0.018,
+                            "actual_cost_basis": "recorded_cost",
+                            "cost_delta_usd": -0.002,
+                        },
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_metrics(ledger_path)
+
+    assert summary["advisor_outcomes"] == [
+        {
+            "advisor_outcome_id": "advisor-outcome-002",
+            "status": "scored",
+            "source_decision_type": "routing_decision",
+            "source_decision_ref": "artifacts/decisions/routing-001.yaml",
+            "advisor_decision_ref": "artifacts/decisions/advisor-gate-002.yaml",
+            "outcome_ref": "artifacts/outcomes/advisor-outcome-002.yaml",
+            "classification": "good_skip",
+            "pending_reason": None,
+            "actual_advisor_tokens": 0,
+            "actual_total_tokens": 18400,
+            "rework_count": 0,
+            "broadcast_tokens": 1200,
+            "duplicate_context_observed": False,
+            "price_snapshot_attribution": {
+                "snapshot_id": "price-snapshot-2026-06-20",
+                "snapshot_source": "manual",
+                "model": "gpt-5-mini",
+                "pricing_model": "token",
+                "predicted_cost_usd": 0.02,
+                "predicted_cost_basis": "recorded_cost",
+                "actual_cost_usd": 0.018,
+                "actual_cost_basis": "recorded_cost",
+                "cost_delta_usd": -0.002,
+            },
+        }
+    ]
+    assert summary["advisor_score_summary"]["classification_counts"]["good_skip"] == 0
+    assert summary["advisor_score_summary"]["insufficient_evidence_count"] == 1
+
+
+def test_metrics_summarize_context_telemetry_and_fit_classification(tmp_path) -> None:
+    session_path = tmp_path / "session.yaml"
+    session_path.write_text(
+        yaml.safe_dump(
+            {
+                "session_id": "session-001",
+                "assignment_id": "assign-001",
+                "agent_id": "fake",
+                "role": "coder",
+                "task_type": "implementation",
+                "risk_level": "medium",
+                "effective_model": "gpt-5-mini",
+                "workflow_mode": "small_dag",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+                "exit": {"code": 0, "reason": "completed"},
+                "native_logs": {"stdout": "", "stderr": ""},
+                "diff_refs": [],
+                "artifacts": [],
+                "outcome_metrics": {
+                    "wall_time_ms": 1000,
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                    "changed_files_count": 1,
+                },
+                "context_delivery": {
+                    "policy_version": "context-v1",
+                    "capsule_tokens": 1800,
+                    "included_fact_ids": ["finding-001"],
+                    "included_artifact_refs": ["artifact-report-001"],
+                },
+                "context_requests": [
+                    {
+                        "reason": "missing_test_failure_details",
+                        "requested_refs": ["artifact-test-report-017"],
+                        "granted_artifacts": [{"artifact_id": "artifact-test-report-017"}],
+                        "denied_refs": [],
+                        "unavailable_refs": [],
+                        "added_tokens": 620,
+                    }
+                ],
+                "outcome": {
+                    "first_pass_success": True,
+                    "rework_required": False,
+                },
+                "result_proposal": {
+                    "review_status": "approved",
+                    "verification": {"status": "passed"},
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_metrics(session_path)
+
+    assert summary["entries"][0]["context_policy_version"] == "context-v1"
+    assert summary["entries"][0]["context_fit_classification"] == "under_provisioned"
+    assert summary["context_summary"]["total_context_requests"] == 1
+    assert summary["context_summary"]["total_added_tokens"] == 620
+    assert summary["context_summary"]["fit_counts"]["under_provisioned"] == 1
+
+
+def test_metrics_summarize_generates_reviewable_policy_recommendations(tmp_path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    common_payload = {
+        "agent_id": "fake",
+        "role": "coder",
+        "task_type": "implementation",
+        "risk_level": "medium",
+        "effective_model": "gpt-5-mini",
+        "workflow_mode": "small_dag",
+        "status": "completed",
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+        "exit": {"code": 0, "reason": "completed"},
+        "native_logs": {"stdout": "", "stderr": ""},
+        "diff_refs": [],
+        "artifacts": [],
+        "outcome_metrics": {
+            "wall_time_ms": 1000,
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "changed_files_count": 1,
+        },
+        "context_delivery": {
+            "policy_version": "context-v1",
+            "capsule_tokens": 1600,
+            "included_fact_ids": [],
+            "included_artifact_refs": [],
+        },
+        "context_requests": [
+            {
+                "reason": "missing_patch_details",
+                "requested_refs": ["artifact-patch-report"],
+                "granted_artifacts": [{"artifact_id": "artifact-patch-report"}],
+                "denied_refs": [],
+                "unavailable_refs": [],
+                "added_tokens": 400,
+            }
+        ],
+        "outcome": {
+            "first_pass_success": True,
+            "rework_required": False,
+        },
+        "result_proposal": {
+            "review_status": "approved",
+            "verification": {"status": "passed"},
+        },
+    }
+    (sessions_dir / "one.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "session_id": "session-001",
+                "assignment_id": "assign-001",
+                **common_payload,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (sessions_dir / "two.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "session_id": "session-002",
+                "assignment_id": "assign-002",
+                **common_payload,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_metrics(sessions_dir)
+
+    assert summary["context_summary"]["repeated_requested_refs"] == [
+        {"ref": "artifact-patch-report", "count": 2}
+    ]
+    assert summary["policy_recommendations"] == [
+        {
+            "recommendation_type": "promote_requested_evidence",
+            "policy_version": "context-v1",
+            "role": "coder",
+            "task_type": "implementation",
+            "risk_level": "medium",
+            "model": "gpt-5-mini",
+            "target_ref": "artifact-patch-report",
+            "request_count": 2,
+            "evidence_basis": "repeated_context_requests",
+            "auto_apply": False,
+        }
+    ]
+
+
+def test_metrics_summarize_distinguishes_unavailable_from_mis_scoped(tmp_path) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "unavailable.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "session_id": "session-001",
+                "assignment_id": "assign-001",
+                "agent_id": "fake",
+                "role": "coder",
+                "task_type": "implementation",
+                "risk_level": "medium",
+                "effective_model": "gpt-5-mini",
+                "workflow_mode": "small_dag",
+                "status": "blocked",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+                "exit": {"code": 0, "reason": "completed"},
+                "native_logs": {"stdout": "", "stderr": ""},
+                "diff_refs": [],
+                "artifacts": [],
+                "outcome_metrics": {"wall_time_ms": 1000, "changed_files_count": 0},
+                "context_delivery": {"policy_version": "context-v1", "capsule_tokens": 900},
+                "context_requests": [
+                    {
+                        "reason": "missing_payload",
+                        "requested_refs": ["artifact-a"],
+                        "granted_artifacts": [],
+                        "denied_refs": [],
+                        "unavailable_refs": [{"requested_ref": "artifact-a"}],
+                        "added_tokens": 0,
+                    }
+                ],
+                "result_proposal": {"verification": {"status": "not_run"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    (sessions_dir / "mis-scoped.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "session_id": "session-002",
+                "assignment_id": "assign-002",
+                "agent_id": "fake",
+                "role": "coder",
+                "task_type": "implementation",
+                "risk_level": "medium",
+                "effective_model": "gpt-5-mini",
+                "workflow_mode": "small_dag",
+                "status": "blocked",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+                "exit": {"code": 0, "reason": "completed"},
+                "native_logs": {"stdout": "", "stderr": ""},
+                "diff_refs": [],
+                "artifacts": [],
+                "outcome_metrics": {"wall_time_ms": 1000, "changed_files_count": 0},
+                "context_delivery": {"policy_version": "context-v1", "capsule_tokens": 900},
+                "context_requests": [
+                    {
+                        "reason": "wrong_branch_history",
+                        "requested_refs": ["artifact-b"],
+                        "granted_artifacts": [],
+                        "denied_refs": [{"requested_ref": "artifact-b"}],
+                        "unavailable_refs": [],
+                        "added_tokens": 0,
+                    }
+                ],
+                "result_proposal": {"verification": {"status": "not_run"}},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_metrics(sessions_dir)
+
+    classifications = {
+        entry["assignment_id"]: entry["context_fit_classification"]
+        for entry in summary["entries"]
+    }
+    assert classifications == {
+        "assign-001": "insufficient_evidence",
+        "assign-002": "mis_scoped",
+    }
 
 
 def test_pre_dispatch_policy_rejects_hard_budget_limit_from_observed_usage() -> None:

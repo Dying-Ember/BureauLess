@@ -26,6 +26,33 @@ class CostEstimate:
 
 
 @dataclass(frozen=True)
+class PriceSnapshotAttribution:
+    snapshot_id: str
+    snapshot_source: str
+    model: str
+    pricing_model: str
+    predicted_cost_usd: float | None
+    predicted_cost_basis: str
+    actual_cost_usd: float | None
+    actual_cost_basis: str
+    cost_delta_usd: float | None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "snapshot_id": self.snapshot_id,
+            "snapshot_source": self.snapshot_source,
+            "model": self.model,
+            "pricing_model": self.pricing_model,
+            "predicted_cost_usd": self.predicted_cost_usd,
+            "predicted_cost_basis": self.predicted_cost_basis,
+            "actual_cost_usd": self.actual_cost_usd,
+            "actual_cost_basis": self.actual_cost_basis,
+            "cost_delta_usd": self.cost_delta_usd,
+        }
+        return payload
+
+
+@dataclass(frozen=True)
 class PreDispatchPolicyDecision:
     decision: str
     selected_mode: str
@@ -34,9 +61,10 @@ class PreDispatchPolicyDecision:
     triggered_rules: list[str]
     reasons: list[str]
     observed_evidence: dict[str, Any]
+    price_snapshot_attribution: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "decision": self.decision,
             "selected_mode": self.selected_mode,
             "recommended_mode": self.recommended_mode,
@@ -45,6 +73,9 @@ class PreDispatchPolicyDecision:
             "reasons": self.reasons,
             "observed_evidence": self.observed_evidence,
         }
+        if self.price_snapshot_attribution is not None:
+            payload["price_snapshot_attribution"] = self.price_snapshot_attribution
+        return payload
 
 
 def load_price_snapshot(path: Path) -> dict[str, Any]:
@@ -117,6 +148,7 @@ def evaluate_pre_dispatch_policy(
     mission_budget: dict[str, Any],
     routing_facts: dict[str, Any],
     observed_budget: dict[str, Any],
+    price_snapshot: dict[str, Any] | None = None,
 ) -> PreDispatchPolicyDecision:
     selected_mode = _string_or_unknown(routing_facts.get("selected_mode"), "single_agent")
     recommended_mode = selected_mode
@@ -135,6 +167,11 @@ def evaluate_pre_dispatch_policy(
             triggered_rules=_dedupe(triggered_rules),
             reasons=_dedupe(reasons),
             observed_evidence=_observed_evidence(mission_budget, routing_facts, observed_budget),
+            price_snapshot_attribution=_price_snapshot_attribution(
+                price_snapshot,
+                routing_facts,
+                observed_budget,
+            ),
         )
 
     if selected_mode == "parallel_swarm" and _reject_parallel_swarm(routing_facts):
@@ -170,6 +207,50 @@ def evaluate_pre_dispatch_policy(
         triggered_rules=_dedupe(triggered_rules),
         reasons=_dedupe(reasons),
         observed_evidence=_observed_evidence(mission_budget, routing_facts, observed_budget),
+        price_snapshot_attribution=_price_snapshot_attribution(
+            price_snapshot,
+            routing_facts,
+            observed_budget,
+        ),
+    )
+
+
+def attribute_price_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    model: str,
+    predicted_cost_usd: float | None,
+    predicted_tokens_recorded: bool,
+    actual_cost_usd: float | None,
+    actual_tokens_recorded: bool,
+) -> PriceSnapshotAttribution:
+    snapshot_id = _string_or_unknown(snapshot.get("snapshot_id"))
+    snapshot_source = _string_or_unknown(snapshot.get("source"), "unknown")
+    model_data = snapshot.get("models", {}).get(model, {}) if isinstance(snapshot.get("models"), dict) else {}
+    pricing_model = _string_or_unknown(
+        model_data.get("pricing_model") if isinstance(model_data, dict) else None
+    )
+    predicted_cost_basis = _cost_basis(
+        cost_usd=predicted_cost_usd,
+        tokens_recorded=predicted_tokens_recorded,
+    )
+    actual_cost_basis = _cost_basis(
+        cost_usd=actual_cost_usd,
+        tokens_recorded=actual_tokens_recorded,
+    )
+    cost_delta_usd = None
+    if predicted_cost_usd is not None and actual_cost_usd is not None:
+        cost_delta_usd = round(actual_cost_usd - predicted_cost_usd, 6)
+    return PriceSnapshotAttribution(
+        snapshot_id=snapshot_id,
+        snapshot_source=snapshot_source,
+        model=model,
+        pricing_model=pricing_model,
+        predicted_cost_usd=predicted_cost_usd,
+        predicted_cost_basis=predicted_cost_basis,
+        actual_cost_usd=actual_cost_usd,
+        actual_cost_basis=actual_cost_basis,
+        cost_delta_usd=cost_delta_usd,
     )
 
 
@@ -189,6 +270,31 @@ def _int_or_none(value: Any) -> int | None:
 
 def _bool(value: Any) -> bool:
     return value is True
+
+
+def _price_snapshot_attribution(
+    snapshot: dict[str, Any] | None,
+    routing_facts: dict[str, Any],
+    observed_budget: dict[str, Any],
+) -> dict[str, Any] | None:
+    if snapshot is None:
+        return None
+    model = _string_or_unknown(
+        routing_facts.get("target_model") or routing_facts.get("model"),
+        "unknown",
+    )
+    predicted_cost_usd = _float_or_none(routing_facts.get("predicted_cost_usd"))
+    actual_cost_usd = _float_or_none(observed_budget.get("known_cost_usd_total"))
+    predicted_tokens_recorded = _int_or_none(routing_facts.get("predicted_total_tokens")) is not None
+    actual_tokens_recorded = _int_or_none(observed_budget.get("total_tokens_used")) is not None
+    return attribute_price_snapshot(
+        snapshot,
+        model=model,
+        predicted_cost_usd=predicted_cost_usd,
+        predicted_tokens_recorded=predicted_tokens_recorded,
+        actual_cost_usd=actual_cost_usd,
+        actual_tokens_recorded=actual_tokens_recorded,
+    ).to_dict()
 
 
 def _budget_state(
@@ -335,6 +441,14 @@ def _observed_evidence(
         "routing_facts": routing_facts,
         "observed_budget": observed_budget,
     }
+
+
+def _cost_basis(*, cost_usd: float | None, tokens_recorded: bool) -> str:
+    if cost_usd is not None:
+        return "recorded_cost"
+    if tokens_recorded:
+        return "unavailable_from_runtime"
+    return "not_recorded"
 
 
 def _dedupe(values: list[str]) -> list[str]:

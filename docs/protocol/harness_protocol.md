@@ -235,6 +235,72 @@ and workflow. If the accepted workspace has moved past the pre-state, the
 outcome is `stale` or `needs_review`; it is not silently applied. Failed and
 interrupted outcomes must record partial effects and cleanup requirements.
 
+### Review Decision
+
+Review acceptance is a separate artifact, not an implicit side effect of raw
+worker output. The review decision packet captures who made the judgment, which
+existing ledger event they reviewed, which findings were accepted or rejected,
+and what should happen next.
+
+```yaml
+decision_type: review_decision
+decision_id: review-017
+mission_id: optimize-worker-lifecycle
+workflow_id: workflow-001
+reviewed_event: event-result-017
+actor: orchestrator
+verdict: approved
+reason: >
+  The patch satisfies the node acceptance criteria and verification receipts
+  match the claimed workspace delta.
+evidence_refs:
+  - artifact-patch-017
+  - artifact-test-report-017
+accepted_findings:
+  - finding_id: finding-017
+    content: Superseded assignment events no longer satisfy downstream gates.
+rejected_findings: []
+next_action: continue
+```
+
+The harness validates review decisions independently of the worker payload.
+`actor` is limited to `orchestrator` or `human`. `verdict` is limited to
+`approved`, `rejected`, or `changes_requested`. `next_action` is limited to
+`continue`, `retry`, `escalate`, or `stop`. The same `finding_id` must not
+appear in both `accepted_findings` and `rejected_findings`.
+
+Accepted review decisions append a dedicated ledger event that preserves both
+the reviewed event linkage and the raw decision packet reference:
+
+```yaml
+event_id: event-review-017
+event_type: review_decision_recorded
+mission_id: optimize-worker-lifecycle
+workflow_id: workflow-001
+review_decision_id: review-017
+reviewed_event: event-result-017
+actor: orchestrator
+verdict: approved
+reason: >
+  The patch satisfies the node acceptance criteria and verification receipts
+  match the claimed workspace delta.
+evidence_refs:
+  - artifact-patch-017
+  - artifact-test-report-017
+accepted_findings:
+  - finding_id: finding-017
+    content: Superseded assignment events no longer satisfy downstream gates.
+rejected_findings: []
+next_action: continue
+decision_ref: artifacts/reviews/review-017.yaml
+```
+
+Projected `public_findings` and `decisions` derive from
+`review_decision_recorded` events. A public finding therefore always carries
+review provenance through `source_event`, `source_agent`, `accepted_by`, and
+`review_decision_id`. Raw decision packets remain audit evidence; the accepted
+projection remains the canonical current-state view.
+
 ## Artifact Integrity
 
 Artifacts are immutable evidence objects. Ledger records should refer to

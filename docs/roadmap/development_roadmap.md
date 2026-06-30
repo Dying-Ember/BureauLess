@@ -15,9 +15,10 @@ The project currently has two runtime layers:
   checks, isolated sessions, result packaging, outcome metrics, and dispatch
   readiness checks.
 
-Milestones 1, 2, and 2.5 are complete. The next runtime priority is establishing
-the node-outcome and bounded-context boundary before completing advisor outcome
-learning and the remaining orchestrator decision artifacts. Those tasks form
+Milestones 1, 2, and 2.5 are complete. The current runtime priority is
+finishing advisor outcome learning, routing/dispatch decision artifacts, and
+the integrated M3 acceptance spine now that the node-outcome, bounded-context,
+and context-telemetry boundary is in place. Those tasks form
 Runtime Harness Milestone 3. That milestone now explicitly includes a narrow
 real-agent binding spine: `codex-cli` is the first real worker target for the
 demo path. This is not a full provider platform milestone. Broader agent and
@@ -91,6 +92,15 @@ workflow end to end through normal session/import/replay paths. Broader agent
 and provider breadth remains out of scope until the next decision-artifact and
 context work is complete.
 
+That acceptance spine is now accompanied by one maintained integrated M3 demo
+fixture. The live demo writes inspectable routing, advisor-skip, context
+capsule, session, node-outcome, review-decision, metrics-summary, and ledger
+artifacts into one workspace so replay, metrics, API, and workbench checks can
+reuse the same bounded path.
+That path has now been validated through a real `codex-cli` run and reloaded in
+the workbench against the emitted `tmp/...` mission/workflow/ledger artifacts,
+not only against fixture-only test doubles.
+
 The local development entrypoint for that API is `npm run api:dev`. It pins
 execution to the repo-local `.venv`, tolerates another active shell virtual
 environment, and records the selected API URL in `.bureauless-api-url` when it
@@ -104,7 +114,7 @@ bridge milestone between the semi-automatic runtime and later policy-driven
 automation: controlled workflow mutation. The goal is to let workers report
 that the current workflow is structurally incomplete without allowing them to
 change workflow or ledger state directly. This work is documented as
-[`../rfcs/workflow_mutation_proposal.md`](../rfcs/workflow_mutation_proposal.md)
+[`../rfcs/001-controlled-workflow-mutation.md`](../rfcs/001-controlled-workflow-mutation.md)
 and broken down in
 [`../tasks/runtime_harness_milestone_2_5_tasklist.md`](../tasks/runtime_harness_milestone_2_5_tasklist.md).
 
@@ -180,8 +190,9 @@ Acceptance:
 
 ### A4: Advisor Policy And Budget Estimator
 
-Status: started. Budget snapshots and pre-dispatch workflow selection are
-implemented; advisor outcome learning remains planned.
+Status: started. Budget snapshots, pre-dispatch workflow selection, advisor
+outcome events, price-snapshot attribution, and deterministic scoring are
+implemented.
 
 Goal: make advisor usage measurable instead of instinctive.
 
@@ -202,15 +213,16 @@ Acceptance:
 
 ### A5: Orchestrator Decision Artifacts
 
-Status: started. Assignment and result artifacts are implemented; broader
-orchestrator routing and review decision artifacts remain planned.
+Status: completed for the Milestone 3 scope. Assignment, result, review
+decision, routing decision, turn report, and dispatch packet artifacts are now
+implemented and validated.
 
 Goal: persist orchestrator decisions as structured YAML.
 
 Work:
 
-- Add loaders/validators for routing decisions, assignments, turn reports, and
-  review decisions.
+- Add loaders/validators for routing decisions, assignments, turn reports,
+  dispatch packets, and review decisions.
 - Keep orchestrator outputs machine-readable.
 - Reject decision artifacts that attempt to bypass harness gates.
 - Enforce worker/orchestrator invariants from `docs/protocol/harness_protocol.md`.
@@ -218,6 +230,12 @@ Work:
 Acceptance:
 
 - A complete orchestrator proposal can be compiled before worker dispatch.
+
+The API surface now exposes the minimum M3 artifact set directly: routing
+decisions, assignments, context capsules, context requests and resolutions,
+result proposals, node outcomes, advisor outcomes, turn reports, and compiled
+dispatch packets. That keeps the workbench on authoritative runtime shapes
+instead of file scraping or frontend-side policy reconstruction.
 
 ### A5.5: Real Agent Binding Spine
 
@@ -260,7 +278,7 @@ Tracking:
 - GitHub issue:
   [#1 RFC: Controlled Workflow Mutation](https://github.com/Dying-Ember/BureauLess/issues/1)
 - RFC:
-  [`../rfcs/workflow_mutation_proposal.md`](../rfcs/workflow_mutation_proposal.md)
+  [`../rfcs/001-controlled-workflow-mutation.md`](../rfcs/001-controlled-workflow-mutation.md)
 - Task list:
   [`../tasks/runtime_harness_milestone_2_5_tasklist.md`](../tasks/runtime_harness_milestone_2_5_tasklist.md)
 

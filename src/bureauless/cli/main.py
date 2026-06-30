@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -27,16 +28,27 @@ from ..core import (
 )
 from ..protocol import (
     append_ledger_event,
+    apply_advisor_outcome,
+    apply_review_decision,
+    compile_dispatch_packet,
     compile_workflow,
     export_assignment,
     import_result_proposal,
+    load_advisor_outcome,
     load_assignment,
+    load_dispatch_packet,
+    load_routing_decision,
     load_ledger,
     load_mission,
+    load_node_outcome,
     load_result_proposal,
+    load_review_decision,
     load_workflow,
+    node_outcome_from_session,
     render_assignment_prompt,
     sha256_file,
+    validate_dispatch_packet,
+    validate_routing_decision,
     verify_ledger_artifacts,
     write_ledger,
 )
@@ -47,6 +59,7 @@ from ..runtime import (
 )
 from ..runtime.sessions import (
     build_assignment_created_event,
+    build_session_terminal_event,
     cancel_session_record,
     create_session_spec,
     import_session_record,
@@ -88,7 +101,10 @@ def main(argv: list[str] | None = None) -> int:
     mission_live_demo_parser.add_argument("--target-model", required=True)
     mission_live_demo_parser.add_argument("--target-provider", required=True)
     mission_live_demo_parser.add_argument("--provider-base-url")
-    mission_live_demo_parser.add_argument("--provider-api-key-env", default="OPENAI_API_KEY")
+    mission_live_demo_parser.add_argument(
+        "--provider-api-key-env",
+        default="BUREAULESS_TEST_OPENAI_API_KEY",
+    )
     mission_live_demo_parser.add_argument("--provider-wire-api")
     mission_live_demo_parser.add_argument("--timeout-seconds", type=float, default=120.0)
 
@@ -146,6 +162,42 @@ def main(argv: list[str] | None = None) -> int:
     result_import_parser.add_argument("ledger")
     result_import_parser.add_argument("assignment")
     result_import_parser.add_argument("result")
+
+    decision_parser = subparsers.add_parser("decision", help="Decision artifact operations")
+    decision_subparsers = decision_parser.add_subparsers(dest="decision_command", required=True)
+    decision_review_import_parser = decision_subparsers.add_parser(
+        "import-review",
+        help="Import a review decision artifact into the ledger",
+    )
+    decision_review_import_parser.add_argument("workflow")
+    decision_review_import_parser.add_argument("ledger")
+    decision_review_import_parser.add_argument("decision")
+    decision_review_import_parser.add_argument("--decision-ref", required=True)
+    decision_advisor_import_parser = decision_subparsers.add_parser(
+        "import-advisor-outcome",
+        help="Import an advisor outcome artifact into the ledger",
+    )
+    decision_advisor_import_parser.add_argument("workflow")
+    decision_advisor_import_parser.add_argument("ledger")
+    decision_advisor_import_parser.add_argument("outcome")
+    decision_advisor_import_parser.add_argument("--outcome-ref", required=True)
+    decision_routing_validate_parser = decision_subparsers.add_parser(
+        "validate-routing",
+        help="Validate a routing decision artifact against a mission and optional workflow",
+    )
+    decision_routing_validate_parser.add_argument("mission")
+    decision_routing_validate_parser.add_argument("decision")
+    decision_routing_validate_parser.add_argument("--workflow")
+    decision_dispatch_compile_parser = decision_subparsers.add_parser(
+        "compile-dispatch",
+        help="Compile a dispatch packet from mission, workflow, routing decision, and assignment",
+    )
+    decision_dispatch_compile_parser.add_argument("mission")
+    decision_dispatch_compile_parser.add_argument("workflow")
+    decision_dispatch_compile_parser.add_argument("routing_decision")
+    decision_dispatch_compile_parser.add_argument("assignment")
+    decision_dispatch_compile_parser.add_argument("--packet-id", required=True)
+    decision_dispatch_compile_parser.add_argument("--dispatch-packet")
 
     agent_parser = subparsers.add_parser("agent", help="Agent runtime operations")
     agent_subparsers = agent_parser.add_subparsers(dest="agent_command", required=True)
@@ -372,6 +424,75 @@ def main(argv: list[str] | None = None) -> int:
                 result_id=args.result_id,
             )
             print(yaml.safe_dump(result.to_dict(), sort_keys=False))
+            return 0
+
+        if args.command == "decision" and args.decision_command == "import-review":
+            workflow = load_workflow(Path(args.workflow))
+            ledger_path = Path(args.ledger)
+            ledger = load_ledger(ledger_path)
+            decision = load_review_decision(
+                _load_yaml_mapping(Path(args.decision), "Review decision")
+            )
+            updated = apply_review_decision(
+                ledger,
+                decision,
+                workflow=workflow,
+                decision_ref=args.decision_ref,
+            )
+            write_ledger(ledger_path, updated)
+            print(yaml.safe_dump(updated.event_log[-1], sort_keys=False))
+            return 0
+
+        if args.command == "decision" and args.decision_command == "import-advisor-outcome":
+            workflow = load_workflow(Path(args.workflow))
+            ledger_path = Path(args.ledger)
+            ledger = load_ledger(ledger_path)
+            outcome = load_advisor_outcome(
+                _load_yaml_mapping(Path(args.outcome), "Advisor outcome")
+            )
+            updated = apply_advisor_outcome(
+                ledger,
+                outcome,
+                workflow=workflow,
+                outcome_ref=args.outcome_ref,
+            )
+            write_ledger(ledger_path, updated)
+            print(yaml.safe_dump(updated.event_log[-1], sort_keys=False))
+            return 0
+
+        if args.command == "decision" and args.decision_command == "validate-routing":
+            mission = load_mission(Path(args.mission))
+            decision = load_routing_decision(
+                _load_yaml_mapping(Path(args.decision), "Routing decision")
+            )
+            workflow = load_workflow(Path(args.workflow)) if args.workflow else None
+            validate_routing_decision(mission, decision, workflow=workflow)
+            print(yaml.safe_dump(decision.to_dict(), sort_keys=False))
+            return 0
+
+        if args.command == "decision" and args.decision_command == "compile-dispatch":
+            mission = load_mission(Path(args.mission))
+            workflow = load_workflow(Path(args.workflow))
+            routing_decision = load_routing_decision(
+                _load_yaml_mapping(Path(args.routing_decision), "Routing decision")
+            )
+            assignment = load_assignment(
+                _load_yaml_mapping(Path(args.assignment), "Assignment")
+            )
+            packet = compile_dispatch_packet(
+                mission,
+                workflow,
+                routing_decision,
+                assignment,
+                packet_id=args.packet_id,
+            )
+            if args.dispatch_packet:
+                packet_path = Path(args.dispatch_packet)
+                with packet_path.open("w", encoding="utf-8") as handle:
+                    yaml.safe_dump(packet.to_dict(), handle, sort_keys=False)
+                loaded_packet = load_dispatch_packet(packet.to_dict())
+                validate_dispatch_packet(mission, workflow, loaded_packet)
+            print(yaml.safe_dump(packet.to_dict(), sort_keys=False))
             return 0
 
         if args.command == "agent" and args.agent_command == "list":
@@ -696,7 +817,11 @@ def build_demo_golden_path(workspace: Path) -> dict:
     }
 
 
-def prepare_demo_workspace(workspace: Path) -> dict[str, Path]:
+def prepare_demo_workspace(
+    workspace: Path,
+    *,
+    include_fixture_results: bool = True,
+) -> dict[str, Path]:
     source_root = _repo_root() / "examples" / "missions" / "demo"
     if not source_root.exists():
         raise ProtocolError(f"Demo mission fixture root does not exist: {source_root}")
@@ -705,15 +830,27 @@ def prepare_demo_workspace(workspace: Path) -> dict[str, Path]:
     workflows_dir = workspace / "workflows"
     results_dir = workspace / "results"
     artifacts_dir = workspace / "artifacts"
+    src_dir = workspace / "src"
     assignments_dir = workspace / "generated" / "assignments"
     sessions_dir = workspace / "generated" / "sessions"
     packaged_results_dir = workspace / "generated" / "results"
+    capsules_dir = workspace / "generated" / "capsules"
+    outcomes_dir = workspace / "generated" / "outcomes"
+    reviews_dir = workspace / "generated" / "reviews"
+    decisions_dir = workspace / "generated" / "decisions"
+    telemetry_dir = workspace / "generated" / "telemetry"
     workflows_dir.mkdir(parents=True, exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
+    src_dir.mkdir(parents=True, exist_ok=True)
     assignments_dir.mkdir(parents=True, exist_ok=True)
     sessions_dir.mkdir(parents=True, exist_ok=True)
     packaged_results_dir.mkdir(parents=True, exist_ok=True)
+    capsules_dir.mkdir(parents=True, exist_ok=True)
+    outcomes_dir.mkdir(parents=True, exist_ok=True)
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    decisions_dir.mkdir(parents=True, exist_ok=True)
+    telemetry_dir.mkdir(parents=True, exist_ok=True)
 
     mission_path = workspace / "mission.yaml"
     workflow_path = workflows_dir / "coder_reviewer_committer.yaml"
@@ -721,6 +858,12 @@ def prepare_demo_workspace(workspace: Path) -> dict[str, Path]:
     shutil.copy2(source_root / "mission.yaml", mission_path)
     shutil.copy2(source_root / "workflows" / "coder_reviewer_committer.yaml", workflow_path)
     shutil.copy2(source_root / "ledger.yaml", ledger_path)
+    _write_demo_artifact(workspace / ".gitignore", ".bureauless/\ngenerated/\n")
+    _write_demo_artifact(src_dir / "demo.py", "print('old')\n")
+    _write_demo_artifact(
+        workspace / "README.md",
+        "# BureauLess Demo Workspace\n\nImplement updates `src/demo.py` from old to new.\n",
+    )
 
     _write_demo_artifact(
         artifacts_dir / "implement_patch.diff",
@@ -735,51 +878,53 @@ def prepare_demo_workspace(workspace: Path) -> dict[str, Path]:
         "# Commit Note\n\nCommit created after review approval.\n",
     )
 
-    _write_demo_result(
-        results_dir / "implement_result.yaml",
-        result_id="result-implement",
-        assignment_id="assign-implement",
-        emitted_events=["patch_ready"],
-        changed_files_count=1,
-        artifacts=[
-            _demo_artifact_payload(
-                artifacts_dir / "implement_patch.diff",
-                artifact_id="artifact-implement-patch",
-                created_by="coder",
-                source_event="event-result-implement",
-            )
-        ],
-    )
-    _write_demo_result(
-        results_dir / "review_result.yaml",
-        result_id="result-review",
-        assignment_id="assign-review",
-        emitted_events=["review_approved"],
-        changed_files_count=0,
-        artifacts=[
-            _demo_artifact_payload(
-                artifacts_dir / "review_report.md",
-                artifact_id="artifact-review-report",
-                created_by="reviewer",
-                source_event="event-result-review",
-            )
-        ],
-    )
-    _write_demo_result(
-        results_dir / "commit_result.yaml",
-        result_id="result-commit",
-        assignment_id="assign-commit",
-        emitted_events=["commit_created"],
-        changed_files_count=1,
-        artifacts=[
-            _demo_artifact_payload(
-                artifacts_dir / "commit_note.md",
-                artifact_id="artifact-commit-note",
-                created_by="committer",
-                source_event="event-result-commit",
-            )
-        ],
-    )
+    if include_fixture_results:
+        _write_demo_result(
+            results_dir / "implement_result.yaml",
+            result_id="result-implement",
+            assignment_id="assign-implement",
+            emitted_events=["patch_ready"],
+            changed_files_count=1,
+            artifacts=[
+                _demo_artifact_payload(
+                    artifacts_dir / "implement_patch.diff",
+                    artifact_id="artifact-implement-patch",
+                    created_by="coder",
+                    source_event="event-result-implement",
+                )
+            ],
+        )
+        _write_demo_result(
+            results_dir / "review_result.yaml",
+            result_id="result-review",
+            assignment_id="assign-review",
+            emitted_events=["review_approved"],
+            changed_files_count=0,
+            artifacts=[
+                _demo_artifact_payload(
+                    artifacts_dir / "review_report.md",
+                    artifact_id="artifact-review-report",
+                    created_by="reviewer",
+                    source_event="event-result-review",
+                )
+            ],
+        )
+        _write_demo_result(
+            results_dir / "commit_result.yaml",
+            result_id="result-commit",
+            assignment_id="assign-commit",
+            emitted_events=["commit_created"],
+            changed_files_count=1,
+            artifacts=[
+                _demo_artifact_payload(
+                    artifacts_dir / "commit_note.md",
+                    artifact_id="artifact-commit-note",
+                    created_by="committer",
+                    source_event="event-result-commit",
+                )
+            ],
+        )
+    _initialize_demo_git_repo(workspace)
 
     return {
         "mission": mission_path,
@@ -790,7 +935,72 @@ def prepare_demo_workspace(workspace: Path) -> dict[str, Path]:
         "assignments_dir": assignments_dir,
         "sessions_dir": sessions_dir,
         "packaged_results_dir": packaged_results_dir,
+        "capsules_dir": capsules_dir,
+        "outcomes_dir": outcomes_dir,
+        "reviews_dir": reviews_dir,
+        "decisions_dir": decisions_dir,
+        "telemetry_dir": telemetry_dir,
     }
+
+
+def _initialize_demo_git_repo(workspace: Path) -> None:
+    git_dir = workspace / ".git"
+    if git_dir.exists():
+        shutil.rmtree(git_dir)
+    subprocess.run(
+        ["git", "init"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "BureauLess Demo"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "demo@bureauless.local"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "add", "."],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "Initialize demo workspace"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _promote_demo_workspace_snapshot(session_workspace: Path, workspace: Path) -> None:
+    excluded = {".bureauless", "generated", "ledger.yaml"}
+    for child in workspace.iterdir():
+        if child.name in excluded:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    for child in session_workspace.iterdir():
+        if child.name in excluded:
+            continue
+        destination = workspace / child.name
+        if child.is_dir():
+            shutil.copytree(child, destination)
+        else:
+            shutil.copy2(child, destination)
 
 
 def run_live_demo(
@@ -805,16 +1015,31 @@ def run_live_demo(
     timeout_seconds: float = 120.0,
     command_runner: CommandRunner | None = None,
 ) -> dict[str, Any]:
-    paths = prepare_demo_workspace(workspace)
+    paths = prepare_demo_workspace(workspace, include_fixture_results=False)
     workflow_path = paths["workflow"]
     ledger_path = paths["ledger"]
     assignments_dir = paths["assignments_dir"]
     sessions_dir = paths["sessions_dir"]
     results_dir = paths["packaged_results_dir"]
+    capsules_dir = paths["capsules_dir"]
+    outcomes_dir = paths["outcomes_dir"]
+    reviews_dir = paths["reviews_dir"]
+    decisions_dir = paths["decisions_dir"]
+    telemetry_dir = paths["telemetry_dir"]
     artifact_root = workspace
+    workflow = load_workflow(workflow_path)
+
+    routing_decision = _build_demo_routing_decision(workflow)
+    routing_decision_path = decisions_dir / "routing_decision.yaml"
+    _write_yaml(routing_decision_path, routing_decision)
+
+    advisor_gate_decision = _build_demo_advisor_gate_decision(workflow)
+    advisor_gate_decision_path = decisions_dir / "advisor_gate_decision.yaml"
+    _write_yaml(advisor_gate_decision_path, advisor_gate_decision)
 
     node_ids = ["implement", "review", "commit"]
     steps: list[dict[str, Any]] = []
+    failure: dict[str, Any] | None = None
     for node_id in node_ids:
         workflow = load_workflow(workflow_path)
         ledger = load_ledger(ledger_path)
@@ -831,6 +1056,9 @@ def run_live_demo(
         assignment_path = assignments_dir / f"{node_id}_assignment.yaml"
         with assignment_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(assignment.to_dict(), handle, sort_keys=False)
+        capsule_payload = assignment.visible_context.get("context_capsule", {})
+        capsule_path = capsules_dir / f"{node_id}_context_capsule.yaml"
+        _write_yaml(capsule_path, capsule_payload)
 
         created_event = build_assignment_created_event(
             workflow,
@@ -848,6 +1076,7 @@ def run_live_demo(
             timeout_seconds=timeout_seconds,
             isolation_mode="copy",
             cleanup_policy="retain_session_root",
+            sandbox_mode="danger-full-access" if node_id == "commit" else "workspace-write",
             target_model=target_model,
             target_provider=target_provider,
             provider_base_url=provider_base_url,
@@ -857,8 +1086,46 @@ def run_live_demo(
         )
         record = run_session(spec, assignment, command_runner=command_runner)
         session_path = sessions_dir / f"{node_id}_session.yaml"
-        with session_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(record.to_dict(), handle, sort_keys=False)
+        telemetry_record = _attach_demo_context_telemetry(
+            record.to_dict(),
+            assignment=assignment,
+            node_id=node_id,
+        )
+        _write_yaml(session_path, telemetry_record)
+
+        if record.status != "completed":
+            ledger = load_ledger(ledger_path)
+            terminal_event = build_session_terminal_event(
+                workflow,
+                assignment,
+                record,
+                event_id=f"event-{record.session_id}-{record.status}",
+            )
+            if terminal_event is not None:
+                ledger = append_ledger_event(ledger, terminal_event, workflow)
+                write_ledger(ledger_path, ledger)
+            steps.append(
+                {
+                    "node_id": node_id,
+                    "assignment_path": str(assignment_path),
+                    "context_capsule_path": str(capsule_path),
+                    "session_path": str(session_path),
+                    "record_status": record.status,
+                    "failure_reason": record.exit.get("reason"),
+                    "ready_after": [],
+                    "node_state_after": "blocked",
+                }
+            )
+            failure = {
+                "node_id": node_id,
+                "session_id": record.session_id,
+                "status": record.status,
+                "reason": record.exit.get("reason"),
+                "session_path": str(session_path),
+            }
+            break
+
+        _promote_demo_workspace_snapshot(Path(record.workspace["path"]), workspace)
 
         packaged = package_session_result(
             record,
@@ -867,8 +1134,15 @@ def run_live_demo(
             result_id=result_id,
         )
         result_path = results_dir / f"{node_id}_result.yaml"
-        with result_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(packaged.to_dict(), handle, sort_keys=False)
+        _write_yaml(result_path, packaged.to_dict())
+
+        outcome = node_outcome_from_session(
+            assignment,
+            record.to_dict(),
+            outcome_id=f"outcome-{session_id}",
+        )
+        outcome_path = outcomes_dir / f"{node_id}_node_outcome.yaml"
+        _write_yaml(outcome_path, outcome.to_dict())
 
         ledger = import_session_record(
             workflow,
@@ -880,6 +1154,22 @@ def run_live_demo(
             outcome_id=f"outcome-{session_id}",
             decision_event_id=f"event-outcome-{session_id}-decision",
         )
+        review_decision_payload = _build_demo_review_decision(
+            workflow=workflow,
+            assignment=assignment,
+            packaged_result=packaged.to_dict(),
+            node_id=node_id,
+            result_id=result_id,
+        )
+        review_decision_path = reviews_dir / f"{node_id}_review_decision.yaml"
+        _write_yaml(review_decision_path, review_decision_payload)
+        ledger = apply_review_decision(
+            ledger,
+            load_review_decision(review_decision_payload),
+            workflow=workflow,
+            event_id=f"event-review-{node_id}-live",
+            decision_ref=str(review_decision_path),
+        )
         write_ledger(ledger_path, ledger)
 
         replay = replay_workflow(workflow, ledger)
@@ -888,12 +1178,17 @@ def run_live_demo(
             {
                 "node_id": node_id,
                 "assignment_path": str(assignment_path),
+                "context_capsule_path": str(capsule_path),
                 "session_path": str(session_path),
                 "result_path": str(result_path),
+                "node_outcome_path": str(outcome_path),
+                "review_decision_path": str(review_decision_path),
                 "record_status": record.status,
                 "emitted_events": (
                     packaged.emitted_events if record.status == "completed" else []
                 ),
+                "outcome_event_id": f"event-outcome-{session_id}-decision",
+                "review_event_id": f"event-review-{node_id}-live",
                 "ready_after": gatekeeper.ready,
                 "node_state_after": replay.nodes[node_id].state,
             }
@@ -903,7 +1198,15 @@ def run_live_demo(
     ledger = load_ledger(ledger_path)
     replay = replay_workflow(workflow, ledger)
     gatekeeper = evaluate_gatekeeper(workflow, ledger)
-    return {
+    metrics_summary = summarize_metrics(sessions_dir)
+    metrics_summary_path = telemetry_dir / "metrics_summary.yaml"
+    _write_yaml(metrics_summary_path, metrics_summary)
+    advisor_gate_outcome = _build_demo_advisor_gate_outcome(metrics_summary)
+    advisor_gate_outcome_path = telemetry_dir / "advisor_gate_outcome.yaml"
+    _write_yaml(advisor_gate_outcome_path, advisor_gate_outcome)
+    query = f"workflow_path={workflow_path}&ledger_path={ledger_path}"
+    manifest_path = telemetry_dir / "m3_integrated_demo_manifest.yaml"
+    manifest = {
         "milestone": "runtime-milestone-3",
         "flow_id": "demo-live-session-path",
         "workspace": str(workspace.resolve()),
@@ -913,7 +1216,13 @@ def run_live_demo(
         "agent": agent_id,
         "target_model": target_model,
         "target_provider": target_provider,
+        "routing_decision_path": str(routing_decision_path),
+        "advisor_gate_decision_path": str(advisor_gate_decision_path),
+        "advisor_gate_outcome_path": str(advisor_gate_outcome_path),
+        "metrics_summary_path": str(metrics_summary_path),
+        "workbench_url": f"http://127.0.0.1:5173/?{query}",
         "steps": steps,
+        "failure": failure,
         "terminal_complete": replay.terminal_complete,
         "ready": gatekeeper.ready,
         "node_states": {
@@ -921,6 +1230,184 @@ def run_live_demo(
             for node_id, node_state in replay.nodes.items()
         },
     }
+    _write_yaml(manifest_path, manifest)
+    manifest["manifest_path"] = str(manifest_path)
+    return manifest
+
+
+def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, sort_keys=False)
+
+
+def _build_demo_routing_decision(workflow: Any) -> dict[str, Any]:
+    return {
+        "decision_type": "routing_decision",
+        "mission_id": workflow.mission_id,
+        "workflow_id": workflow.workflow_id,
+        "selected_mode": workflow.mode,
+        "selection_policy_version": "0.1",
+        "triggered_rules": [
+            "explicit_review_step_required",
+            "explicit_commit_step_required",
+        ],
+        "rejected_modes": [
+            {
+                "mode": "single_agent",
+                "rejected_because": (
+                    "The demo keeps implementation, review, and commit as separate "
+                    "bounded steps so replay and gate decisions remain inspectable."
+                ),
+            },
+            {
+                "mode": "single_agent_with_review",
+                "rejected_because": (
+                    "The commit action remains a distinct downstream node with its own "
+                    "event boundary and outcome record."
+                ),
+            },
+        ],
+        "estimated_coordination_ratio": 0.18,
+        "budget_confidence": "high",
+    }
+
+
+def _build_demo_advisor_gate_decision(workflow: Any) -> dict[str, Any]:
+    return {
+        "mission_id": workflow.mission_id,
+        "workflow_id": workflow.workflow_id,
+        "advisor_gate_decision": {
+            "invoked": False,
+            "policy_version": "0.1",
+            "reason": [
+                "parallel_width < 3",
+                "review_or_human_gate_count == 1",
+                "estimated_total_tokens < 80000",
+                "estimated_context_fanout_tokens < advisor_expected_tokens * 2",
+            ],
+            "decision_basis": "first_run_heuristic",
+        },
+    }
+
+
+def _attach_demo_context_telemetry(
+    record_payload: dict[str, Any],
+    *,
+    assignment: Any,
+    node_id: str,
+) -> dict[str, Any]:
+    capsule = assignment.visible_context.get("context_capsule", {})
+    accepted_facts = capsule.get("accepted_facts", []) if isinstance(capsule, dict) else []
+    artifact_refs = assignment.artifact_refs
+    record_payload["role"] = assignment.role
+    record_payload["task_type"] = node_id
+    record_payload["risk_level"] = _demo_risk_level(node_id)
+    record_payload["context_delivery"] = {
+        "policy_version": capsule.get("policy_version", "context-v1")
+        if isinstance(capsule, dict)
+        else "context-v1",
+        "capsule_tokens": max(
+            1,
+            len(yaml.safe_dump(capsule if isinstance(capsule, dict) else {}, sort_keys=True)) // 4,
+        ),
+        "included_fact_ids": [
+            finding.get("finding_id")
+            for finding in accepted_facts
+            if isinstance(finding, dict) and isinstance(finding.get("finding_id"), str)
+        ],
+        "included_artifact_refs": [
+            artifact.get("artifact_id") or artifact.get("ref") or artifact.get("path")
+            for artifact in artifact_refs
+            if isinstance(artifact, dict)
+            and isinstance(
+                artifact.get("artifact_id") or artifact.get("ref") or artifact.get("path"),
+                str,
+            )
+        ],
+        "disclosure_level": 1,
+    }
+    record_payload["context_requests"] = []
+    record_payload["outcome"] = {
+        "first_pass_success": True,
+        "rework_required": False,
+    }
+    return record_payload
+
+
+def _build_demo_review_decision(
+    *,
+    workflow: Any,
+    assignment: Any,
+    packaged_result: dict[str, Any],
+    node_id: str,
+    result_id: str,
+) -> dict[str, Any]:
+    verification = packaged_result.get("verification", {})
+    verification_status = (
+        verification.get("status")
+        if isinstance(verification, dict) and isinstance(verification.get("status"), str)
+        else "unknown"
+    )
+    emitted_events = packaged_result.get("emitted_events", [])
+    event_summary = ", ".join(
+        event for event in emitted_events if isinstance(event, str)
+    ) or "no workflow events"
+    evidence_refs = []
+    for artifact in packaged_result.get("artifacts", []):
+        if isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str):
+            evidence_refs.append(artifact["artifact_id"])
+    return {
+        "decision_type": "review_decision",
+        "decision_id": f"review-{node_id}-live",
+        "mission_id": workflow.mission_id,
+        "workflow_id": workflow.workflow_id,
+        "reviewed_event": f"event-{result_id}",
+        "actor": "orchestrator" if node_id != "commit" else "human",
+        "verdict": "approved",
+        "reason": (
+            f"{node_id} completed with verification status {verification_status} "
+            f"and satisfied {event_summary}."
+        ),
+        "evidence_refs": evidence_refs,
+        "accepted_findings": [
+            {
+                "finding_id": f"finding-{node_id}-live",
+                "content": (
+                    f"Node {assignment.node_id} completed through {assignment.role} and "
+                    f"produced {event_summary} with verification {verification_status}."
+                ),
+            }
+        ],
+        "rejected_findings": [],
+        "next_action": "continue" if node_id != "commit" else "stop",
+    }
+
+
+def _build_demo_advisor_gate_outcome(metrics_summary: dict[str, Any]) -> dict[str, Any]:
+    observed_budget = metrics_summary.get("observed_budget", {})
+    total_tokens = (
+        observed_budget.get("total_tokens_used")
+        if isinstance(observed_budget.get("total_tokens_used"), int)
+        else 0
+    )
+    return {
+        "advisor_gate_outcome": {
+            "actual_advisor_tokens": 0,
+            "actual_total_tokens": total_tokens,
+            "rework_count": 0,
+            "broadcast_tokens": 0,
+            "duplicate_context_observed": False,
+            "classification": "good_skip",
+        }
+    }
+
+
+def _demo_risk_level(node_id: str) -> str:
+    if node_id == "commit":
+        return "high"
+    if node_id == "review":
+        return "medium"
+    return "low"
 
 
 def prepare_mutation_demo_workspace(workspace: Path) -> dict[str, Path]:

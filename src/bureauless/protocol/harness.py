@@ -92,7 +92,7 @@ class Ledger:
         for finding in self.public_findings:
             missing = [
                 field
-                for field in ("source_event", "source_agent", "accepted_by")
+                for field in ("source_event", "source_agent", "accepted_by", "review_decision_id")
                 if not finding.get(field)
             ]
             if missing:

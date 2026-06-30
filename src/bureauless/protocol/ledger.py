@@ -30,6 +30,8 @@ LIFECYCLE_EVENT_TYPES = {
     "workflow_mutation_proposed",
     "workflow_mutation_accepted",
     "workflow_mutation_rejected",
+    "review_decision_recorded",
+    "advisor_outcome_recorded",
 }
 
 MUTATION_DECISION_EVENT_TYPES = {
@@ -44,7 +46,7 @@ def append_ledger_event(
     workflow: Workflow | None = None,
 ) -> Ledger:
     validate_ledger_event(ledger, event, workflow)
-    return replace(ledger, event_log=[*ledger.event_log, event])
+    return rebuild_ledger_projection(replace(ledger, event_log=[*ledger.event_log, event]))
 
 
 def validate_ledger_event(
@@ -72,6 +74,10 @@ def validate_ledger_event(
         _validate_mutation_supersession_event(ledger, event)
     elif event_type == "node_outcome_decided":
         _validate_node_outcome_decision_event(event)
+    elif event_type == "review_decision_recorded":
+        _validate_review_decision_recorded_event(ledger, event)
+    elif event_type == "advisor_outcome_recorded":
+        _validate_advisor_outcome_recorded_event(event)
 
     mission_id = event.get("mission_id")
     if mission_id is not None and mission_id != ledger.mission_id:
@@ -290,6 +296,114 @@ def _validate_node_outcome_decision_event(event: dict[str, Any]) -> None:
             )
 
 
+def _validate_review_decision_recorded_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+) -> None:
+    _required_string(event, "review_decision_id")
+    reviewed_event = _required_string(event, "reviewed_event")
+    actor = _required_string(event, "actor")
+    if actor not in {"orchestrator", "human"}:
+        raise ProtocolError(
+            "review_decision_recorded actor must be orchestrator or human"
+        )
+    verdict = _required_string(event, "verdict")
+    if verdict not in {"approved", "rejected", "changes_requested"}:
+        raise ProtocolError(
+            "review_decision_recorded verdict must be approved, rejected, or changes_requested"
+        )
+    next_action = _required_string(event, "next_action")
+    if next_action not in {"continue", "retry", "escalate", "stop"}:
+        raise ProtocolError(
+            "review_decision_recorded next_action must be continue, retry, escalate, or stop"
+        )
+    _required_string(event, "decision_ref")
+    if not any(existing.get("event_id") == reviewed_event for existing in ledger.event_log):
+        raise ProtocolError(
+            "review_decision_recorded reviewed_event must reference an existing ledger event"
+        )
+    accepted_findings = event.get("accepted_findings", [])
+    rejected_findings = event.get("rejected_findings", [])
+    if not isinstance(accepted_findings, list) or not all(
+        isinstance(item, dict) for item in accepted_findings
+    ):
+        raise ProtocolError(
+            "review_decision_recorded accepted_findings must be a list of objects"
+        )
+    if not isinstance(rejected_findings, list) or not all(
+        isinstance(item, dict) for item in rejected_findings
+    ):
+        raise ProtocolError(
+            "review_decision_recorded rejected_findings must be a list of objects"
+        )
+    for finding in accepted_findings:
+        _required_string(finding, "finding_id")
+        _required_string(finding, "content")
+    for finding in rejected_findings:
+        _required_string(finding, "finding_id")
+        _required_string(finding, "reason")
+
+
+def _validate_advisor_outcome_recorded_event(event: dict[str, Any]) -> None:
+    _required_string(event, "advisor_outcome_id")
+    status = _required_string(event, "status")
+    if status not in {"pending", "scored"}:
+        raise ProtocolError("advisor_outcome_recorded status must be pending or scored")
+    source_decision_type = _required_string(event, "source_decision_type")
+    if source_decision_type not in {"routing_decision", "review_decision"}:
+        raise ProtocolError(
+            "advisor_outcome_recorded source_decision_type must be routing_decision or review_decision"
+        )
+    _required_string(event, "source_decision_ref")
+    _required_string(event, "advisor_decision_ref")
+    _required_string(event, "outcome_ref")
+    classification = _string_or_none(event.get("classification"))
+    pending_reason = _string_or_none(event.get("pending_reason"))
+    if status == "pending":
+        if pending_reason is None:
+            raise ProtocolError(
+                "advisor_outcome_recorded pending status requires pending_reason"
+            )
+        if classification is not None:
+            raise ProtocolError(
+                "advisor_outcome_recorded pending status must not include classification"
+            )
+    else:
+        if classification not in {"good_call", "bad_call", "good_skip", "missed_call"}:
+            raise ProtocolError(
+                "advisor_outcome_recorded scored status requires a valid classification"
+            )
+        if pending_reason is not None:
+            raise ProtocolError(
+                "advisor_outcome_recorded scored status must not include pending_reason"
+            )
+    for field in (
+        "actual_advisor_tokens",
+        "actual_total_tokens",
+        "rework_count",
+        "broadcast_tokens",
+    ):
+        value = event.get(field)
+        if value is not None and (not isinstance(value, int) or value < 0):
+            raise ProtocolError(
+                f"advisor_outcome_recorded {field} must be a non-negative integer when present"
+            )
+    duplicate_context_observed = event.get("duplicate_context_observed")
+    if duplicate_context_observed is not None and not isinstance(
+        duplicate_context_observed, bool
+    ):
+        raise ProtocolError(
+            "advisor_outcome_recorded duplicate_context_observed must be boolean when present"
+        )
+    price_snapshot_attribution = event.get("price_snapshot_attribution")
+    if price_snapshot_attribution is not None and not isinstance(
+        price_snapshot_attribution, dict
+    ):
+        raise ProtocolError(
+            "advisor_outcome_recorded price_snapshot_attribution must be an object when present"
+        )
+
+
 def write_ledger(path: Path, ledger: Ledger) -> None:
     ledger = rebuild_ledger_projection(ledger)
     with path.open("w", encoding="utf-8") as handle:
@@ -315,6 +429,7 @@ def ledger_to_dict(ledger: Ledger) -> dict[str, Any]:
 
 def rebuild_ledger_projection(ledger: Ledger) -> Ledger:
     derived_projection = _derive_projection(ledger)
+    public_findings, decisions, risks, open_questions = _derive_projected_state(ledger)
     persisted_cursor = _string_or_none(ledger.projection.get("through_event_id"))
     derived_cursor = _string_or_none(derived_projection.get("through_event_id"))
     has_persisted_projection = bool(ledger.projection)
@@ -333,12 +448,19 @@ def rebuild_ledger_projection(ledger: Ledger) -> Ledger:
         return replace(
             ledger,
             projection=derived_projection,
-            public_findings=[],
-            decisions=[],
-            risks=[],
-            open_questions=[],
+            public_findings=public_findings,
+            decisions=decisions,
+            risks=risks,
+            open_questions=open_questions,
         )
-    return replace(ledger, projection=derived_projection)
+    return replace(
+        ledger,
+        projection=derived_projection,
+        public_findings=public_findings,
+        decisions=decisions,
+        risks=risks,
+        open_questions=open_questions,
+    )
 
 
 def _derive_projection(ledger: Ledger) -> dict[str, Any]:
@@ -351,6 +473,60 @@ def _derive_projection(ledger: Ledger) -> dict[str, Any]:
     if accepted_workspace_ref is not None:
         projection["accepted_workspace_ref"] = accepted_workspace_ref
     return projection
+
+
+def _derive_projected_state(
+    ledger: Ledger,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    public_findings: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+    reviewed_events = {event.get("event_id"): event for event in ledger.event_log}
+    for event in ledger.event_log:
+        if event.get("event_type") != "review_decision_recorded":
+            continue
+        decision_id = _string_or_none(event.get("review_decision_id"))
+        reviewed_event_id = _string_or_none(event.get("reviewed_event"))
+        actor = _string_or_none(event.get("actor"))
+        verdict = _string_or_none(event.get("verdict"))
+        next_action = _string_or_none(event.get("next_action"))
+        if None in {decision_id, reviewed_event_id, actor, verdict, next_action}:
+            continue
+        decisions.append(
+            {
+                "decision_id": decision_id,
+                "decision_type": "review_decision",
+                "reviewed_event": reviewed_event_id,
+                "verdict": verdict,
+                "next_action": next_action,
+                "accepted_by": actor,
+                "source_event": event.get("event_id"),
+            }
+        )
+        reviewed_event = reviewed_events.get(reviewed_event_id, {})
+        source_agent = _string_or_none(reviewed_event.get("agent_id")) or _string_or_none(
+            reviewed_event.get("source_agent")
+        ) or "unknown"
+        accepted_findings = event.get("accepted_findings", [])
+        if not isinstance(accepted_findings, list):
+            continue
+        for finding in accepted_findings:
+            if not isinstance(finding, dict):
+                continue
+            finding_id = _string_or_none(finding.get("finding_id"))
+            content = _string_or_none(finding.get("content"))
+            if finding_id is None or content is None:
+                continue
+            public_findings.append(
+                {
+                    "finding_id": finding_id,
+                    "content": content,
+                    "source_event": reviewed_event_id,
+                    "source_agent": source_agent,
+                    "accepted_by": actor,
+                    "review_decision_id": decision_id,
+                }
+            )
+    return public_findings, decisions, [], []
 
 
 def _accepted_workspace_ref(ledger: Ledger) -> str | None:

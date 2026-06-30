@@ -4,7 +4,7 @@ This is the completed implementation task list for controlled workflow mutation.
 It is tracked by GitHub issue
 [#1 RFC: Controlled Workflow Mutation](https://github.com/Dying-Ember/BureauLess/issues/1)
 and grounded in
-[`../rfcs/workflow_mutation_proposal.md`](../rfcs/workflow_mutation_proposal.md).
+[`../rfcs/001-controlled-workflow-mutation.md`](../rfcs/001-controlled-workflow-mutation.md).
 
 Milestone 2.5 is intentionally narrow. It gives workers a controlled channel to
 propose workflow structure changes after a session discovers that the current
@@ -41,7 +41,7 @@ proposals.
 - Risk: high
 - Labels: runtime, protocol, replay
 - Target docs:
-  - `docs/rfcs/workflow_mutation_proposal.md`
+  - `docs/rfcs/001-controlled-workflow-mutation.md`
   - `docs/protocol/harness_protocol.md`
 - Target code:
   - `src/bureauless/protocol/`

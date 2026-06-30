@@ -1,13 +1,15 @@
-# RFC: Ledger Evidence And Progressive Context
+# RFC-002: Ledger Evidence And Progressive Context
 
 ## Status
 
 **Accepted design; partially implemented in Milestone 3.** The node-outcome
-protocol, outcome-decision event, accepted-state projection cursor, and stale
-outcome guardrails are now implemented. Context-capsule compilation and review
-decision artifacts remain tracked in later M3 tasks. Canonical rules are promoted into
-[`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md) and
-[`docs/architecture/context_economy.md`](../architecture/context_economy.md).
+protocol, outcome-decision event, accepted-state projection cursor, stale
+outcome guardrails, and review-decision artifact path are now implemented.
+Context-capsule compilation remains tracked in later M3 tasks. Canonical rules
+are promoted into [`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md)
+and [`docs/architecture/context_economy.md`](../architecture/context_economy.md).
+The decision record lives in
+[`docs/adrs/002-ledger-evidence-and-progressive-context/001-accepted-design.md`](../adrs/002-ledger-evidence-and-progressive-context/001-accepted-design.md).
 This RFC remains as decision history while implementation is tracked in
 [`docs/tasks/runtime_harness_milestone_3_tasklist.md`](../tasks/runtime_harness_milestone_3_tasklist.md).
 

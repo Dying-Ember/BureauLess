@@ -51,6 +51,7 @@ class SessionSpec:
     dry_run: bool
     isolation_mode: str
     cleanup_policy: str
+    sandbox_mode: str
     shell_command: str | None = None
     target_model: str | None = None
     target_provider: str | None = None
@@ -68,6 +69,7 @@ class SessionSpec:
             "dry_run": self.dry_run,
             "isolation_mode": self.isolation_mode,
             "cleanup_policy": self.cleanup_policy,
+            "sandbox_mode": self.sandbox_mode,
             "shell_command": self.shell_command,
             "target_model": self.target_model,
             "target_provider": self.target_provider,
@@ -121,6 +123,7 @@ def create_session_spec(
     dry_run: bool = False,
     isolation_mode: str = "copy",
     cleanup_policy: str = "retain_session_root",
+    sandbox_mode: str = "workspace-write",
     shell_command: str | None = None,
     target_model: str | None = None,
     target_provider: str | None = None,
@@ -133,6 +136,8 @@ def create_session_spec(
         raise ProtocolError(f"Unsupported session agent: {agent_id}")
     if isolation_mode not in {"copy", "worktree"}:
         raise ProtocolError(f"Unsupported isolation_mode: {isolation_mode}")
+    if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
+        raise ProtocolError(f"Unsupported sandbox_mode: {sandbox_mode}")
     if agent_id == "shell-dummy" and not dry_run and not shell_command:
         raise ProtocolError("shell-dummy session requires --shell-command")
     if agent_id == "codex-cli":
@@ -155,6 +160,7 @@ def create_session_spec(
         dry_run=dry_run,
         isolation_mode=isolation_mode,
         cleanup_policy=cleanup_policy,
+        sandbox_mode=sandbox_mode,
         shell_command=shell_command,
         target_model=target_model,
         target_provider=target_provider,
@@ -385,8 +391,9 @@ def package_session_result(
     packaged_result_id = result_id or base.result_id
     source_event = f"event-{packaged_result_id}"
     package_root, workspace_root = _packaging_roots(record, artifact_root)
-    artifacts = [
-        _normalize_packaged_artifact(
+    artifacts: list[dict[str, Any]] = []
+    for index, artifact in enumerate(base.artifacts or record.artifacts, start=1):
+        normalized = _normalize_packaged_artifact(
             artifact,
             package_root=package_root,
             workspace_root=workspace_root,
@@ -394,8 +401,8 @@ def package_session_result(
             created_by=record.agent_id,
             fallback_id=f"artifact-{packaged_result_id}-{index:03d}",
         )
-        for index, artifact in enumerate(base.artifacts or record.artifacts, start=1)
-    ]
+        if normalized is not None:
+            artifacts.append(normalized)
     native_log_refs = _package_native_log_refs(
         record,
         package_root,
@@ -1176,7 +1183,7 @@ def _build_codex_command(spec: SessionSpec, binding: Any, workdir: Path) -> list
         "--cd",
         str(workdir),
         "--sandbox",
-        "workspace-write",
+        spec.sandbox_mode,
         "--model",
         binding.model,
     ]
@@ -1520,10 +1527,10 @@ def _normalize_packaged_artifact(
     source_event: str,
     created_by: str,
     fallback_id: str,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     artifact_path = _string_or_none(artifact.get("path"))
     if artifact_path is None:
-        raise ProtocolError("Session artifact is missing required field: path")
+        return None
     resolved_path, relative_path = _resolve_artifact_path(
         package_root,
         artifact_path,

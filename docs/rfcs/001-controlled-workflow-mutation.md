@@ -1,10 +1,13 @@
-# RFC: Controlled Workflow Mutation
+# RFC-001: Controlled Workflow Mutation
 
 ## Status
 
 **Implemented in Milestone 2.5.** Canonical behavior now lives in
-[`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md). This RFC
-remains as design history. Full temporal replay remains deferred to M3+.
+[`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md). The
+final decision record lives in
+[`docs/adrs/001-controlled-workflow-mutation/001-accepted-design.md`](../adrs/001-controlled-workflow-mutation/001-accepted-design.md).
+This RFC remains as proposal history. Full temporal replay remains deferred to
+M3+.
 
 Tracking issue:
 [#1 RFC: Controlled Workflow Mutation](https://github.com/Dying-Ember/BureauLess/issues/1)

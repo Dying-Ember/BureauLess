@@ -39,11 +39,30 @@ acceptance criteria.
 Use this path for design proposals and their decision history. Implemented
 behavior is promoted into `protocol/`; the RFC remains as provenance.
 
-- [`rfcs/workflow_mutation_proposal.md`](rfcs/workflow_mutation_proposal.md):
-  implemented Milestone 2.5 design history for controlled workflow mutation.
-- [`rfcs/ledger_evidence_and_context.md`](rfcs/ledger_evidence_and_context.md):
-  accepted design for separating native evidence, node outcomes, canonical
-  ledger facts, progressive context disclosure, and context-policy feedback.
+- [`rfcs/001-controlled-workflow-mutation.md`](rfcs/001-controlled-workflow-mutation.md):
+  RFC-001, implemented Milestone 2.5 design history for controlled workflow
+  mutation.
+- [`rfcs/002-ledger-evidence-and-progressive-context.md`](rfcs/002-ledger-evidence-and-progressive-context.md):
+  RFC-002, accepted design for separating native evidence, node outcomes,
+  canonical ledger facts, progressive context disclosure, and context-policy
+  feedback.
+- [`rfcs/003-engineering-boundary-refactor.md`](rfcs/003-engineering-boundary-refactor.md):
+  RFC-003, draft engineering-boundary refactor for shared errors, CLI split,
+  application services, and narrower protocol exports.
+
+## ADRs
+
+Use this path for decision records that resolve an RFC into a stable archived
+choice.
+
+- [`adrs/README.md`](adrs/README.md): ADR archive rules and RFC/ADR linking
+  model.
+- [`adrs/001-controlled-workflow-mutation/README.md`](adrs/001-controlled-workflow-mutation/README.md):
+  ADR-001 archive for GitHub issue #1 and controlled workflow mutation.
+- [`adrs/002-ledger-evidence-and-progressive-context/README.md`](adrs/002-ledger-evidence-and-progressive-context/README.md):
+  ADR-002 archive for ledger evidence and progressive context.
+- [`adrs/003-engineering-boundary-refactor/README.md`](adrs/003-engineering-boundary-refactor/README.md):
+  ADR-003 archive index for the engineering boundary refactor RFC.
 
 ## Architecture
 

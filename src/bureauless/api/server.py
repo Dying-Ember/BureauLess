@@ -27,12 +27,23 @@ from ..core import (
 )
 from ..protocol import (
     append_ledger_event,
+    compile_context_capsule,
+    compile_dispatch_packet,
     export_assignment,
+    load_advisor_outcome,
+    load_assignment,
+    load_context_request,
+    load_dispatch_packet,
     import_result_proposal,
     load_ledger,
     load_mission,
+    load_node_outcome,
+    load_result_proposal,
+    load_routing_decision,
+    load_turn_report,
     load_workflow,
     materialize_current_workflow,
+    resolve_context_request,
     write_ledger,
 )
 from ..runtime import (
@@ -95,6 +106,23 @@ class MutationDecisionRequest(BaseModel):
     actor: Literal["orchestrator", "human"] = "human"
     reason: str | None = None
     applied_changes: dict[str, Any] | None = None
+
+
+class DispatchCompileRequest(BaseModel):
+    mission_path: str
+    workflow_path: str
+    routing_decision_path: str
+    assignment_path: str
+    packet_id: str
+    review_constraints: dict[str, Any] | None = None
+    turn_report_policy: dict[str, Any] | None = None
+
+
+class ContextResolveRequest(BaseModel):
+    assignment_path: str
+    ledger_path: str
+    context_request_path: str
+    max_artifacts: int = 1
 
 
 def create_app() -> FastAPI:
@@ -217,6 +245,54 @@ def create_app() -> FastAPI:
         workflow = load_workflow(Path(path))
         return workflow_payload(workflow)
 
+    @app.get("/api/routing-decision")
+    def api_routing_decision(path: str) -> dict[str, Any]:
+        return load_routing_decision(_load_yaml(path)).to_dict()
+
+    @app.get("/api/assignment")
+    def api_assignment(path: str) -> dict[str, Any]:
+        return load_assignment(_load_yaml(path)).to_dict()
+
+    @app.get("/api/context-capsule")
+    def api_context_capsule(
+        path: str | None = None,
+        workflow_path: str | None = None,
+        ledger_path: str | None = None,
+        node_id: str | None = None,
+        assignment_id: str | None = None,
+        mission_path: str | None = None,
+    ) -> dict[str, Any]:
+        if path:
+            payload = _load_yaml(path)
+            if not isinstance(payload, dict):
+                raise ProtocolError("Context capsule YAML must be an object")
+            return payload
+        if not workflow_path or not ledger_path or not node_id or not assignment_id:
+            raise ProtocolError(
+                "Context capsule requires either path or workflow_path, ledger_path, node_id, and assignment_id"
+            )
+        mission = load_mission(Path(mission_path)) if mission_path else None
+        return compile_context_capsule(
+            load_workflow(Path(workflow_path)),
+            load_ledger(Path(ledger_path)),
+            node_id,
+            assignment_id=assignment_id,
+            mission=mission,
+        ).to_dict()
+
+    @app.get("/api/context-request")
+    def api_context_request(path: str) -> dict[str, Any]:
+        return load_context_request(_load_yaml(path)).to_dict()
+
+    @app.post("/api/context-request/resolve")
+    def api_context_request_resolve(request: ContextResolveRequest) -> dict[str, Any]:
+        return resolve_context_request(
+            load_assignment(_load_yaml(request.assignment_path)),
+            load_ledger(Path(request.ledger_path)),
+            load_context_request(_load_yaml(request.context_request_path)),
+            max_artifacts=request.max_artifacts,
+        ).to_dict()
+
     @app.get("/api/ledger")
     def api_ledger(path: str = "examples/missions/demo/ledger.yaml") -> dict[str, Any]:
         ledger = load_ledger(Path(path))
@@ -330,6 +406,42 @@ def create_app() -> FastAPI:
     def api_agent_doctor(agent_id: str) -> dict[str, Any]:
         return doctor_agent(agent_id).to_dict()
 
+    @app.get("/api/result")
+    def api_result(path: str) -> dict[str, Any]:
+        return load_result_proposal(_load_yaml(path)).to_dict()
+
+    @app.get("/api/node-outcome")
+    def api_node_outcome(path: str) -> dict[str, Any]:
+        return load_node_outcome(_load_yaml(path)).to_dict()
+
+    @app.get("/api/advisor-outcome")
+    def api_advisor_outcome(path: str) -> dict[str, Any]:
+        return load_advisor_outcome(_load_yaml(path)).to_dict()
+
+    @app.get("/api/turn-report")
+    def api_turn_report(path: str) -> dict[str, Any]:
+        return load_turn_report(_load_yaml(path)).to_dict()
+
+    @app.get("/api/dispatch-packet")
+    def api_dispatch_packet(path: str) -> dict[str, Any]:
+        return load_dispatch_packet(_load_yaml(path)).to_dict()
+
+    @app.post("/api/dispatch-packet/compile")
+    def api_dispatch_packet_compile(request: DispatchCompileRequest) -> dict[str, Any]:
+        mission = load_mission(Path(request.mission_path))
+        workflow = load_workflow(Path(request.workflow_path))
+        routing_decision = load_routing_decision(_load_yaml(request.routing_decision_path))
+        assignment = load_assignment(_load_yaml(request.assignment_path))
+        return compile_dispatch_packet(
+            mission,
+            workflow,
+            routing_decision,
+            assignment,
+            packet_id=request.packet_id,
+            review_constraints=request.review_constraints,
+            turn_report_policy=request.turn_report_policy,
+        ).to_dict()
+
     @app.get("/api/metrics")
     def api_metrics(path: str, price_snapshot: str | None = None) -> dict[str, Any]:
         snapshot_path = Path(price_snapshot) if price_snapshot else None
@@ -419,6 +531,13 @@ def state_payload(dag: Dag, records: list[dict[str, Any]]) -> dict[str, Any]:
         for node_id in dag.nodes
     }
     return {"states": states, "ready": sorted(ready)}
+
+
+def _load_yaml(path: str) -> dict[str, Any]:
+    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ProtocolError("YAML payload must be an object")
+    return payload
 
 
 def workflow_payload(workflow) -> dict[str, Any]:
