@@ -14,6 +14,8 @@ internal implementation grouping inside that milestone.
 - [`workbench_milestone_2_tasklist.md`](workbench_milestone_2_tasklist.md):
   the completed runtime console milestone backed by mission/workflow/ledger/
   replay/gatekeeper state.
+- [`workbench_milestone_3_tasklist.md`](workbench_milestone_3_tasklist.md):
+  the active runtime-source loading and planning-action clarity milestone.
 
 ## Reading Order
 
@@ -22,3 +24,5 @@ internal implementation grouping inside that milestone.
 3. Read Workbench Milestone 1 when changing planning-DAG behavior.
 4. Read Workbench Milestone 2 when changing runtime workflow, replay,
    gatekeeper, mutation inspection, or runtime source controls.
+5. Read Workbench Milestone 3 when changing URL-provided runtime sources,
+   persisted runtime source state, or planning/runtime action copy.

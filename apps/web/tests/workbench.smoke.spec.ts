@@ -526,6 +526,24 @@ async function graphNodeBox(page: Page, title: string) {
   return box!;
 }
 
+async function waitForGraphNodeBox(page: Page, title: string) {
+  let previous = await graphNodeBox(page, title);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await page.waitForTimeout(80);
+    const current = await graphNodeBox(page, title);
+    const distance =
+      Math.abs(current.x - previous.x) +
+      Math.abs(current.y - previous.y) +
+      Math.abs(current.width - previous.width) +
+      Math.abs(current.height - previous.height);
+    if (distance < 1) {
+      return current;
+    }
+    previous = current;
+  }
+  return previous;
+}
+
 async function graphHandleBox(page: Page, nodeId: string, handleClass: 'source' | 'target') {
   const box = await page.locator(`.react-flow__node[data-id="${nodeId}"] .react-flow__handle.${handleClass}`).first().boundingBox();
   expect(box).not.toBeNull();
@@ -587,7 +605,7 @@ test('uses horizontal handles and lets graph nodes be dragged, persisted, and re
   await mockWorkbenchApi(page);
   await page.goto('/');
 
-  const before = await graphNodeBox(page, 'Baseline Inventory');
+  const before = await waitForGraphNodeBox(page, 'Baseline Inventory');
   const targetHandle = await graphHandleBox(page, 'baseline-inventory', 'target');
   const sourceHandle = await graphHandleBox(page, 'baseline-inventory', 'source');
 
@@ -621,7 +639,7 @@ test('uses horizontal handles and lets graph nodes be dragged, persisted, and re
     )
     .toBeNull();
 
-  const reset = await graphNodeBox(page, 'Baseline Inventory');
+  const reset = await waitForGraphNodeBox(page, 'Baseline Inventory');
   expect(Math.abs(reset.x - before.x) + Math.abs(reset.y - before.y)).toBeLessThan(8);
   await expect(page.getByRole('button', { name: 'Reset layout' })).toBeDisabled();
 });
@@ -1243,6 +1261,7 @@ test('stages graph dependency edits with undo, cancel, save, removal, and inline
   });
 
   await page.goto('/');
+  await waitForGraphNodeBox(page, 'Integration Review');
   await expect(page.locator('.react-flow__edge')).toHaveCount(1);
 
   await dragGraphConnection(page, 'integration-review', 'worker-stop-lifecycle');
@@ -1427,7 +1446,7 @@ test('applies custom DAG and runs paths and persists them across refresh', async
 
   await page.getByLabel('DAG path').fill('examples/custom_dag.yaml');
   await page.getByLabel('Runs directory').fill('custom-runs');
-  await page.getByRole('button', { name: 'Apply' }).click();
+  await page.getByRole('button', { name: 'Apply workspace paths' }).click();
 
   await expect(page.getByText('examples/custom_dag.yaml')).toBeVisible();
   await expect(page.getByText('custom-runs')).toBeVisible();
@@ -1591,8 +1610,26 @@ test('shows decision sync status while refreshing runtime state', async ({ page 
 });
 
 test('renders runtime summary panels and persists runtime source paths', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem('bureauless.workbenchViewMode', 'planning');
+    window.localStorage.setItem('bureauless.missionPath', 'stale/mission.yaml');
+    window.localStorage.setItem('bureauless.workflowPath', 'stale/workflow.yaml');
+    window.localStorage.setItem('bureauless.ledgerPath', 'stale/ledger.yaml');
+  });
+  let missionRequestUrl = '';
+  let mutationRequestUrl = '';
+  let ledgerRequestUrl = '';
   await mockWorkbenchApi(page, {
     mutationResponse: { body: mutationFixture },
+    onMissionRequest: (url) => {
+      missionRequestUrl = url;
+    },
+    onMutationRequest: (url) => {
+      mutationRequestUrl = url;
+    },
+    onLedgerRequest: (url) => {
+      ledgerRequestUrl = url;
+    },
   });
 
   await page.goto('/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml');
@@ -1600,8 +1637,21 @@ test('renders runtime summary panels and persists runtime source paths', async (
   const runtimeSources = page.getByRole('region', { name: 'Runtime sources' });
   const missionPanel = page.getByRole('region', { name: 'Mission summary' });
   const ledgerPanel = page.getByRole('region', { name: 'Ledger summary' });
+  const applyRuntimeSources = runtimeSources.getByRole('button', { name: 'Apply runtime sources' });
 
   await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('.bureauless/mutation-demo/mission.yaml');
+  await expect(runtimeSources.getByLabel('Workflow path')).toHaveValue('.bureauless/mutation-demo/workflow.yaml');
+  await expect(runtimeSources.getByLabel('Ledger path')).toHaveValue('.bureauless/mutation-demo/ledger.yaml');
+  await expect(applyRuntimeSources).toBeDisabled();
+  await expect.poll(() => new URL(missionRequestUrl).searchParams.get('path')).toBe(
+    '.bureauless/mutation-demo/mission.yaml',
+  );
+  await expect.poll(() => new URL(mutationRequestUrl).searchParams.get('workflow_path')).toBe(
+    '.bureauless/mutation-demo/workflow.yaml',
+  );
+  await expect.poll(() => new URL(ledgerRequestUrl).searchParams.get('path')).toBe(
+    '.bureauless/mutation-demo/ledger.yaml',
+  );
   await expect(missionPanel.locator('dd').first()).toHaveText('demo');
   await expect(missionPanel.getByText('Keep the runtime workflow healthy.')).toBeVisible();
   await expect(ledgerPanel.getByText('3')).toBeVisible();
@@ -1610,6 +1660,7 @@ test('renders runtime summary panels and persists runtime source paths', async (
   await expect(ledgerPanel.getByText('Artifacts')).toBeVisible();
   await expect(ledgerPanel.getByText('Risks')).toBeVisible();
   await expect(ledgerPanel.getByText('Decisions')).toBeVisible();
+  await expect(runtimeSources.getByRole('status')).toContainText('Runtime sources loaded.');
 
   await runtimeSources.getByLabel('Mission path').fill('examples/missions/custom/mission.yaml');
   await runtimeSources.getByLabel('Workflow path').fill('examples/missions/custom/workflow.yaml');
@@ -1617,7 +1668,7 @@ test('renders runtime summary panels and persists runtime source paths', async (
   await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('examples/missions/custom/mission.yaml');
   await expect(runtimeSources.getByLabel('Workflow path')).toHaveValue('examples/missions/custom/workflow.yaml');
   await expect(runtimeSources.getByLabel('Ledger path')).toHaveValue('examples/missions/custom/ledger.yaml');
-  const applyRuntimeSources = runtimeSources.getByRole('button', { name: 'Apply runtime sources' });
+  await expect(runtimeSources.getByRole('status')).toContainText('Runtime source changes are not applied.');
   await applyRuntimeSources.dispatchEvent('click');
 
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem('bureauless.missionPath'))).toBe(

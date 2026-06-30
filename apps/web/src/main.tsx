@@ -892,6 +892,25 @@ function Workbench() {
     },
     [mutationPathDraft, mutationPaths],
   );
+  const runtimeSourceError =
+    mission.isError ||
+    ledger.isError ||
+    mutations.isError ||
+    replay.isError ||
+    gatekeeper.isError;
+  const runtimeSourceLoading =
+    mission.isFetching ||
+    ledger.isFetching ||
+    mutations.isFetching ||
+    replay.isFetching ||
+    gatekeeper.isFetching;
+  const runtimeSourceStatus = mutationPathDraftChanged
+    ? { kind: 'pending', text: 'Runtime source changes are not applied.' }
+    : runtimeSourceError
+      ? { kind: 'error', text: 'Runtime sources need attention.' }
+      : runtimeSourceLoading
+        ? { kind: 'loading', text: 'Loading runtime sources.' }
+        : { kind: 'loaded', text: 'Runtime sources loaded.' };
 
   const currentGraphDependenciesForTarget = (targetId: string): DependencyDraft => {
     if (graphDependencyDraft?.targetId === targetId) {
@@ -1152,7 +1171,7 @@ function Workbench() {
               </label>
               <div className="metadata-actions">
                 <button type="button" className="metadata-save" onClick={applyPathDraft} disabled={!pathDraftChanged}>
-                  Apply
+                  Apply workspace paths
                 </button>
               </div>
             </div>
@@ -1297,6 +1316,13 @@ function Workbench() {
                   >
                     Apply runtime sources
                   </button>
+                  <span
+                    className={`runtime-source-status ${runtimeSourceStatus.kind}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {runtimeSourceStatus.text}
+                  </span>
                 </div>
               </div>
               <p className="runtime-source-note">
@@ -4962,15 +4988,31 @@ function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
     };
   }
   const search = new URLSearchParams(window.location.search);
+  const searchLedgerPath = search.get('ledger_path')?.trim();
+  const searchWorkflowPath = search.get('workflow_path')?.trim();
+  const searchMissionPath = search.get('mission_path')?.trim();
+  if (hasExplicitRuntimeSourceQuery(search)) {
+    const ledgerPath = searchLedgerPath || DEFAULT_LEDGER_PATH;
+    return {
+      missionPath: searchMissionPath || deriveMissionPath(ledgerPath),
+      workflowPath: searchWorkflowPath || DEFAULT_WORKFLOW_PATH,
+      ledgerPath,
+    };
+  }
+
   const storedMissionPath = window.localStorage.getItem('bureauless.missionPath');
   const storedWorkflowPath = window.localStorage.getItem('bureauless.workflowPath');
   const storedLedgerPath = window.localStorage.getItem('bureauless.ledgerPath');
-  const ledgerPath = search.get('ledger_path')?.trim() || storedLedgerPath?.trim() || DEFAULT_LEDGER_PATH;
+  const ledgerPath = storedLedgerPath?.trim() || DEFAULT_LEDGER_PATH;
   return {
-    missionPath: search.get('mission_path')?.trim() || storedMissionPath?.trim() || deriveMissionPath(ledgerPath),
-    workflowPath: search.get('workflow_path')?.trim() || storedWorkflowPath?.trim() || DEFAULT_WORKFLOW_PATH,
+    missionPath: storedMissionPath?.trim() || deriveMissionPath(ledgerPath),
+    workflowPath: storedWorkflowPath?.trim() || DEFAULT_WORKFLOW_PATH,
     ledgerPath,
   };
+}
+
+function hasExplicitRuntimeSourceQuery(search: URLSearchParams): boolean {
+  return search.has('mission_path') || search.has('workflow_path') || search.has('ledger_path');
 }
 
 function deriveMissionPath(ledgerPath: string): string {
@@ -5004,7 +5046,7 @@ function loadWorkbenchViewMode(): WorkbenchViewMode {
   }
 
   const search = new URLSearchParams(window.location.search);
-  if (search.has('workflow_path') || search.has('ledger_path')) {
+  if (hasExplicitRuntimeSourceQuery(search)) {
     return 'runtime';
   }
 

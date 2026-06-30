@@ -419,7 +419,8 @@ selection, and operator input.
 1. Complete A4 Advisor Policy outcome learning.
 2. Complete A5 Orchestrator Decision Artifacts.
 3. Open Runtime Harness Milestone 3 and land its acceptance spine.
-4. Define the next workbench milestone only after M3 API shapes stabilize.
+4. Workbench Milestone 3 is complete: runtime-source URL loading,
+   planning-action clarity, and the full web smoke suite are green.
 5. Return to post-M2.5 replay evolution only after runtime decisions and UI
    inspection surfaces are stable.
 

@@ -994,6 +994,26 @@ button {
   margin: 0;
 }
 
+.runtime-source-status {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.runtime-source-status.error {
+  color: var(--danger);
+}
+
+.runtime-source-status.loaded {
+  color: var(--accent);
+}
+
+.runtime-source-status.pending {
+  color: var(--review);
+}
+
 .runtime-node-shell {
   height: 100%;
   width: 100%;
