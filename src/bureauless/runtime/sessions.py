@@ -15,7 +15,7 @@ from uuid import uuid4
 import yaml
 
 from ..agents import resolve_agent_binding
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from ..protocol.artifacts import sha256_file
 from ..protocol.assignments import AssignmentPacket
 from ..protocol.assignments import render_assignment_prompt

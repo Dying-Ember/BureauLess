@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from .harness import Ledger, Workflow
 from .mutations import load_workflow_mutation_proposal
 

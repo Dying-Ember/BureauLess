@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from typing import Any, Callable
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from ..runtime_workspace import WorkspaceReadiness, assess_workspace_isolation
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from .harness import Ledger, Workflow
 from .ledger import append_ledger_event
 

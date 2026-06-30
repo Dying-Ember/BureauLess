@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 
 
 VALID_MISSION_MODES = {

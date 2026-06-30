@@ -10,6 +10,8 @@ from uuid import uuid4
 
 import yaml
 
+from .errors import ProtocolError
+
 
 VALID_RISK_LEVELS = {"low", "medium", "high"}
 VALID_REVIEW_GATES = {"auto_pass", "orchestrator_review", "human_review"}
@@ -40,11 +42,6 @@ VALID_REVIEW_STATUSES = {
     "human_approved",
     "rejected",
 }
-
-
-class ProtocolError(ValueError):
-    """Raised when a DAG document or run record is invalid."""
-
 
 @dataclass(frozen=True)
 class TaskNode:

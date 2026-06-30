@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from ..protocol.budget import estimate_cost_from_snapshot, load_price_snapshot
 from .advisors import summarize_advisor_scores
 

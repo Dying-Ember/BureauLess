@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from .assignments import AssignmentPacket, load_assignment
 from .harness import Mission, Workflow
 from .routing import RoutingDecision, load_routing_decision, validate_routing_decision

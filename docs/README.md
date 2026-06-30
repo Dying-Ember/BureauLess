@@ -33,6 +33,11 @@ acceptance criteria.
 - [`tasks/workbench_milestone_2_tasklist.md`](tasks/workbench_milestone_2_tasklist.md):
   completed runtime console milestone for workflow, replay, gatekeeper, and
   mutation inspection.
+- [`tasks/workbench_milestone_3_tasklist.md`](tasks/workbench_milestone_3_tasklist.md):
+  completed runtime-source loading and planning-action clarity milestone.
+- [`tasks/engineering_boundary_refactor_tasklist.md`](tasks/engineering_boundary_refactor_tasklist.md):
+  RFC-003 implementation task list for shared errors, CLI split, application
+  services, and protocol exports.
 
 ## RFCs
 

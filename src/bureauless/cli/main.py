@@ -17,7 +17,6 @@ from ..agents import (
     list_agent_specs,
 )
 from ..core import (
-    ProtocolError,
     create_run_record,
     load_dag,
     load_run_records,
@@ -26,6 +25,7 @@ from ..core import (
     update_review_status,
     write_run_record,
 )
+from ..errors import ProtocolError
 from ..protocol import (
     append_ledger_event,
     apply_advisor_outcome,

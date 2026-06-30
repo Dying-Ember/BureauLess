@@ -5,7 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from .harness import Ledger
 
 

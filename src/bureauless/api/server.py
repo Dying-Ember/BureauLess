@@ -15,7 +15,6 @@ from ..agents import doctor_agent, list_agent_specs
 from ..cli.main import prepare_demo_workspace
 from ..core import (
     Dag,
-    ProtocolError,
     create_node,
     load_dag,
     load_run_records,
@@ -25,6 +24,7 @@ from ..core import (
     update_node_metadata,
     update_review_status,
 )
+from ..errors import ProtocolError
 from ..protocol import (
     append_ledger_event,
     compile_context_capsule,

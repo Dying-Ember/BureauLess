@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from .assignments import AssignmentPacket
 from .harness import Ledger
 

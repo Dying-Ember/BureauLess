@@ -8,6 +8,13 @@ Draft. Decision records, if accepted, should be archived under
 Tracking issue:
 [#2 RFC: Engineering Boundary Refactor](https://github.com/Dying-Ember/BureauLess/issues/2)
 
+Implementation tracking:
+[`docs/tasks/engineering_boundary_refactor_tasklist.md`](../tasks/engineering_boundary_refactor_tasklist.md)
+
+Decision records:
+- [`2026-06-30-shared-errors.md`](../adrs/003-engineering-boundary-refactor/2026-06-30-shared-errors.md):
+  accepted shared error boundary for `ProtocolError`.
+
 ## Scope
 
 CLI, protocol boundary, application service layer, shared errors.

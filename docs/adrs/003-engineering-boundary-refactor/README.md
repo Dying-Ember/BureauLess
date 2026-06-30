@@ -12,7 +12,7 @@ boundary refactor RFC.
 
 ## Planned Decision Records
 
-- `2026-06-30-shared-errors.md`: extract `ProtocolError` into `src/bureauless/errors.py`.
+- `2026-06-30-shared-errors.md`: accepted; extract `ProtocolError` into `src/bureauless/errors.py`.
 - `2026-06-30-cli-split.md`: split CLI command ownership into command modules.
 - `2026-06-30-application-services.md`: introduce shared application services for CLI/API flows.
 - `2026-06-30-protocol-exports.md`: narrow `bureauless.protocol` public exports.

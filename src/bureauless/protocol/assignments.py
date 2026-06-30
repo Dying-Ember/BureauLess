@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import yaml
 
-from ..core import ProtocolError
+from ..errors import ProtocolError
 from ..runtime.gatekeeper import evaluate_gatekeeper
 from .harness import Ledger, Mission, Workflow
 from .ledger import rebuild_ledger_projection
