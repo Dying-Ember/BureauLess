@@ -109,9 +109,9 @@ Goal: make `cli/main.py` small and mostly declarative.
   - Defined initial command module groups while preserving the public
     `bureauless` CLI entrypoint.
 
-### [ ] EBR-04: Split Initial CLI Command Modules
+### [x] EBR-04: Split Initial CLI Command Modules
 
-- Status: planned
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: high
@@ -128,6 +128,18 @@ Goal: make `cli/main.py` small and mostly declarative.
   - CLI tests still pass.
   - `cli/main.py` is materially smaller and no longer owns demo/session
     orchestration details directly.
+- Implementation notes:
+  - Added CLI command modules for legacy DAG commands, runtime commands,
+    assignment/result/decision exchange flows, agent commands, session
+    commands, metrics, and shared YAML loading helpers.
+  - Kept `src/bureauless/cli/main.py` as the public parser entrypoint and
+    top-level error boundary while preserving mission/demo helpers used by API
+    and tests.
+  - Reduced `src/bureauless/cli/main.py` from 1659 lines to 1179 lines in the
+    first split.
+  - Verified with
+    `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_core.py tests/test_harness.py tests/test_server.py -q`
+    (`180 passed`).
 
 ## Workstream 3: Application Services
 

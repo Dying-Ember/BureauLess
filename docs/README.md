@@ -116,7 +116,8 @@ documentation, but not a literal one-to-one directory mirror:
   metrics.
 - `src/bureauless/agents/`: external agent registry and doctor checks.
 - `src/bureauless/api/`: FastAPI workbench API.
-- `src/bureauless/cli/`: CLI entrypoints.
+- `src/bureauless/cli/`: CLI entrypoint plus command modules for legacy DAG,
+  runtime, exchange, agent, session, and metrics operations.
 - `src/bureauless/core.py`: legacy DAG/run-record compatibility layer.
 
 When changing runtime behavior, update both the relevant `docs/protocol/*` file
