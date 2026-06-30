@@ -88,9 +88,9 @@ error types.
 
 Goal: make `cli/main.py` small and mostly declarative.
 
-### [ ] EBR-03: Accept CLI Split ADR
+### [x] EBR-03: Accept CLI Split ADR
 
-- Status: planned
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4-mini
 - Risk: low
@@ -103,6 +103,11 @@ Goal: make `cli/main.py` small and mostly declarative.
 - Acceptance criteria:
   - The ADR identifies command groups that can move out of `cli/main.py`.
   - The ADR names commands that must remain behavior-compatible.
+- Implementation notes:
+  - Accepted
+    [`2026-06-30-cli-split.md`](../adrs/003-engineering-boundary-refactor/2026-06-30-cli-split.md).
+  - Defined initial command module groups while preserving the public
+    `bureauless` CLI entrypoint.
 
 ### [ ] EBR-04: Split Initial CLI Command Modules
 
