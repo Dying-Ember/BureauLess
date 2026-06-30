@@ -146,9 +146,9 @@ Goal: make `cli/main.py` small and mostly declarative.
 Goal: share use cases between CLI and API instead of duplicating orchestration
 logic.
 
-### [ ] EBR-05: Accept Application Services ADR
+### [x] EBR-05: Accept Application Services ADR
 
-- Status: planned
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -161,10 +161,15 @@ logic.
 - Acceptance criteria:
   - The ADR names the initial shared use cases and non-goals.
   - CLI/API ownership remains explicit.
+- Implementation notes:
+  - Accepted
+    [`2026-06-30-application-services.md`](../adrs/003-engineering-boundary-refactor/2026-06-30-application-services.md).
+  - Selected demo workspace preparation as the first application service
+    because API currently imports that behavior from the CLI.
 
-### [ ] EBR-06: Introduce First Application Services
+### [x] EBR-06: Introduce First Application Services
 
-- Status: planned
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4
 - Risk: high
@@ -182,6 +187,18 @@ logic.
 - Acceptance criteria:
   - CLI and API share at least one application service.
   - API response shapes and CLI output behavior remain compatible.
+- Implementation notes:
+  - Added `src/bureauless/application/demo.py` as the first shared
+    application service module.
+  - Moved demo workspace preparation out of the CLI boundary while preserving
+    the existing `bureauless.cli.main.prepare_demo_workspace` import surface.
+  - Updated the API to import demo preparation from the application boundary
+    instead of the CLI boundary.
+  - Verified with
+    `PYTHONPATH=src python -m py_compile src/bureauless/application/demo.py src/bureauless/cli/main.py src/bureauless/api/server.py`.
+  - Verified behavior with
+    `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_core.py tests/test_harness.py tests/test_server.py -q`
+    (`180 passed`).
 
 ## Workstream 4: Protocol Public Exports
 

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import yaml
 
 from ..agents import doctor_agent, list_agent_specs
-from ..cli.main import prepare_demo_workspace
+from ..application.demo import prepare_demo_workspace
 from ..core import (
     Dag,
     create_node,

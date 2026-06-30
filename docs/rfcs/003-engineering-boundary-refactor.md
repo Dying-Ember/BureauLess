@@ -16,6 +16,8 @@ Decision records:
   accepted shared error boundary for `ProtocolError`.
 - [`2026-06-30-cli-split.md`](../adrs/003-engineering-boundary-refactor/2026-06-30-cli-split.md):
   accepted CLI command ownership split.
+- [`2026-06-30-application-services.md`](../adrs/003-engineering-boundary-refactor/2026-06-30-application-services.md):
+  accepted application services boundary.
 
 ## Scope
 
