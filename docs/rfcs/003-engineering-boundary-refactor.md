@@ -5,6 +5,9 @@
 Draft. Decision records, if accepted, should be archived under
 [`docs/adrs/003-engineering-boundary-refactor/`](../adrs/003-engineering-boundary-refactor/).
 
+Tracking issue:
+[#2 RFC: Engineering Boundary Refactor](https://github.com/Dying-Ember/BureauLess/issues/2)
+
 ## Scope
 
 CLI, protocol boundary, application service layer, shared errors.

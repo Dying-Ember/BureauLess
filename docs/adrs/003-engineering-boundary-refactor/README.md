@@ -3,6 +3,7 @@
 ## RFC
 
 - Planned RFC: `docs/rfcs/003-engineering-boundary-refactor.md`
+- Tracking issue: [#2 RFC: Engineering Boundary Refactor](https://github.com/Dying-Ember/BureauLess/issues/2)
 
 ## Purpose
 
