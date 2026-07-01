@@ -1,7 +1,9 @@
 # Workbench Milestone 2 Task List
 
-This is the next active UI/workbench milestone task list for BureauLess. It
-builds on the completed Workbench Milestone 1 viewer/editor surface and turns
+Status: completed.
+
+This is the completed Workbench Milestone 2 task list for BureauLess. It built
+on the completed Workbench Milestone 1 viewer/editor surface and turned
 the workbench into a runtime console for the harness line.
 
 The project-level sequencing lives in

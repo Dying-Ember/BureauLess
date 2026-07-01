@@ -17,7 +17,8 @@ Use this directory for candidate changes that need review before they move into
 - [`002-ledger-evidence-and-progressive-context.md`](002-ledger-evidence-and-progressive-context.md):
   RFC-002, accepted design for minimum-sufficient ledger facts, immutable
   native evidence, node-outcome boundaries, progressive context disclosure,
-  and feedback-driven context policy. Implementation is tracked in Milestone 3.
+  and feedback-driven context policy. The Runtime Milestone 3 scope is
+  implemented.
 - [`003-engineering-boundary-refactor.md`](003-engineering-boundary-refactor.md):
-  RFC-003, draft engineering-boundary refactor for shared errors, CLI split,
-  application services, and narrower protocol exports.
+  RFC-003, implemented engineering-boundary refactor for shared errors, CLI
+  split, application services, and narrower protocol exports.

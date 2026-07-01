@@ -2,8 +2,9 @@
 
 ## Status
 
-Draft. Decision records, if accepted, should be archived under
-[`docs/adrs/003-engineering-boundary-refactor/`](../adrs/003-engineering-boundary-refactor/).
+Implemented. The accepted decision records are archived under
+[`docs/adrs/003-engineering-boundary-refactor/`](../adrs/003-engineering-boundary-refactor/),
+and implementation completion is recorded in the task list below.
 
 Tracking issue:
 [#2 RFC: Engineering Boundary Refactor](https://github.com/Dying-Ember/BureauLess/issues/2)

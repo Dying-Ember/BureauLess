@@ -2,7 +2,7 @@
 
 ## RFC
 
-- Planned RFC: `docs/rfcs/003-engineering-boundary-refactor.md`
+- Implemented RFC: `docs/rfcs/003-engineering-boundary-refactor.md`
 - Tracking issue: [#2 RFC: Engineering Boundary Refactor](https://github.com/Dying-Ember/BureauLess/issues/2)
 
 ## Purpose
@@ -10,7 +10,7 @@
 This directory archives the decision records that resolve the engineering
 boundary refactor RFC.
 
-## Planned Decision Records
+## Accepted Decision Records
 
 - `2026-06-30-shared-errors.md`: accepted; extract `ProtocolError` into `src/bureauless/errors.py`.
 - `2026-06-30-cli-split.md`: accepted; split CLI command ownership into command modules.

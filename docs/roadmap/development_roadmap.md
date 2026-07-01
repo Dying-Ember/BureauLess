@@ -4,6 +4,12 @@ This document is the project-level roadmap. It explains how the runtime/harness
 line and the workbench/UI line fit together, so day-to-day implementation does
 not drift into unrelated details.
 
+The roadmap owns capability sequencing and milestone history. The milestone
+indexes identify completed and planned delivery units. Individual milestone
+task lists own task status, implementation notes, and acceptance evidence. When
+these documents disagree, shipped behavior and the checked task list must be
+used to repair the roadmap and indexes in the same change.
+
 ## Current Position
 
 The project currently has two runtime layers:
@@ -15,25 +21,114 @@ The project currently has two runtime layers:
   checks, isolated sessions, result packaging, outcome metrics, and dispatch
   readiness checks.
 
-Milestones 1, 2, and 2.5 are complete. The current runtime priority is
-finishing advisor outcome learning, routing/dispatch decision artifacts, and
-the integrated M3 acceptance spine now that the node-outcome, bounded-context,
-and context-telemetry boundary is in place. Those tasks form
-Runtime Harness Milestone 3. That milestone now explicitly includes a narrow
-real-agent binding spine: `codex-cli` is the first real worker target for the
-demo path. This is not a full provider platform milestone. Broader agent and
-provider expansion, including deeper `opencode` customization, stays after the
-first `codex-cli` path is stable.
+Milestones 1, 2, 2.5, and 3 are complete for the runtime/harness line. The
+current runtime now includes advisor outcome learning, routing/dispatch
+decision artifacts, bounded deterministic context delivery, context telemetry,
+and the integrated M3 acceptance spine on top of the earlier ledger/replay and
+gatekeeper baseline. Milestone 3 also landed the initial narrow real-agent
+binding spine: `codex-cli` is the first real worker target for the maintained
+demo path. This is still not a full provider platform milestone. Broader agent
+and provider expansion, including deeper `opencode` customization, remains
+post-M3 work.
 
 The project has one UI surface:
 
 - Workbench: a browser/Electron planning-DAG viewer/editor and runtime console
   backed by the Python API.
 
-Workbench Milestones 1 and 2 are complete. The UI now separates planning-DAG
-editing from runtime workflow inspection, and can present mission, ledger,
+Workbench Milestones 1, 2, and 3 are complete. The UI now separates
+planning-DAG editing from runtime workflow inspection, can load explicit
+runtime sources directly from live-demo URLs, and can present mission, ledger,
 gatekeeper, replay, and mutation state without reimplementing runtime rules in
-the frontend.
+the frontend. It does not yet provide complete visual inspection for the
+decision, outcome, context, and dispatch artifacts added in Runtime Harness
+Milestone 3. That gap is the planned Workbench Milestone 4.
+
+## Milestone History
+
+This roadmap tracks both the delivery order and the historical shape of the
+system. The task lists remain the implementation source of truth; this section
+summarizes what has already landed so the current position is easy to read
+without reconstructing it from commits.
+
+### Implemented Runtime Milestones
+
+- Runtime Harness Milestone 1:
+  protocol hardening, append-only ledger/replay, gatekeeper, assignment
+  export, result import, agent registry, session wrapping, metrics, budget
+  snapshots, and baseline runtime API coverage.
+  Source: [`../tasks/runtime_harness_milestone_1_tasklist.md`](../tasks/runtime_harness_milestone_1_tasklist.md)
+- Runtime Harness Milestone 2:
+  reliable real-agent execution loop hardening, isolated sessions,
+  compatibility checks, and end-to-end runtime smoke coverage.
+  Source: [`../tasks/runtime_harness_milestone_2_tasklist.md`](../tasks/runtime_harness_milestone_2_tasklist.md)
+- Runtime Harness Milestone 2.5:
+  controlled workflow mutation, where workers can propose structural changes
+  but only accepted ledger events can change current workflow state.
+  Source: [`../tasks/runtime_harness_milestone_2_5_tasklist.md`](../tasks/runtime_harness_milestone_2_5_tasklist.md)
+- Runtime Harness Milestone 3:
+  advisor outcome learning, orchestrator decision artifacts, node outcomes,
+  bounded deterministic context delivery, context telemetry, and one
+  maintained `codex-cli` demo path.
+  Source: [`../tasks/runtime_harness_milestone_3_tasklist.md`](../tasks/runtime_harness_milestone_3_tasklist.md)
+
+### Implemented Workbench Milestones
+
+- Workbench Milestone 1:
+  planning-DAG review actions, diagnostics, file selection, metadata editing,
+  graph editing, prompt export, and assignment visibility.
+  Source: [`../tasks/workbench_milestone_1_tasklist.md`](../tasks/workbench_milestone_1_tasklist.md)
+- Workbench Milestone 2:
+  runtime console coverage for mission, workflow, ledger, replay, gatekeeper,
+  and mutation inspection.
+  Source: [`../tasks/workbench_milestone_2_tasklist.md`](../tasks/workbench_milestone_2_tasklist.md)
+- Workbench Milestone 3:
+  runtime-source URL loading, persisted source alignment, planning/runtime
+  action clarity, and full workbench smoke coverage.
+  Source: [`../tasks/workbench_milestone_3_tasklist.md`](../tasks/workbench_milestone_3_tasklist.md)
+
+### Implemented Engineering Cleanup
+
+- RFC-003 Engineering Boundary Refactor:
+  shared errors boundary, CLI command ownership split, first application
+  service extraction, and narrower `bureauless.protocol` package exports.
+  Source: [`../tasks/engineering_boundary_refactor_tasklist.md`](../tasks/engineering_boundary_refactor_tasklist.md)
+
+### Capability And Delivery Map
+
+Capability sections describe the long-lived product shape. Milestones describe
+the delivery order. A milestone can advance several capabilities, and a
+capability can span several milestones.
+
+| Delivery milestone | Roadmap capability contribution | State |
+| --- | --- | --- |
+| Runtime Harness M1 | A1 mission/workflow foundation, A2 ledger/replay, A3 gatekeeper, plus the first A4 budget and A5/A5.5 assignment/session boundaries | completed |
+| Runtime Harness M2 | Hardened the A4 dispatch-readiness policy and A5.5 isolated real-agent execution loop | completed |
+| Runtime Harness M2.5 | A6 controlled workflow mutation and current-state replay | completed |
+| Runtime Harness M3 | Extended A1 with node outcomes, completed the current A4 and A5 scope, and proved the initial `codex-cli` A5.5 path | completed |
+| Workbench M1 | B1 through B5 planning-DAG inspection, editing, and dispatch preparation | completed |
+| Workbench M2 | B6 runtime console for mission, workflow, ledger, gatekeeper, replay, and mutation state | completed |
+| Workbench M3 | B7 runtime-source trust and planning/runtime action clarity | completed |
+| Workbench M4 | B8 visual inspection for Runtime Harness M3 artifacts | planned |
+
+## Planned Next Milestones
+
+Workbench Milestone 4 is the next planned delivery. Its task list is
+[`../tasks/workbench_milestone_4_tasklist.md`](../tasks/workbench_milestone_4_tasklist.md).
+It adds read-only inspection for the structured M3 runtime artifacts already
+exposed by the backend: routing and advisor decisions, node outcomes and
+evidence, context capsules and requests, assignments and results, turn reports,
+and dispatch packets.
+
+No post-M3 runtime milestone is active. Before Runtime Milestone 4 is opened,
+the project must choose one coherent target: temporal replay evolution or
+broader real-agent/provider execution. That decision must produce a dedicated
+task list and update this roadmap; neither target should be inferred from old
+`Next` notes in completed capability sections.
+
+No additional engineering-cleanup milestone is planned. Documentation indexes,
+task status, and API boundaries remain part of each delivery milestone's
+acceptance work.
 
 ## North Star
 
@@ -190,9 +285,9 @@ Acceptance:
 
 ### A4: Advisor Policy And Budget Estimator
 
-Status: started. Budget snapshots, pre-dispatch workflow selection, advisor
-outcome events, price-snapshot attribution, and deterministic scoring are
-implemented.
+Status: completed for the Milestone 3 scope. Budget snapshots, pre-dispatch
+workflow selection, advisor outcome events, price-snapshot attribution, and
+deterministic scoring are implemented.
 
 Goal: make advisor usage measurable instead of instinctive.
 
@@ -405,6 +500,14 @@ The workbench should gradually become the visual surface for harness runtime:
 - Replay view: event history and derived state.
 - Mutation view: pending proposals, accept/reject decisions, affected
   assignments, and supersession reasons.
+- Decision view: routing rationale, rejected modes, advisor decisions, and
+  scored advisor outcomes.
+- Outcome view: node results, evidence references, workspace deltas, accepted
+  findings, rejected findings, and review decisions.
+- Context view: initial capsules, policy versions, included facts and risks,
+  scoped requests, and progressively disclosed evidence.
+- Dispatch view: assignment, result, turn-report, and compiled dispatch-packet
+  boundaries.
 
 This means the UI should not become a separate source of business rules. Python
 runtime remains the source of truth.
@@ -414,15 +517,79 @@ gatekeeper, replay, mission, and ledger state. It still treats Python runtime
 responses as authoritative; frontend state is limited to presentation,
 selection, and operator input.
 
+### B7: Runtime Source Trust And Operator Clarity
+
+Status: completed for Workbench Milestone 3.
+
+Source tasks:
+
+- WB3-01 Normalize Runtime Source URL Parameters.
+- WB3-02 Auto-Load Explicit Runtime Sources.
+- WB3-03 Runtime Source Status Feedback.
+- WB3-04 Clarify Planning Apply Availability.
+- WB3-05 Separate Planning And Runtime Action Copy.
+- WB3-06 Smoke Coverage For Live-Demo URL Loading.
+- WB3-07 Document Workbench Milestone 3 Completion.
+
+Goal: make runtime artifacts opened from links behave like trustworthy
+workbench sessions without moving runtime semantics into the frontend.
+
+Implemented scope:
+
+- Treat URL-provided runtime sources as authoritative initial state.
+- Auto-load live-demo runtime artifacts without a manual apply step.
+- Show compact status for loaded, loading, pending, and failed runtime-source
+  states.
+- Keep planning and runtime actions visibly distinct when backend write
+  contracts differ.
+- Preserve the Python runtime as the source of truth while making the runtime
+  console easier to trust and operate.
+
+### B8: Runtime M3 Artifact Inspection
+
+Status: planned for Workbench Milestone 4. Implementation has not started.
+
+Source tasks:
+
+- WB4-01 Runtime Artifact Session Manifest API.
+- WB4-02 M3 Artifact API Client And Source Model.
+- WB4-03 Routing And Advisor Inspector.
+- WB4-04 Node Outcome And Evidence Inspector.
+- WB4-05 Context Delivery Inspector.
+- WB4-06 Budget And Context Telemetry Inspector.
+- WB4-07 Assignment, Result, Turn, And Dispatch Inspector.
+- WB4-08 M3 Demo Inspection Smoke Coverage.
+
+Task list:
+[`../tasks/workbench_milestone_4_tasklist.md`](../tasks/workbench_milestone_4_tasklist.md)
+
+Goal: close the current visual-inspection gap between Runtime Harness M3 and the
+Workbench while keeping all runtime rules and artifact validation in Python.
+
+Acceptance boundary:
+
+- One validated manifest API discovers the related M3 artifacts, and all
+  read-only M3 inspection endpoints have typed frontend clients and visible
+  inspection paths.
+- Operators can follow routing, advisor, outcome, evidence, context,
+  budget/telemetry, assignment, result, turn-report, and dispatch references
+  through the maintained M3 demo.
+- Missing artifacts remain explicit and do not break baseline runtime views.
+- No dispatch action, runtime policy, YAML parsing, or canonical-state mutation
+  moves into the frontend.
+
 ## Current Priority Order
 
-1. Complete A4 Advisor Policy outcome learning.
-2. Complete A5 Orchestrator Decision Artifacts.
-3. Open Runtime Harness Milestone 3 and land its acceptance spine.
-4. Workbench Milestone 3 is complete: runtime-source URL loading,
-   planning-action clarity, and the full web smoke suite are green.
-5. Return to post-M2.5 replay evolution only after runtime decisions and UI
-   inspection surfaces are stable.
+1. Execute Workbench Milestone 4 in its recorded task order, starting with the
+   artifact-session manifest API, typed M3 clients, and the source model.
+2. Validate each inspection surface against the maintained Runtime M3 demo and
+   canonical Python API responses.
+3. Complete WB4 only after the full web build and smoke suite pass and the
+   roadmap, milestone index, and task list record the same status.
+4. Select and scope the next runtime milestone separately; do not mix temporal
+   replay and provider expansion into the Workbench M4 delivery.
+5. Defer policy auto-tuning and broader automatic dispatch until a post-M3
+   runtime milestone explicitly owns them.
 
 ## Decision Rules
 
@@ -435,12 +602,12 @@ selection, and operator input.
 - If a task couples planning-DAG editing with runtime-workflow state, keep the
   runtime model authoritative and let the UI reflect it rather than derive it.
 
-## Non-Goals For The Next Milestone
+## Non-Goals For Workbench Milestone 4
 
 - No internal coding-agent harness.
-- No automatic agent dispatch before doctor checks, gates, and replay.
+- No broader automatic agent dispatch or provider expansion.
 - No automatic subagent spawning.
-- No visual workflow drag editor.
+- No runtime-workflow drag editor; the existing planning-DAG editor remains.
 - No full-ledger broadcast.
 - No worker writes to canonical ledger.
 - No worker applies workflow mutation directly.

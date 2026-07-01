@@ -1,7 +1,9 @@
 # Runtime Harness Milestone 3 Task List
 
-This is the next active runtime/harness milestone task list for BureauLess. It
-builds on the completed M1, M2, and M2.5 milestones and turns the current
+Status: completed.
+
+This is the completed Runtime Harness Milestone 3 task list for BureauLess. It
+built on the completed M1, M2, and M2.5 milestones and turned the current
 runtime from "safe to run" into "safe to evaluate and route".
 
 The project-level sequencing lives in

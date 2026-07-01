@@ -1,8 +1,10 @@
 # Workbench Milestone 3 Task List
 
-This is the next active UI/workbench milestone task list for BureauLess. It
-follows the completed Workbench Milestone 2 runtime console milestone and
-focuses on making real runtime artifacts easier to open, trust, and operate.
+Status: completed.
+
+This is the completed Workbench Milestone 3 task list for BureauLess. It
+followed the completed Workbench Milestone 2 runtime console milestone and
+focused on making real runtime artifacts easier to open, trust, and operate.
 
 The project-level sequencing lives in
 [`../roadmap/development_roadmap.md`](../roadmap/development_roadmap.md).

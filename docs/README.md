@@ -24,7 +24,7 @@ acceptance criteria.
 - [`tasks/runtime_harness_milestone_2_5_tasklist.md`](tasks/runtime_harness_milestone_2_5_tasklist.md):
   completed runtime/harness bridge milestone for controlled workflow mutation.
 - [`tasks/runtime_harness_milestone_3_tasklist.md`](tasks/runtime_harness_milestone_3_tasklist.md):
-  active runtime milestone for node outcomes, bounded context delivery,
+  completed runtime milestone for node outcomes, bounded context delivery,
   orchestrator decision artifacts, and advisor outcome learning.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
@@ -35,6 +35,9 @@ acceptance criteria.
   mutation inspection.
 - [`tasks/workbench_milestone_3_tasklist.md`](tasks/workbench_milestone_3_tasklist.md):
   completed runtime-source loading and planning-action clarity milestone.
+- [`tasks/workbench_milestone_4_tasklist.md`](tasks/workbench_milestone_4_tasklist.md):
+  planned next milestone for visual inspection of Runtime Harness Milestone 3
+  decisions, outcomes, context delivery, and dispatch artifacts.
 - [`tasks/engineering_boundary_refactor_tasklist.md`](tasks/engineering_boundary_refactor_tasklist.md):
   RFC-003 implementation task list for shared errors, CLI split, application
   services, and protocol exports.
@@ -52,8 +55,8 @@ behavior is promoted into `protocol/`; the RFC remains as provenance.
   canonical ledger facts, progressive context disclosure, and context-policy
   feedback.
 - [`rfcs/003-engineering-boundary-refactor.md`](rfcs/003-engineering-boundary-refactor.md):
-  RFC-003, draft engineering-boundary refactor for shared errors, CLI split,
-  application services, and narrower protocol exports.
+  RFC-003, implemented engineering-boundary refactor for shared errors, CLI
+  split, application services, and narrower protocol exports.
 
 ## ADRs
 

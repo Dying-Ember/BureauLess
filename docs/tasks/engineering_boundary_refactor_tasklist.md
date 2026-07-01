@@ -1,5 +1,7 @@
 # Engineering Boundary Refactor Task List
 
+Status: completed.
+
 This task list tracks implementation for
 [`RFC-003: Engineering Boundary Refactor`](../rfcs/003-engineering-boundary-refactor.md)
 and GitHub issue
