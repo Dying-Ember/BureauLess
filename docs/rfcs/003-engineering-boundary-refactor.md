@@ -18,6 +18,8 @@ Decision records:
   accepted CLI command ownership split.
 - [`2026-06-30-application-services.md`](../adrs/003-engineering-boundary-refactor/2026-06-30-application-services.md):
   accepted application services boundary.
+- [`2026-06-30-protocol-exports.md`](../adrs/003-engineering-boundary-refactor/2026-06-30-protocol-exports.md):
+  accepted stable package-root exports for `bureauless.protocol`.
 
 ## Scope
 

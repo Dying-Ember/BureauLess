@@ -10,24 +10,15 @@ import yaml
 
 from ..application.demo import prepare_demo_workspace
 from ..errors import ProtocolError
-from ..protocol import (
-    append_ledger_event,
-    apply_review_decision,
-    export_assignment,
-    load_advisor_outcome,
-    load_assignment,
-    load_routing_decision,
-    load_ledger,
-    load_mission,
-    load_node_outcome,
-    load_result_proposal,
-    load_review_decision,
-    load_workflow,
-    node_outcome_from_session,
-    sha256_file,
-    validate_routing_decision,
-    write_ledger,
-)
+from ..protocol.advisors import load_advisor_outcome
+from ..protocol.artifacts import sha256_file
+from ..protocol.assignments import export_assignment, load_assignment
+from ..protocol.harness import load_ledger, load_mission, load_workflow
+from ..protocol.ledger import append_ledger_event, write_ledger
+from ..protocol.outcomes import load_node_outcome, node_outcome_from_session
+from ..protocol.results import load_result_proposal
+from ..protocol.reviews import apply_review_decision, load_review_decision
+from ..protocol.routing import load_routing_decision, validate_routing_decision
 from ..runtime import (
     evaluate_gatekeeper,
     replay_workflow,

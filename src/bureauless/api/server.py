@@ -25,27 +25,16 @@ from ..core import (
     update_review_status,
 )
 from ..errors import ProtocolError
-from ..protocol import (
-    append_ledger_event,
-    compile_context_capsule,
-    compile_dispatch_packet,
-    export_assignment,
-    load_advisor_outcome,
-    load_assignment,
-    load_context_request,
-    load_dispatch_packet,
-    import_result_proposal,
-    load_ledger,
-    load_mission,
-    load_node_outcome,
-    load_result_proposal,
-    load_routing_decision,
-    load_turn_report,
-    load_workflow,
-    materialize_current_workflow,
-    resolve_context_request,
-    write_ledger,
-)
+from ..protocol.advisors import load_advisor_outcome
+from ..protocol.assignments import compile_context_capsule, export_assignment, load_assignment
+from ..protocol.context import load_context_request, resolve_context_request
+from ..protocol.dispatch import compile_dispatch_packet, load_dispatch_packet, load_turn_report
+from ..protocol.harness import load_ledger, load_mission, load_workflow
+from ..protocol.ledger import append_ledger_event, write_ledger
+from ..protocol.mutations import materialize_current_workflow
+from ..protocol.outcomes import load_node_outcome
+from ..protocol.results import import_result_proposal, load_result_proposal
+from ..protocol.routing import load_routing_decision
 from ..runtime import (
     build_mutation_supersession_events,
     evaluate_assignment_impacts,

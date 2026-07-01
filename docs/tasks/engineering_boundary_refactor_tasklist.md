@@ -206,7 +206,7 @@ Goal: make `bureauless.protocol` exports intentional and stable.
 
 ### [ ] EBR-07: Accept Protocol Exports ADR
 
-- Status: planned
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -219,10 +219,16 @@ Goal: make `bureauless.protocol` exports intentional and stable.
 - Acceptance criteria:
   - The ADR states what `bureauless.protocol` should re-export.
   - Existing internal callers have a migration path.
+- Implementation notes:
+  - Accepted
+    [`2026-06-30-protocol-exports.md`](../adrs/003-engineering-boundary-refactor/2026-06-30-protocol-exports.md).
+  - Defined `bureauless.protocol` as a small facade for stable document-level
+    entrypoints and required internal callers to use direct submodule imports
+    for narrower helpers and types.
 
-### [ ] EBR-08: Narrow Protocol __init__ Exports
+### [x] EBR-08: Narrow Protocol __init__ Exports
 
-- Status: planned
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4
 - Risk: high
@@ -239,6 +245,18 @@ Goal: make `bureauless.protocol` exports intentional and stable.
 - Acceptance criteria:
   - Tests pass with narrower exports.
   - Protocol public surface is documented in the ADR or protocol docs.
+- Implementation notes:
+  - Reduced `src/bureauless/protocol/__init__.py` to stable document-level
+    entrypoints.
+  - Updated CLI, API, application, and test imports to use direct protocol
+    submodules for narrower helpers and module-owned behavior.
+  - Kept package-root imports only where tests intentionally exercise the
+    remaining public facade.
+  - Verified with
+    `PYTHONPATH=src python -m py_compile src/bureauless/protocol/__init__.py src/bureauless/application/demo.py src/bureauless/cli/exchange.py src/bureauless/cli/runtime.py src/bureauless/cli/sessions.py src/bureauless/cli/main.py src/bureauless/api/server.py tests/test_harness.py tests/test_server.py`.
+  - Verified behavior with
+    `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_harness.py tests/test_server.py -q`
+    (`165 passed`).
 
 ## Recommended Execution Order
 

@@ -15,7 +15,7 @@ boundary refactor RFC.
 - `2026-06-30-shared-errors.md`: accepted; extract `ProtocolError` into `src/bureauless/errors.py`.
 - `2026-06-30-cli-split.md`: accepted; split CLI command ownership into command modules.
 - `2026-06-30-application-services.md`: accepted; introduce shared application services for CLI/API flows.
-- `2026-06-30-protocol-exports.md`: narrow `bureauless.protocol` public exports.
+- `2026-06-30-protocol-exports.md`: accepted; narrow `bureauless.protocol` public exports to stable entrypoints.
 
 ## Correspondence Rules
 

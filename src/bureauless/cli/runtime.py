@@ -6,14 +6,9 @@ import sys
 
 import yaml
 
-from ..protocol import (
-    append_ledger_event,
-    compile_workflow,
-    load_ledger,
-    load_workflow,
-    verify_ledger_artifacts,
-    write_ledger,
-)
+from ..protocol.artifacts import verify_ledger_artifacts
+from ..protocol.harness import compile_workflow, load_ledger, load_workflow
+from ..protocol.ledger import append_ledger_event, write_ledger
 from ..runtime import evaluate_gatekeeper, replay_workflow
 from .common import load_yaml_event
 

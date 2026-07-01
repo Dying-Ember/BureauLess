@@ -5,12 +5,9 @@ from pathlib import Path
 
 import yaml
 
-from ..protocol import (
-    load_assignment,
-    load_ledger,
-    load_workflow,
-    write_ledger,
-)
+from ..protocol.assignments import load_assignment
+from ..protocol.harness import load_ledger, load_workflow
+from ..protocol.ledger import write_ledger
 from ..runtime.sessions import (
     cancel_session_record,
     create_session_spec,

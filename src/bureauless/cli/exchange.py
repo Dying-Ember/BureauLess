@@ -5,26 +5,14 @@ from pathlib import Path
 
 import yaml
 
-from ..protocol import (
-    apply_advisor_outcome,
-    apply_review_decision,
-    compile_dispatch_packet,
-    export_assignment,
-    import_result_proposal,
-    load_advisor_outcome,
-    load_assignment,
-    load_dispatch_packet,
-    load_ledger,
-    load_mission,
-    load_result_proposal,
-    load_review_decision,
-    load_routing_decision,
-    load_workflow,
-    render_assignment_prompt,
-    validate_dispatch_packet,
-    validate_routing_decision,
-    write_ledger,
-)
+from ..protocol.advisors import apply_advisor_outcome, load_advisor_outcome
+from ..protocol.assignments import export_assignment, load_assignment, render_assignment_prompt
+from ..protocol.dispatch import compile_dispatch_packet, load_dispatch_packet, validate_dispatch_packet
+from ..protocol.harness import load_ledger, load_mission, load_workflow
+from ..protocol.ledger import write_ledger
+from ..protocol.results import import_result_proposal, load_result_proposal
+from ..protocol.reviews import apply_review_decision, load_review_decision
+from ..protocol.routing import load_routing_decision, validate_routing_decision
 from ..runtime.sessions import load_session_record, package_session_result
 from .common import load_yaml_mapping
 

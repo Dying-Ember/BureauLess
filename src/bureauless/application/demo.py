@@ -7,7 +7,7 @@ import subprocess
 import yaml
 
 from ..errors import ProtocolError
-from ..protocol import sha256_file
+from ..protocol.artifacts import sha256_file
 
 
 def prepare_demo_workspace(
