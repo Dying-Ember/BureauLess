@@ -1,8 +1,10 @@
 from pathlib import Path
+import subprocess
 
 import yaml
 
 from bureauless.core import ProtocolError, create_run_record, load_dag, write_run_record
+from bureauless.cli.main import run_live_demo
 from bureauless.protocol import export_assignment, load_ledger, load_workflow
 from bureauless.api.server import (
     CreateNodeRequest,
@@ -264,6 +266,106 @@ def test_runtime_demo_api_creates_reviewable_workspace(tmp_path: Path) -> None:
     assert replay["nodes"]["review"]["state"] == "runnable"
     assert gatekeeper["ready"] == ["review"]
     assert metrics["entries"][0]["assignment_id"] == "assign-implement-demo"
+
+
+def test_artifact_session_manifest_api_loads_m3_demo_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    endpoints = _api_endpoints()
+
+    def fake_runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        cwd = Path(_kwargs["cwd"])
+        node_id = cwd.parent.name.removeprefix("session-").removesuffix("-live")
+        event_name = {
+            "implement": "patch_ready",
+            "review": "review_approved",
+            "commit": "commit_created",
+        }[node_id]
+        stdout = (
+            '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'
+            f'status: completed\\nemitted_events:\\n  - {event_name}\\nverification:\\n  status: passed'
+            '"}}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20}}\n'
+        )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        timeout_seconds=10.0,
+        command_runner=fake_runner,
+    )
+
+    response = endpoints["/api/artifact-session-manifest"](path=manifest["manifest_path"])
+
+    assert response["manifest_path"] == manifest["manifest_path"]
+    assert response["routing_decision_path"] == manifest["routing_decision_path"]
+    assert response["metrics_summary_path"] == manifest["metrics_summary_path"]
+    assert response["steps"][0]["dispatch_packet_path"].endswith("implement_dispatch_packet.yaml")
+    assert response["steps"][0]["turn_report_path"].endswith("implement_turn_report.yaml")
+    assert response["steps"][0]["context_request_path"] is None
+    assert response["steps"][2]["review_decision_path"].endswith("commit_review_decision.yaml")
+
+
+def test_artifact_session_manifest_api_rejects_incomplete_manifest(tmp_path: Path) -> None:
+    endpoints = _api_endpoints()
+    manifest_path = tmp_path / "broken_manifest.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump(
+            {
+                "milestone": "runtime-milestone-3",
+                "flow_id": "broken",
+                "workspace": str(tmp_path),
+                "mission_path": "mission.yaml",
+                "workflow_path": "workflow.yaml",
+                "ledger_path": "ledger.yaml",
+                "agent": "codex-cli",
+                "target_model": "gpt-5",
+                "target_provider": "openai",
+                "routing_decision_path": "routing.yaml",
+                "advisor_gate_decision_path": "advisor_gate_decision.yaml",
+                "advisor_gate_outcome_path": "advisor_outcome.yaml",
+                "metrics_summary_path": "metrics.yaml",
+                "workbench_url": "http://127.0.0.1:5173/",
+                "steps": [
+                    {
+                        "node_id": "implement",
+                        "assignment_path": "assign.yaml",
+                        "context_capsule_path": "capsule.yaml",
+                        "session_path": "session.yaml",
+                        "record_status": "completed",
+                        "ready_after": [],
+                        "node_state_after": "completed",
+                    }
+                ],
+                "failure": None,
+                "terminal_complete": True,
+                "ready": [],
+                "node_states": {"implement": "completed"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        endpoints["/api/artifact-session-manifest"](path=str(manifest_path))
+    except ProtocolError as exc:
+        assert (
+            str(exc)
+            == "Artifact session manifest steps[0] field 'result_path' must be a non-empty string"
+        )
+    else:
+        raise AssertionError("Expected ProtocolError for incomplete artifact manifest")
 
 
 def test_m3_artifact_api_endpoints(tmp_path: Path) -> None:

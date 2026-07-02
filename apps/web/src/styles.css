@@ -406,6 +406,72 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.runtime-inspection-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.runtime-inspection-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.runtime-inspection-card {
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.runtime-inspection-card-header,
+.runtime-inspection-section-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.runtime-inspection-card-header strong,
+.runtime-inspection-section strong,
+.runtime-inspection-item strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.runtime-inspection-section {
+  display: grid;
+  gap: 6px;
+}
+
+.runtime-inspection-section p,
+.runtime-inspection-item p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.runtime-inspection-list {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-inspection-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+}
+
 .runtime-graph-panel {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2465,6 +2531,7 @@ button {
   }
 
   .runtime-node-surface,
+  .runtime-inspection-grid,
   .runtime-node-list,
   .runtime-node-inspector-facts {
     grid-template-columns: 1fr;

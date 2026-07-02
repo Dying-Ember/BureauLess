@@ -115,6 +115,351 @@ const missionFixture = {
   human_gate: null,
 };
 
+const artifactManifestFixture = {
+  milestone: 'runtime-milestone-3',
+  flow_id: 'demo-live-session-path',
+  workspace: '/tmp/live-demo',
+  mission_path: '.bureauless/m3-demo/mission.yaml',
+  workflow_path: '.bureauless/m3-demo/workflow.yaml',
+  ledger_path: '.bureauless/m3-demo/ledger.yaml',
+  agent: 'codex-cli',
+  target_model: 'gpt-5.4',
+  target_provider: 'openai',
+  routing_decision_path: '.bureauless/m3-demo/generated/decisions/routing.yaml',
+  advisor_gate_decision_path: '.bureauless/m3-demo/generated/decisions/advisor_gate_decision.yaml',
+  advisor_gate_outcome_path: '.bureauless/m3-demo/generated/telemetry/advisor_outcome.yaml',
+  metrics_summary_path: '.bureauless/m3-demo/generated/telemetry/metrics_summary.yaml',
+  workbench_url: 'http://127.0.0.1:5173/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml',
+  steps: [
+    {
+      node_id: 'prepare',
+      assignment_path: '.bureauless/m3-demo/generated/assignments/prepare_assignment.yaml',
+      context_capsule_path: '.bureauless/m3-demo/generated/capsules/prepare_context_capsule.yaml',
+      context_request_path: '.bureauless/m3-demo/generated/context/prepare_context_request.yaml',
+      session_path: '.bureauless/m3-demo/generated/sessions/prepare_session.yaml',
+      result_path: '.bureauless/m3-demo/generated/results/prepare_result.yaml',
+      node_outcome_path: '.bureauless/m3-demo/generated/outcomes/prepare_node_outcome.yaml',
+      review_decision_path: '.bureauless/m3-demo/generated/reviews/prepare_review_decision.yaml',
+      turn_report_path: '.bureauless/m3-demo/generated/telemetry/prepare_turn_report.yaml',
+      dispatch_packet_path: '.bureauless/m3-demo/generated/decisions/prepare_dispatch_packet.yaml',
+      record_status: 'completed',
+      emitted_events: ['patch_ready'],
+      outcome_event_id: 'event-outcome-session-prepare-live-decision',
+      review_event_id: 'event-review-prepare-live',
+      ready_after: ['review'],
+      node_state_after: 'completed',
+    },
+  ],
+  failure: null,
+  terminal_complete: true,
+  ready: [],
+  node_states: {
+    implement: 'completed',
+    review: 'completed',
+    commit: 'completed',
+  },
+  manifest_path: '.bureauless/m3-demo/generated/telemetry/manifest.yaml',
+} as const;
+
+const routingDecisionFixture = {
+  decision_type: 'routing_decision',
+  mission_id: 'demo',
+  workflow_id: 'workflow-001',
+  selected_mode: 'small_dag',
+  selection_policy_version: '0.1',
+  triggered_rules: ['explicit_review_step_required', 'explicit_commit_step_required'],
+  rejected_modes: [
+    {
+      mode: 'single_agent',
+      rejected_because: 'The demo keeps inspectable handoff boundaries between implement, review, and commit.',
+    },
+  ],
+  estimated_coordination_ratio: 0.18,
+  budget_confidence: 'high',
+  reason: 'The workflow remains a staged small DAG so review and commit stay explicit.',
+  budget_reason: 'Observed usage remains below the advisor threshold for escalation.',
+  risk_reason: 'The commit path stays review-gated.',
+  advisor_gate_decision: {
+    invoked: false,
+    policy_version: '0.1',
+    reason: ['parallel_width < 3', 'estimated_total_tokens < 80000'],
+    decision_basis: 'first_run_heuristic',
+  },
+} as const;
+
+const advisorOutcomeFixture = {
+  decision_type: 'advisor_outcome',
+  outcome_id: 'advisor-outcome-001',
+  mission_id: 'demo',
+  workflow_id: 'workflow-001',
+  status: 'scored',
+  source_decision_type: 'routing_decision',
+  source_decision_ref: 'generated/decisions/routing.yaml',
+  advisor_decision_ref: 'generated/decisions/advisor_gate_decision.yaml',
+  classification: 'good_skip',
+  actual_advisor_tokens: 120,
+  actual_total_tokens: 1800,
+  rework_count: 0,
+  broadcast_tokens: 80,
+  duplicate_context_observed: false,
+  price_snapshot_attribution: {
+    provider: 'openai',
+    model: 'gpt-5.4',
+  },
+  notes: 'Skip remained the correct call for the bounded demo graph.',
+} as const;
+
+const nodeOutcomeFixture = {
+  outcome_id: 'outcome-session-prepare-live',
+  assignment_id: 'assign-prepare-live',
+  session_id: 'session-prepare-live',
+  workflow_id: 'workflow-001',
+  node_id: 'prepare',
+  role: 'producer',
+  agent_id: 'codex-cli',
+  status: 'completed',
+  effective_model: 'gpt-5.4',
+  effective_provider: 'openai',
+  pre_state_ref: 'workspace-prepared',
+  post_state_ref: 'workspace-updated',
+  observed_delta: {
+    changed_files_count: 1,
+    patch_bytes: 124,
+    diff_refs: [{ artifact_id: 'artifact-prepare-patch', path: 'artifacts/prepare.diff' }],
+  },
+  verification: {
+    status: 'passed',
+  },
+  native_log_refs: [],
+  diff_refs: [{ artifact_id: 'artifact-prepare-patch', path: 'artifacts/prepare.diff' }],
+  outcome_metrics: {
+    wall_time_ms: 1000,
+    changed_files_count: 1,
+  },
+  extraction: {},
+} as const;
+
+const assignmentFixture = {
+  assignment_id: 'assign-prepare-live',
+  workflow_id: 'workflow-001',
+  node_id: 'prepare',
+  role: 'producer',
+  goal: 'Prepare the implementation patch.',
+  visible_context: {},
+  artifact_refs: [{ artifact_id: 'artifact-prepare-patch', path: 'artifacts/prepare.diff' }],
+  allowed_tools: [],
+  forbidden_actions: ['update_canonical_ledger'],
+  expected_events: ['patch_ready'],
+  outcome_metrics_policy: {
+    wall_time: 'required',
+    final_status: 'required',
+  },
+} as const;
+
+const contextCapsuleFixture = {
+  context_capsule_id: 'context-assign-prepare-live',
+  policy_version: 'context-v1',
+  mission_id: 'demo',
+  workflow_id: 'workflow-001',
+  assignment_id: 'assign-prepare-live',
+  node_id: 'prepare',
+  role: 'producer',
+  workspace_ref: 'workspace-prepared',
+  dependency_node_ids: ['prepare'],
+  required_gates: [],
+  role_permissions: {
+    can_emit: ['patch_ready'],
+    can_consume: [],
+  },
+  accepted_facts: [
+    {
+      finding_id: 'finding-prepare-live',
+      content: 'The current implementation baseline is already isolated.',
+    },
+  ],
+  accepted_decisions: [],
+  active_risks: [
+    {
+      risk_id: 'risk-prepare-001',
+      summary: 'Patch must preserve the downstream review handoff.',
+      status: 'open',
+    },
+  ],
+  open_questions: [],
+  artifact_refs: [{ artifact_id: 'artifact-prepare-patch', path: 'artifacts/prepare.diff' }],
+  source_event_ids: ['event-review-prepare-live'],
+  mission_constraints: {},
+  excluded: {
+    ledger: 'bounded_context_only',
+  },
+} as const;
+
+const resultFixture = {
+  result_id: 'result-prepare-live',
+  assignment_id: 'assign-prepare-live',
+  agent_id: 'codex-cli',
+  status: 'completed',
+  effective_model: 'gpt-5.4',
+  effective_provider: 'openai',
+  emitted_events: ['patch_ready'],
+  artifacts: [{ artifact_id: 'artifact-prepare-patch', path: 'artifacts/prepare.diff' }],
+  outcome_metrics: {
+    wall_time_ms: 1000,
+    input_tokens: 220,
+    output_tokens: 80,
+    total_tokens: 300,
+    changed_files_count: 1,
+    cost_usd: 0.012,
+  },
+  verification: {
+    status: 'passed',
+  },
+  native_log_refs: [],
+  mutation_proposal_refs: [],
+  review_status: 'approved',
+} as const;
+
+const turnReportFixture = {
+  report_id: 'turn-session-prepare-live',
+  assignment_id: 'assign-prepare-live',
+  agent_id: 'codex-cli',
+  status: 'completed',
+  tool_calls_since_last_report: 1,
+  summary: 'Prepared the patch and verified the bounded handoff.',
+  new_findings: [{ finding_id: 'finding-prepare-live', summary: 'Patch prepared successfully.' }],
+  artifact_refs: [{ artifact_id: 'artifact-prepare-patch', path: 'artifacts/prepare.diff' }],
+  blockers: [],
+  suggested_ledger_updates: [{ type: 'events_emitted', events: ['patch_ready'] }],
+  token_usage: { input_tokens: 220, output_tokens: 80 },
+} as const;
+
+const dispatchPacketFixture = {
+  packet_id: 'packet-session-prepare-live',
+  mission_id: 'demo',
+  workflow_id: 'workflow-001',
+  routing_decision: routingDecisionFixture,
+  assignment: assignmentFixture,
+  review_constraints: {
+    required_gate_ids: [],
+    requires_review_decision: false,
+    forbid_scope_expansion: true,
+    forbid_new_agents: true,
+  },
+  turn_report_policy: {
+    after_each_tool_call: true,
+    max_report_tokens: 600,
+  },
+} as const;
+
+const sessionMetricsFixture = {
+  entries: [
+    {
+      assignment_id: 'assign-prepare-live',
+      status: 'completed',
+      agent_id: 'codex-cli',
+      role: 'producer',
+      task_type: 'prepare',
+      risk_level: 'medium',
+      model: 'gpt-5.4',
+      provider: 'openai',
+      workflow_mode: 'small_dag',
+      wall_time_ms: 1000,
+      input_tokens: 220,
+      output_tokens: 80,
+      total_tokens: 300,
+      cost_usd: 0.012,
+      cost_source: 'observed',
+      cost_confidence: 'high',
+      changed_files_count: 1,
+      verification_status: 'passed',
+      review_status: 'approved',
+      usage_confidence: 'high',
+      context_policy_version: 'context-v1',
+      context_capsule_tokens: 1800,
+      included_fact_ids: ['finding-prepare-live'],
+      included_artifact_refs: ['artifact-prepare-patch'],
+      context_requests: [
+        {
+          reason: 'missing_test_failure_details',
+          requested_refs: ['artifact-test-report-017'],
+          granted_artifacts: [{ artifact_id: 'artifact-test-report-017' }],
+          denied_refs: [],
+          unavailable_refs: [],
+          added_tokens: 620,
+        },
+      ],
+      first_pass_success: true,
+      rework_required: false,
+      context_fit_classification: 'under_provisioned',
+      context_fit_reason: 'Required evidence arrived only after a scoped request.',
+    },
+  ],
+  summary: [],
+  observed_budget: {
+    session_count: 1,
+    completed_count: 1,
+    total_tokens_used: 300,
+    total_cost_usd: 0.012,
+    known_cost_usd_total: 0.012,
+    missing_usage_count: 0,
+    missing_cost_count: 0,
+    observed_coordination_ratio: 0.18,
+  },
+  advisor_outcomes: [],
+  advisor_score_summary: {
+    scores: [],
+    classification_counts: { good_call: 0, bad_call: 0, good_skip: 1, missed_call: 0 },
+    insufficient_evidence_count: 0,
+  },
+  context_summary: {
+    entry_count: 1,
+    total_context_requests: 1,
+    total_added_tokens: 620,
+    fit_counts: {
+      under_provisioned: 1,
+      well_provisioned: 0,
+      over_provisioned: 0,
+      mis_scoped: 0,
+      insufficient_evidence: 0,
+    },
+    repeated_requested_refs: [],
+  },
+  policy_recommendations: [],
+} as const;
+
+const aggregateMetricsFixture = {
+  ...sessionMetricsFixture,
+  observed_budget: {
+    session_count: 3,
+    completed_count: 3,
+    total_tokens_used: 1800,
+    total_cost_usd: 0.072,
+    known_cost_usd_total: 0.072,
+    missing_usage_count: 0,
+    missing_cost_count: 0,
+    observed_coordination_ratio: 0.18,
+  },
+  advisor_outcomes: [advisorOutcomeFixture],
+  advisor_score_summary: {
+    scores: [{ outcome_id: 'advisor-outcome-001', classification: 'good_skip' }],
+    classification_counts: { good_call: 0, bad_call: 0, good_skip: 1, missed_call: 0 },
+    insufficient_evidence_count: 0,
+  },
+  context_summary: {
+    entry_count: 3,
+    total_context_requests: 1,
+    total_added_tokens: 620,
+    fit_counts: {
+      under_provisioned: 1,
+      well_provisioned: 2,
+      over_provisioned: 0,
+      mis_scoped: 0,
+      insufficient_evidence: 0,
+    },
+    repeated_requested_refs: [],
+  },
+} as const;
+
 const ledgerFixture = {
   mission_id: 'demo',
   ledger_version: '1',
@@ -285,6 +630,28 @@ async function mockWorkbenchApi(
     mutationDecisionDelayMs?: number;
     mutationDecisionResponse?: (payload: unknown) => { status?: number; body?: unknown };
     gatekeeperResponse?: { status?: number; body?: unknown };
+    routingDecisionResponse?: { status?: number; body?: unknown };
+    onRoutingDecisionRequest?: (url: string) => void;
+    advisorOutcomeResponse?: { status?: number; body?: unknown };
+    onAdvisorOutcomeRequest?: (url: string) => void;
+    nodeOutcomeResponse?: { status?: number; body?: unknown };
+    onNodeOutcomeRequest?: (url: string) => void;
+    assignmentResponse?: { status?: number; body?: unknown };
+    onAssignmentRequest?: (url: string) => void;
+    contextCapsuleResponse?: { status?: number; body?: unknown };
+    onContextCapsuleRequest?: (url: string) => void;
+    contextRequestResponse?: { status?: number; body?: unknown };
+    onContextRequest?: (url: string) => void;
+    resultResponse?: { status?: number; body?: unknown };
+    onResultRequest?: (url: string) => void;
+    turnReportResponse?: { status?: number; body?: unknown };
+    onTurnReportRequest?: (url: string) => void;
+    dispatchPacketResponse?: { status?: number; body?: unknown };
+    onDispatchPacketRequest?: (url: string) => void;
+    metricsResponse?: { status?: number; body?: unknown } | ((url: string) => { status?: number; body?: unknown });
+    onMetricsRequest?: (url: string) => void;
+    artifactManifestResponse?: { status?: number; body?: unknown };
+    onArtifactManifestRequest?: (url: string) => void;
     onGatekeeperRequest?: (url: string) => void;
     missionResponse?: { status?: number; body?: unknown };
     onMissionRequest?: (url: string) => void;
@@ -392,6 +759,121 @@ async function mockWorkbenchApi(
       status: options.missionResponse?.status ?? 200,
       contentType: 'application/json',
       body: JSON.stringify(options.missionResponse?.body ?? missionFixture),
+    });
+  });
+
+  await page.route('**/api/artifact-session-manifest?**', async (route) => {
+    options.onArtifactManifestRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.artifactManifestResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.artifactManifestResponse?.body ?? artifactManifestFixture),
+    });
+  });
+
+  await page.route('**/api/routing-decision?**', async (route) => {
+    options.onRoutingDecisionRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.routingDecisionResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.routingDecisionResponse?.body ?? routingDecisionFixture),
+    });
+  });
+
+  await page.route('**/api/advisor-outcome?**', async (route) => {
+    options.onAdvisorOutcomeRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.advisorOutcomeResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.advisorOutcomeResponse?.body ?? advisorOutcomeFixture),
+    });
+  });
+
+  await page.route('**/api/node-outcome?**', async (route) => {
+    options.onNodeOutcomeRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.nodeOutcomeResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.nodeOutcomeResponse?.body ?? nodeOutcomeFixture),
+    });
+  });
+
+  await page.route('**/api/assignment?**', async (route) => {
+    options.onAssignmentRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.assignmentResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.assignmentResponse?.body ?? assignmentFixture),
+    });
+  });
+
+  await page.route('**/api/context-capsule?**', async (route) => {
+    options.onContextCapsuleRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.contextCapsuleResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.contextCapsuleResponse?.body ?? contextCapsuleFixture),
+    });
+  });
+
+  await page.route('**/api/context-request?**', async (route) => {
+    options.onContextRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.contextRequestResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.contextRequestResponse?.body ?? {
+        context_request_id: 'ctxreq-001',
+        assignment_id: 'assign-prepare-live',
+        missing_information: 'Need the test failure details artifact.',
+        requested_refs: ['artifact-test-report-017'],
+        expected_value: 'Use the accepted test report instead of guessing the failure.',
+      }),
+    });
+  });
+
+  await page.route('**/api/result?**', async (route) => {
+    options.onResultRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.resultResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.resultResponse?.body ?? resultFixture),
+    });
+  });
+
+  await page.route('**/api/turn-report?**', async (route) => {
+    options.onTurnReportRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.turnReportResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.turnReportResponse?.body ?? turnReportFixture),
+    });
+  });
+
+  await page.route('**/api/dispatch-packet?**', async (route) => {
+    options.onDispatchPacketRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.dispatchPacketResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.dispatchPacketResponse?.body ?? dispatchPacketFixture),
+    });
+  });
+
+  await page.route('**/api/metrics?**', async (route) => {
+    const url = route.request().url();
+    options.onMetricsRequest?.(url);
+    const response =
+      typeof options.metricsResponse === 'function'
+        ? options.metricsResponse(url)
+        : options.metricsResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(
+        response?.body ??
+          (url.includes(encodeURIComponent('metrics_summary.yaml'))
+            ? aggregateMetricsFixture
+            : sessionMetricsFixture),
+      ),
     });
   });
 
@@ -1680,6 +2162,214 @@ test('renders runtime summary panels and persists runtime source paths', async (
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem('bureauless.ledgerPath'))).toBe(
     'examples/missions/custom/ledger.yaml',
   );
+});
+
+test('loads runtime sources from artifact_manifest_path without frontend YAML parsing', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem('bureauless.workbenchViewMode', 'planning');
+    window.localStorage.setItem('bureauless.missionPath', 'stale/mission.yaml');
+    window.localStorage.setItem('bureauless.workflowPath', 'stale/workflow.yaml');
+    window.localStorage.setItem('bureauless.ledgerPath', 'stale/ledger.yaml');
+    window.localStorage.setItem('bureauless.artifactManifestPath', 'stale/manifest.yaml');
+  });
+  let artifactManifestRequestUrl = '';
+  let missionRequestUrl = '';
+  let mutationRequestUrl = '';
+  let ledgerRequestUrl = '';
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: artifactManifestFixture },
+    onArtifactManifestRequest: (url) => {
+      artifactManifestRequestUrl = url;
+    },
+    onMissionRequest: (url) => {
+      missionRequestUrl = url;
+    },
+    onMutationRequest: (url) => {
+      mutationRequestUrl = url;
+    },
+    onLedgerRequest: (url) => {
+      ledgerRequestUrl = url;
+    },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml');
+
+  const runtimeSources = page.getByRole('region', { name: 'Runtime sources' });
+  await expect(runtimeSources.getByLabel('Artifact manifest path')).toHaveValue(
+    '.bureauless/m3-demo/generated/telemetry/manifest.yaml',
+  );
+  await expect.poll(() => new URL(artifactManifestRequestUrl).searchParams.get('path')).toBe(
+    '.bureauless/m3-demo/generated/telemetry/manifest.yaml',
+  );
+  await expect.poll(() => (missionRequestUrl ? new URL(missionRequestUrl).searchParams.get('path') : null)).toBe(
+    '.bureauless/m3-demo/mission.yaml',
+  );
+  await expect.poll(() => (mutationRequestUrl ? new URL(mutationRequestUrl).searchParams.get('workflow_path') : null)).toBe(
+    '.bureauless/m3-demo/workflow.yaml',
+  );
+  await expect.poll(() => (ledgerRequestUrl ? new URL(ledgerRequestUrl).searchParams.get('path') : null)).toBe(
+    '.bureauless/m3-demo/ledger.yaml',
+  );
+  await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('.bureauless/m3-demo/mission.yaml');
+  await expect(runtimeSources.getByLabel('Workflow path')).toHaveValue('.bureauless/m3-demo/workflow.yaml');
+  await expect(runtimeSources.getByLabel('Ledger path')).toHaveValue('.bureauless/m3-demo/ledger.yaml');
+  await expect(runtimeSources.getByRole('status')).toContainText('Runtime sources loaded.');
+});
+
+test('renders routing and advisor inspector from manifest-backed runtime artifacts', async ({ page }) => {
+  let routingDecisionRequestUrl = '';
+  let advisorOutcomeRequestUrl = '';
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: artifactManifestFixture },
+    routingDecisionResponse: { body: routingDecisionFixture },
+    advisorOutcomeResponse: { body: advisorOutcomeFixture },
+    onRoutingDecisionRequest: (url) => {
+      routingDecisionRequestUrl = url;
+    },
+    onAdvisorOutcomeRequest: (url) => {
+      advisorOutcomeRequestUrl = url;
+    },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml');
+
+  const inspector = page.getByRole('region', { name: 'Routing and advisor inspector' });
+  await expect.poll(() => (routingDecisionRequestUrl ? new URL(routingDecisionRequestUrl).searchParams.get('path') : null)).toBe(
+    '.bureauless/m3-demo/generated/decisions/routing.yaml',
+  );
+  await expect.poll(() => (advisorOutcomeRequestUrl ? new URL(advisorOutcomeRequestUrl).searchParams.get('path') : null)).toBe(
+    '.bureauless/m3-demo/generated/telemetry/advisor_outcome.yaml',
+  );
+  await expect(inspector.getByRole('definition').filter({ hasText: 'small_dag' })).toBeVisible();
+  await expect(inspector.getByRole('definition').filter({ hasText: 'good_skip' })).toBeVisible();
+  await expect(inspector.getByText('first_run_heuristic')).toBeVisible();
+  await expect(inspector.getByText('openai/gpt-5.4')).toBeVisible();
+  await expect(inspector.getByText('generated/decisions/routing.yaml')).toBeVisible();
+});
+
+test('renders node outcome and accepted evidence for the selected manifest-backed runtime node', async ({ page }) => {
+  let nodeOutcomeRequestUrl = '';
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: artifactManifestFixture },
+    nodeOutcomeResponse: { body: nodeOutcomeFixture },
+    ledgerResponse: {
+      body: {
+        ...ledgerFixture,
+        event_log: [
+          {
+            event_id: 'event-review-prepare-live',
+            event_type: 'review_decision_recorded',
+            evidence_refs: ['artifact-prepare-patch'],
+            accepted_findings: [
+              {
+                finding_id: 'finding-prepare-live',
+                content: 'The prepare node patch is safe to land.',
+              },
+            ],
+            rejected_findings: [
+              {
+                finding_id: 'finding-prepare-rejected',
+                reason: 'A speculative claim was not supported by the patch.',
+              },
+            ],
+          },
+        ],
+      },
+    },
+    onNodeOutcomeRequest: (url) => {
+      nodeOutcomeRequestUrl = url;
+    },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml');
+  await page.getByLabel('Runtime workflow nodes').getByRole('button', { name: /prepare/i }).click();
+
+  await expect.poll(() => (nodeOutcomeRequestUrl ? new URL(nodeOutcomeRequestUrl).searchParams.get('path') : null)).toBe(
+    '.bureauless/m3-demo/generated/outcomes/prepare_node_outcome.yaml',
+  );
+  const inspector = page.getByRole('region', { name: 'Runtime node inspector' });
+  await expect(inspector.getByText('1 changed file, 124 patch bytes')).toBeVisible();
+  await expect(inspector.getByText('artifact-prepare-patch').first()).toBeVisible();
+  await expect(inspector.getByText('The prepare node patch is safe to land.')).toBeVisible();
+  await expect(inspector.getByText('A speculative claim was not supported by the patch.')).toBeVisible();
+});
+
+test('renders context delivery details for the selected manifest-backed runtime node', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: artifactManifestFixture },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml');
+  await page.getByLabel('Runtime workflow nodes').getByRole('button', { name: /prepare/i }).click();
+
+  const inspector = page.getByRole('region', { name: 'Runtime node inspector' });
+  await expect(inspector.getByText('context-v1')).toBeVisible();
+  await expect(inspector.getByRole('definition').filter({ hasText: '1800' })).toBeVisible();
+  await expect(inspector.getByText('artifact-test-report-017').first()).toBeVisible();
+  await expect(inspector.getByText('Patch must preserve the downstream review handoff.')).toBeVisible();
+  await expect(inspector.getByText('Need the test failure details artifact.')).toBeVisible();
+});
+
+test('renders budget telemetry and bounded handoff artifacts for the selected manifest-backed runtime node', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: artifactManifestFixture },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml');
+  await page.getByLabel('Runtime workflow nodes').getByRole('button', { name: /prepare/i }).click();
+
+  const inspector = page.getByRole('region', { name: 'Runtime node inspector' });
+  await expect(inspector.getByText('$0.012')).toBeVisible();
+  await expect(inspector.getByText('good_skip: 1')).toBeVisible();
+  await expect(inspector.getByText('openai/gpt-5.4')).toBeVisible();
+  await expect(inspector.getByText('expected events: patch_ready')).toBeVisible();
+  await expect(inspector.getByText('report tokens: 600')).toBeVisible();
+  await expect(inspector.getByText('Prepared the patch and verified the bounded handoff.')).toBeVisible();
+});
+
+test('covers the manifest-backed M3 inspection path on a narrow viewport and shows explicit missing artifact states', async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: artifactManifestFixture },
+    ledgerResponse: {
+      body: {
+        ...ledgerFixture,
+        event_log: [
+          {
+            event_id: 'event-review-prepare-live',
+            event_type: 'review_decision_recorded',
+            evidence_refs: ['artifact-prepare-patch'],
+            accepted_findings: [
+              {
+                finding_id: 'finding-prepare-live',
+                content: 'The prepare node patch is safe to land.',
+              },
+            ],
+            rejected_findings: [],
+          },
+        ],
+      },
+    },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml');
+  await page.getByLabel('Runtime workflow nodes').getByRole('button', { name: /prepare/i }).click();
+
+  const routingInspector = page.getByRole('region', { name: 'Routing and advisor inspector' });
+  const nodeInspector = page.getByRole('region', { name: 'Runtime node inspector' });
+  await expect(routingInspector.getByText('good_skip')).toBeVisible();
+  await expect(nodeInspector.getByText('The prepare node patch is safe to land.')).toBeVisible();
+  await expect(nodeInspector.getByText('Need the test failure details artifact.')).toBeVisible();
+  await expect(nodeInspector.getByText('Prepared the patch and verified the bounded handoff.')).toBeVisible();
+
+  await page.getByLabel('Runtime workflow nodes').getByRole('button', { name: /review/i }).click();
+  await expect(nodeInspector.getByText('No artifact step linked')).toBeVisible();
 });
 
 test('keeps runtime structure unchanged when a mutation decision fails', async ({ page }) => {

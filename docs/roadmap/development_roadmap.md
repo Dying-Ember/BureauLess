@@ -36,13 +36,13 @@ The project has one UI surface:
 - Workbench: a browser/Electron planning-DAG viewer/editor and runtime console
   backed by the Python API.
 
-Workbench Milestones 1, 2, and 3 are complete. The UI now separates
+Workbench Milestones 1, 2, 3, and 4 are complete. The UI now separates
 planning-DAG editing from runtime workflow inspection, can load explicit
 runtime sources directly from live-demo URLs, and can present mission, ledger,
 gatekeeper, replay, and mutation state without reimplementing runtime rules in
-the frontend. It does not yet provide complete visual inspection for the
-decision, outcome, context, and dispatch artifacts added in Runtime Harness
-Milestone 3. That gap is the planned Workbench Milestone 4.
+the frontend. It now provides manifest-backed visual inspection for the
+decision, outcome, context, telemetry, and dispatch artifacts added in Runtime
+Harness Milestone 3.
 
 ## Milestone History
 
@@ -86,6 +86,11 @@ without reconstructing it from commits.
   runtime-source URL loading, persisted source alignment, planning/runtime
   action clarity, and full workbench smoke coverage.
   Source: [`../tasks/workbench_milestone_3_tasklist.md`](../tasks/workbench_milestone_3_tasklist.md)
+- Workbench Milestone 4:
+  manifest-backed inspection for routing/advisor, node outcome and evidence,
+  context delivery, telemetry, and bounded handoff artifacts from Runtime
+  Harness Milestone 3.
+  Source: [`../tasks/workbench_milestone_4_tasklist.md`](../tasks/workbench_milestone_4_tasklist.md)
 
 ### Implemented Engineering Cleanup
 
@@ -106,25 +111,35 @@ capability can span several milestones.
 | Runtime Harness M2 | Hardened the A4 dispatch-readiness policy and A5.5 isolated real-agent execution loop | completed |
 | Runtime Harness M2.5 | A6 controlled workflow mutation and current-state replay | completed |
 | Runtime Harness M3 | Extended A1 with node outcomes, completed the current A4 and A5 scope, and proved the initial `codex-cli` A5.5 path | completed |
+| Runtime Harness M4 | Close the A6 real-agent mutation intake loop and add A7 retry control plus linear temporal replay | planned |
 | Workbench M1 | B1 through B5 planning-DAG inspection, editing, and dispatch preparation | completed |
 | Workbench M2 | B6 runtime console for mission, workflow, ledger, gatekeeper, replay, and mutation state | completed |
 | Workbench M3 | B7 runtime-source trust and planning/runtime action clarity | completed |
-| Workbench M4 | B8 visual inspection for Runtime Harness M3 artifacts | planned |
+| Workbench M4 | B8 visual inspection for Runtime Harness M3 artifacts | completed |
 
 ## Planned Next Milestones
 
-Workbench Milestone 4 is the next planned delivery. Its task list is
+There is no active Workbench Milestone 5 yet. The most recent completed
+workbench delivery is Workbench Milestone 4. Its task list is
 [`../tasks/workbench_milestone_4_tasklist.md`](../tasks/workbench_milestone_4_tasklist.md).
 It adds read-only inspection for the structured M3 runtime artifacts already
 exposed by the backend: routing and advisor decisions, node outcomes and
 evidence, context capsules and requests, assignments and results, turn reports,
 and dispatch packets.
 
-No post-M3 runtime milestone is active. Before Runtime Milestone 4 is opened,
-the project must choose one coherent target: temporal replay evolution or
-broader real-agent/provider execution. That decision must produce a dedicated
-task list and update this roadmap; neither target should be inferred from old
-`Next` notes in completed capability sections.
+Runtime Harness Milestone 4 is the next planned runtime delivery. Its task list
+is [`../tasks/runtime_harness_milestone_4_tasklist.md`](../tasks/runtime_harness_milestone_4_tasklist.md).
+It first closes the existing real-agent mutation intake gap, then adds
+bounded retry/circuit-break semantics, deterministic workflow versions, and
+linear temporal replay through ledger event cursors. Provider expansion is not
+part of this milestone.
+
+RM4-00 has produced draft
+[`RFC-004`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md).
+Implementation remains blocked until its worker-intent, retry, inclusive cursor,
+version transition, stale proposal, historical assignment, and compatibility
+semantics are accepted into an ADR. The existing RFC-001 remains implemented
+M2.5 design history rather than being silently expanded.
 
 No additional engineering-cleanup milestone is planned. Documentation indexes,
 task status, and API boundaries remain part of each delivery milestone's
@@ -395,6 +410,66 @@ Acceptance:
   `superseded` states.
 - Temporal workflow replay remains out of scope.
 
+### A7: Agent Mutation Intake, Retry Control, And Temporal History
+
+Status: planned for Runtime Harness Milestone 4. Implementation has not started.
+
+Goal: turn controlled mutation from a current-state protocol into a complete
+real-agent proposal path with deterministic, read-only historical replay.
+
+Source tasks:
+
+- [`../tasks/runtime_harness_milestone_4_tasklist.md`](../tasks/runtime_harness_milestone_4_tasklist.md)
+
+Draft design:
+
+- [`../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
+
+Current gap:
+
+- `codex-cli` can return `mutation_proposal_refs`, but the assignment contract
+  does not provide a typed mutation-intent channel and couples proposal presence
+  to `completed_with_proposal` execution status.
+- Session/result packaging preserves the referenced artifact but does not
+  validate its YAML as a mutation proposal or register a
+  `workflow_mutation_proposed` event.
+- Existing mutation APIs inspect and decide proposal events that already exist;
+  they do not complete agent proposal intake.
+
+Planned work:
+
+- Let a worker return a minimal declarative mutation intent as part of its normal
+  result, without adding a mutation-specific wrapper agent.
+- Give every worker the inert structural escape hatch while reserving approval
+  and application authority for the orchestrator, deterministic policy, or a
+  human.
+- Have Bureauless deterministically bind the intent to assignment, session,
+  agent, workflow, base version, canonical IDs, and approval policy.
+- Validate intents and serialize canonical proposal artifacts before atomically
+  registering inert proposal events.
+- Preserve a valid execution result when its optional mutation intent is invalid.
+- Classify recoverable execution errors separately from structural and repeated
+  deterministic failures; bound retries by reason, attempt/token budget, and
+  changed evidence or strategy.
+- Derive deterministic workflow versions from accepted mutations in append-only
+  ledger order.
+- Replay workflow, assignment, node, mutation, and gatekeeper state through an
+  explicit event cursor.
+- Expose read-only timeline, historical snapshot, diff, and explanation APIs.
+
+Acceptance boundary:
+
+- A maintained real-agent demo reaches pending mutation review without manual
+  ledger editing or granting the agent canonical write authority.
+- Recoverable agent/infrastructure errors may retry within policy, while
+  unchanged deterministic or structural failures cannot consume another agent
+  turn indefinitely.
+- Explicit acceptance creates one deterministic child workflow version.
+- Historical replay never consults future events and final-cursor replay equals
+  current-state replay.
+- Branching, rollback, automatic acceptance, provider expansion, and Workbench
+  timeline UI remain deferred.
+
 ## Line B: Workbench UI
 
 This is the product surface line. It should expose current runtime state before
@@ -547,7 +622,7 @@ Implemented scope:
 
 ### B8: Runtime M3 Artifact Inspection
 
-Status: planned for Workbench Milestone 4. Implementation has not started.
+Status: completed in Workbench Milestone 4.
 
 Source tasks:
 
@@ -580,15 +655,17 @@ Acceptance boundary:
 
 ## Current Priority Order
 
-1. Execute Workbench Milestone 4 in its recorded task order, starting with the
-   artifact-session manifest API, typed M3 clients, and the source model.
-2. Validate each inspection surface against the maintained Runtime M3 demo and
-   canonical Python API responses.
-3. Complete WB4 only after the full web build and smoke suite pass and the
-   roadmap, milestone index, and task list record the same status.
-4. Select and scope the next runtime milestone separately; do not mix temporal
-   replay and provider expansion into the Workbench M4 delivery.
-5. Defer policy auto-tuning and broader automatic dispatch until a post-M3
+1. Review draft RFC-004 and accept temporal replay, mutation-intake, and retry
+   semantics into an ADR before implementation.
+2. Close the version-bound real-agent mutation proposal path before treating
+   mutation history as an end-to-end runtime capability.
+3. Implement failure classification and stuck-loop circuit breaking before the
+   maintained real-agent M4 demo.
+4. Implement linear event-cursor replay and its read-only API after workflow
+   version semantics are fixed.
+5. Keep provider expansion, replay branches, rollback, and Workbench history UI
+   outside Runtime Harness Milestone 4.
+6. Defer policy auto-tuning and broader automatic dispatch until a later
    runtime milestone explicitly owns them.
 
 ## Decision Rules
@@ -598,6 +675,8 @@ Acceptance boundary:
 - If a task adds write capability, ensure the corresponding runtime validation exists first.
 - If a task adds agent dispatch, defer it until workflow gates, result import,
   ledger replay, and doctor checks exist.
+- If a retry does not change evidence, input, strategy, assignment revision, or
+  workflow version, require a classified transient failure or open the circuit.
 - If a task is only visually useful but not operationally necessary, keep it behind runtime safety work.
 - If a task couples planning-DAG editing with runtime-workflow state, keep the
   runtime model authoritative and let the UI reflect it rather than derive it.

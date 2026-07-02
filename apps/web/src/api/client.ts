@@ -251,6 +251,203 @@ export type MutationWorkbenchPaths = {
   missionPath: string;
   workflowPath: string;
   ledgerPath: string;
+  artifactManifestPath: string;
+};
+
+export type ArtifactSessionManifestStep = {
+  node_id: string;
+  assignment_path: string;
+  context_capsule_path: string;
+  context_request_path?: string | null;
+  session_path: string;
+  result_path?: string;
+  node_outcome_path?: string;
+  review_decision_path?: string;
+  turn_report_path?: string;
+  dispatch_packet_path?: string;
+  record_status: string;
+  failure_reason?: string | null;
+  emitted_events?: string[];
+  outcome_event_id?: string;
+  review_event_id?: string;
+  ready_after: string[];
+  node_state_after: string;
+};
+
+export type ArtifactSessionManifestResponse = {
+  milestone: string;
+  flow_id: string;
+  workspace: string;
+  mission_path: string;
+  workflow_path: string;
+  ledger_path: string;
+  agent: string;
+  target_model: string;
+  target_provider: string;
+  routing_decision_path: string;
+  advisor_gate_decision_path: string;
+  advisor_gate_outcome_path: string;
+  metrics_summary_path: string;
+  workbench_url: string;
+  steps: ArtifactSessionManifestStep[];
+  failure: Record<string, unknown> | null;
+  terminal_complete: boolean;
+  ready: string[];
+  node_states: Record<string, string>;
+  manifest_path: string;
+};
+
+export type RoutingDecisionResponse = {
+  decision_type: 'routing_decision';
+  mission_id: string;
+  workflow_id?: string | null;
+  selected_mode: string;
+  selection_policy_version: string;
+  triggered_rules: string[];
+  rejected_modes: Array<{ mode: string; rejected_because: string }>;
+  estimated_coordination_ratio: number;
+  budget_confidence: string;
+  reason: string;
+  budget_reason?: string | null;
+  risk_reason?: string | null;
+  advisor_gate_decision: {
+    invoked: boolean;
+    policy_version: string;
+    reason: string[];
+    decision_basis: string;
+  };
+};
+
+export type AssignmentResponse = {
+  assignment_id: string;
+  workflow_id: string;
+  node_id: string;
+  role: string;
+  goal: string;
+  visible_context: Record<string, unknown>;
+  artifact_refs: Array<Record<string, unknown>>;
+  allowed_tools: string[];
+  forbidden_actions: string[];
+  expected_events: string[];
+  outcome_metrics_policy: Record<string, unknown>;
+};
+
+export type ContextCapsuleResponse = Record<string, unknown> & {
+  assignment_id: string;
+  workflow_id: string;
+  node_id: string;
+  role: string;
+};
+
+export type ContextRequestResponse = {
+  context_request_id: string;
+  assignment_id: string;
+  missing_information: string;
+  requested_refs: string[];
+  expected_value?: string | null;
+};
+
+export type ContextResolutionResponse = {
+  context_request_id: string;
+  assignment_id: string;
+  status: string;
+  granted_artifacts: Array<Record<string, unknown>>;
+  denied_refs: string[];
+  unavailable_refs: string[];
+};
+
+export type ResultResponse = {
+  result_id: string;
+  assignment_id: string;
+  agent_id: string;
+  status: string;
+  effective_model?: string | null;
+  effective_provider?: string | null;
+  emitted_events: string[];
+  artifacts: Array<Record<string, unknown>>;
+  outcome_metrics: Record<string, unknown>;
+  verification: Record<string, unknown>;
+  native_log_refs: Array<Record<string, unknown>>;
+  mutation_proposal_refs: string[];
+  review_status?: string | null;
+};
+
+export type NodeOutcomeResponse = {
+  outcome_id: string;
+  assignment_id: string;
+  session_id: string;
+  workflow_id: string;
+  node_id: string;
+  role: string;
+  agent_id: string;
+  status: string;
+  effective_model?: string | null;
+  effective_provider?: string | null;
+  pre_state_ref?: string | null;
+  post_state_ref?: string | null;
+  observed_delta: Record<string, unknown>;
+  verification: Record<string, unknown>;
+  native_log_refs: Array<Record<string, unknown>>;
+  diff_refs: Array<Record<string, unknown>>;
+  outcome_metrics: Record<string, unknown>;
+  extraction: Record<string, unknown>;
+};
+
+export type AdvisorOutcomeResponse = {
+  decision_type: 'advisor_outcome';
+  outcome_id: string;
+  mission_id: string;
+  workflow_id?: string | null;
+  status: string;
+  source_decision_type: string;
+  source_decision_ref: string;
+  advisor_decision_ref: string;
+  classification?: string | null;
+  pending_reason?: string | null;
+  actual_advisor_tokens?: number;
+  actual_total_tokens?: number;
+  rework_count?: number;
+  broadcast_tokens?: number;
+  duplicate_context_observed?: boolean;
+  price_snapshot_attribution?: Record<string, unknown> | null;
+  notes?: string | null;
+};
+
+export type TurnReportResponse = {
+  report_id: string;
+  assignment_id: string;
+  agent_id: string;
+  status: string;
+  tool_calls_since_last_report: number;
+  summary: string;
+  new_findings: Array<Record<string, unknown>>;
+  artifact_refs: Array<Record<string, unknown>>;
+  blockers: Array<Record<string, unknown>>;
+  suggested_ledger_updates: Array<Record<string, unknown>>;
+  token_usage: {
+    input_tokens: number;
+    output_tokens: number;
+  };
+};
+
+export type DispatchPacketResponse = {
+  packet_id: string;
+  mission_id: string;
+  workflow_id: string;
+  routing_decision: RoutingDecisionResponse;
+  assignment: AssignmentResponse;
+  review_constraints: Record<string, unknown>;
+  turn_report_policy: Record<string, unknown>;
+};
+
+export type MetricsSummaryResponse = {
+  entries: Array<Record<string, unknown>>;
+  summary?: Array<Record<string, unknown>>;
+  observed_budget?: Record<string, unknown>;
+  advisor_outcomes?: Array<Record<string, unknown>>;
+  advisor_score_summary?: Record<string, unknown>;
+  context_summary?: Record<string, unknown>;
+  policy_recommendations?: Array<Record<string, unknown>>;
 };
 
 export type MutationDecisionRequest = {
@@ -306,8 +503,82 @@ export async function fetchMission(path: string = DEFAULT_MISSION_PATH): Promise
   return expectOk(response);
 }
 
+export async function fetchArtifactSessionManifest(
+  path: string,
+): Promise<ArtifactSessionManifestResponse> {
+  const response = await fetch(`/api/artifact-session-manifest?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchRoutingDecision(path: string): Promise<RoutingDecisionResponse> {
+  const response = await fetch(`/api/routing-decision?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchAssignment(path: string): Promise<AssignmentResponse> {
+  const response = await fetch(`/api/assignment?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchContextCapsuleByPath(path: string): Promise<ContextCapsuleResponse> {
+  const response = await fetch(`/api/context-capsule?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchContextRequest(path: string): Promise<ContextRequestResponse> {
+  const response = await fetch(`/api/context-request?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function resolveContextRequest(request: {
+  assignment_path: string;
+  ledger_path: string;
+  context_request_path: string;
+  max_artifacts?: number;
+}): Promise<ContextResolutionResponse> {
+  const response = await fetch('/api/context-request/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      max_artifacts: request.max_artifacts ?? 1,
+      ...request,
+    }),
+  });
+  return expectOk(response);
+}
+
 export async function fetchLedger(path: string = DEFAULT_LEDGER_PATH): Promise<LedgerResponse> {
   const response = await fetch(`/api/ledger?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchResult(path: string): Promise<ResultResponse> {
+  const response = await fetch(`/api/result?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchNodeOutcome(path: string): Promise<NodeOutcomeResponse> {
+  const response = await fetch(`/api/node-outcome?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchAdvisorOutcome(path: string): Promise<AdvisorOutcomeResponse> {
+  const response = await fetch(`/api/advisor-outcome?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchTurnReport(path: string): Promise<TurnReportResponse> {
+  const response = await fetch(`/api/turn-report?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchDispatchPacket(path: string): Promise<DispatchPacketResponse> {
+  const response = await fetch(`/api/dispatch-packet?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function fetchMetricsSummary(path: string): Promise<MetricsSummaryResponse> {
+  const response = await fetch(`/api/metrics?path=${encodeURIComponent(path)}`);
   return expectOk(response);
 }
 

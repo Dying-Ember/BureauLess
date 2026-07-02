@@ -23,9 +23,15 @@ internal implementation grouping inside that milestone.
   the completed milestone for the initial `codex-cli` binding spine, node
   outcomes, bounded and measurable context delivery, advisor outcome learning,
   orchestrator decision artifacts, and the M3 runtime API surface.
+- [`runtime_harness_milestone_4_tasklist.md`](runtime_harness_milestone_4_tasklist.md):
+  the planned milestone for validated real-agent mutation intake, deterministic
+  retry/circuit-break control, workflow versions, and linear temporal replay
+  through ledger event cursors.
 
-No post-M3 runtime milestone is active. Its scope must be selected in the
-roadmap and recorded in a dedicated task list before implementation starts.
+Runtime Milestone 4 is selected and planned but implementation has not started.
+Its first task has produced draft
+[`RFC-004`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md);
+implementation remains blocked until that design is accepted into an ADR.
 
 ## Reading Order
 
@@ -38,5 +44,6 @@ roadmap and recorded in a dedicated task list before implementation starts.
 6. Read Milestone 2.5 for controlled workflow mutation design.
 7. Read Milestone 3 for the current decision-artifact, bounded-context, and M3
    API baseline.
-8. Do not infer a Runtime Milestone 4 from roadmap ideas; open its task list
-   only after the post-M3 runtime scope is selected.
+8. Read Milestone 4 and RFC-004 for the selected agent mutation intake,
+   retry-control, and temporal replay scope; do not begin implementation before
+   RM4-00 accepts the RFC/ADR.

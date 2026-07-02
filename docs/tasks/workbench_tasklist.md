@@ -17,7 +17,7 @@ internal implementation grouping inside that milestone.
 - [`workbench_milestone_3_tasklist.md`](workbench_milestone_3_tasklist.md):
   the completed runtime-source loading and planning-action clarity milestone.
 - [`workbench_milestone_4_tasklist.md`](workbench_milestone_4_tasklist.md):
-  the planned next milestone for inspecting the decision, outcome, context, and
+  the completed milestone for inspecting the decision, outcome, context, and
   dispatch artifacts delivered by Runtime Harness Milestone 3.
 
 ## Reading Order
@@ -29,5 +29,5 @@ internal implementation grouping inside that milestone.
    gatekeeper, mutation inspection, or runtime source controls.
 5. Read Workbench Milestone 3 when changing URL-provided runtime sources,
    persisted runtime source state, or planning/runtime action copy.
-6. Read Workbench Milestone 4 for the current planned implementation order and
-   acceptance criteria for M3 artifact inspection.
+6. Read Workbench Milestone 4 for the completed M3 inspection baseline and its
+  acceptance criteria for M3 artifact inspection.
