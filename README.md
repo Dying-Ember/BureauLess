@@ -9,8 +9,10 @@ BureauLess is not an agent. It is a token-aware harness for deciding when
 agents are worth using, constraining what they may do, and recording what can
 be trusted.
 
-Today, BureauLess defines and records the workflow protocol through YAML, CLI
-tools, and a local workbench. It does not dispatch to model providers yet.
+Today, BureauLess combines YAML protocols, a Python runtime/API, CLI tools, and
+a browser/Electron workbench. It also maintains one bounded real-agent execution
+path through `codex-cli`; broader provider and agent coverage remains future
+work.
 
 Agent workflows tend to fail in two familiar organizational ways. Sometimes a
 tiny patch gets an org chart: planner, reviewer, advisor, coordinator, and
@@ -48,44 +50,68 @@ YAML files outside of any single chat session. Codex, Claude, or another model
 can act as the orchestrator, while smaller models execute clearly bounded task
 nodes.
 
-- Validates YAML DAG task files.
-- Lists nodes that are ready to run.
-- Renders per-node prompts with recommended model and review rules.
-- Records execution results as YAML files in `runs/`.
-- Supports review gates and retry/escalation policy as first-class metadata.
-
-The first durable layer is the protocol. Provider-specific dispatch can come
-later, after the rules are boring enough to trust.
+- Validates planning DAGs, missions, workflows, ledgers, assignments, and
+  structured runtime artifacts.
+- Derives runnable, blocked, completed, and superseded state through replay and
+  gatekeeper rules.
+- Exports bounded assignments and can execute one maintained real-agent path
+  through isolated `codex-cli` sessions.
+- Records results, reviews, routing decisions, context delivery, telemetry, and
+  mutation decisions as inspectable artifacts and ledger events.
+- Provides a local Workbench for planning-DAG editing and runtime inspection
+  without moving canonical runtime rules into the frontend.
 
 ## Quick Start
 
+Install Python and workspace dependencies from a fresh checkout:
+
 ```bash
-uv run python -m bureauless validate examples/optimization_dag.yaml
+uv sync --dev
+npm install
+```
+
+Start the Python API in the first terminal:
+
+```bash
+npm run api:dev
+```
+
+Start the browser Workbench in a second terminal:
+
+```bash
+npm run web:dev
+```
+
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The API normally uses
+`http://127.0.0.1:8000`; if that port is busy, `api:dev` selects another local
+port and the Web launcher reads it from `.bureauless-api-url`.
+
+With the API and Web server running, the optional Electron shell uses the same
+Workbench UI:
+
+```bash
+npm run desktop:dev
+```
+
+For a CLI-only sanity check:
+
+```bash
 uv run python -m bureauless mission validate examples/missions/demo/mission.yaml
 uv run python -m bureauless workflow compile examples/missions/demo/workflows/coder_reviewer_committer.yaml
-uv run python -m bureauless ready examples/optimization_dag.yaml
-uv run python -m bureauless prompt examples/optimization_dag.yaml baseline-inventory
-uv run python -m bureauless record examples/optimization_dag.yaml baseline-inventory \
-  --model gpt-5-mini \
-  --status passed \
-  --output-commit abc1234 \
-  --changed-file docs/baseline.md \
-  --verification "pytest -q"
-uv run python -m bureauless review examples/optimization_dag.yaml field-resolver-skeleton \
-  --status orchestrator_approved
+uv run python -m bureauless ledger replay \
+  examples/missions/demo/workflows/coder_reviewer_committer.yaml \
+  examples/missions/demo/ledger.yaml
 ```
 
-Use `uv run` from a fresh checkout:
+Run the maintained checks with:
 
 ```bash
-uv run python -m bureauless ready examples/optimization_dag.yaml
+uv run python -m pytest -q
+npm run web:build
+npm run web:smoke
 ```
 
-After installing the package, the equivalent command is:
-
-```bash
-bureauless ready examples/optimization_dag.yaml
-```
+Playwright starts or reuses its own Vite dev server for `web:smoke`.
 
 ## Core Ideas
 
@@ -138,26 +164,20 @@ The short version: agents can do work, but they do not get to write history.
 
 ## Suggested Flow
 
-1. Write or generate a DAG file.
-2. Run `ready` to find parallelizable tasks.
-3. Render prompts for ready tasks.
-4. Send each prompt to the chosen model or thread.
-5. Record the result.
-6. Review gated nodes.
-7. Repeat until the DAG is complete.
+1. Define or load a planning DAG, mission, workflow, and ledger.
+2. Inspect runnable and blocked state through the Workbench or gatekeeper CLI.
+3. Export a bounded assignment with the required context and review policy.
+4. Execute it manually or through a supported bounded session adapter.
+5. Import and review the result, then record accepted findings and events.
+6. Replay the ledger and continue only when downstream gates are satisfied.
 
 ## Workbench
 
-The workbench is the place to inspect DAG state, runs, gates, and records before
-more execution is automated. It uses one React UI for both browser and Electron.
-Python remains the source of DAG behavior through a local FastAPI API.
-
-Install dependencies:
-
-```bash
-uv sync --dev
-npm install
-```
+The Workbench handles planning-DAG editing plus runtime inspection for mission,
+workflow, ledger, replay, gatekeeper, mutation, routing, outcome, evidence,
+context, telemetry, assignment, result, turn-report, and dispatch artifacts. It
+uses one React UI for both browser and Electron. Python remains authoritative
+through the local FastAPI API.
 
 Run the local API:
 
@@ -180,7 +200,7 @@ The Vite dev server reads `.bureauless-api-url` when it starts. If the API
 launcher had to move from `8000` to another port, restart `web:dev` once so
 the proxy follows the new API address.
 
-Run the browser smoke test after the API and web server are running:
+Run the browser smoke test:
 
 ```bash
 npm run web:smoke
@@ -206,8 +226,9 @@ npm run desktop:dev
 If the local npm Electron binary is incomplete, the launcher automatically falls
 back to a system install such as `electron39`.
 
-The UI follows the system color scheme by default and also exposes
-`system / light / dark` controls. DAG documents and run records remain YAML-only.
+Playwright starts or reuses the Vite dev server. The UI follows the system color
+scheme by default and also exposes `system / light / dark` controls. DAG
+documents and run records remain YAML-only.
 
 ## Source Layout
 
@@ -226,18 +247,15 @@ as one flat module shelf:
 
 ## Documentation
 
-Design notes, protocol drafts, and roadmap live here:
+Start with the documentation map, then use the two milestone indexes for current
+delivery status:
 
 - [`docs/README.md`](docs/README.md)
 - [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
 - [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_1_tasklist.md`](docs/tasks/runtime_harness_milestone_1_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_2_tasklist.md`](docs/tasks/runtime_harness_milestone_2_tasklist.md)
 - [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
-- [`docs/tasks/workbench_milestone_1_tasklist.md`](docs/tasks/workbench_milestone_1_tasklist.md)
-- [`docs/architecture/research_and_design_notes.md`](docs/architecture/research_and_design_notes.md)
-- [`docs/architecture/orchestrator_system_prompt.md`](docs/architecture/orchestrator_system_prompt.md)
-- [`docs/architecture/context_economy.md`](docs/architecture/context_economy.md)
+- [`docs/rfcs/README.md`](docs/rfcs/README.md)
+- [`docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
 - [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md)
 - [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
 - [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)

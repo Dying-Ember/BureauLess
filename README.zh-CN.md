@@ -7,8 +7,9 @@ BureauLess 是一个本地优先的小型编排层，用来管理 DAG 形态的 
 BureauLess 不是 Agent。它是一套带 token 经济意识的 harness：判断何时值得使用
 Agent，约束 Agent 能做什么，并记录哪些事实可信。
 
-当前版本主要通过 YAML、CLI 工具和本地 workbench 定义并记录 workflow protocol；它还
-不会直接 dispatch 到模型供应商。
+当前版本由 YAML protocol、Python runtime/API、CLI 工具和浏览器/Electron Workbench
+组成，并已经维护一条通过 `codex-cli` 运行受限真实 Agent 的路径；更广泛的 provider 和
+Agent 支持仍属于后续工作。
 
 Agent workflow 的失败方式很像真实组织。有时，一个小 patch 被套上一整张组织架构图：
 planner、reviewer、advisor、coordinator 都来了，每个角色都要读一遍同样的仓库上下文，
@@ -39,44 +40,65 @@ ledger。
 锁在某一次聊天上下文中。Codex、Claude 或其他模型可以担任 orchestrator，较小模型
 负责执行边界清楚的任务节点。
 
-- 校验 YAML DAG 任务文件。
-- 列出当前可执行的节点。
-- 为每个节点渲染 prompt，并附带推荐模型和 review 规则。
-- 把执行结果记录为 `runs/` 下的 YAML 文件。
-- 把 review gate、retry 和 escalation policy 当作一等元数据处理。
-
-第一层先把协议做稳；具体 provider 的 dispatch 可以晚点再接，等规则足够无聊、足够
-可信之后再说。
+- 校验 planning DAG、mission、workflow、ledger、assignment 和结构化 runtime artifact。
+- 通过 replay 和 gatekeeper 规则推导 runnable、blocked、completed 和 superseded 状态。
+- 导出有边界的 assignment，并通过隔离的 `codex-cli` session 维护一条真实 Agent
+  执行路径。
+- 把 result、review、routing decision、context delivery、telemetry 和 mutation decision
+  记录为可检查的 artifact 与 ledger event。
+- 提供本地 Workbench，用于 planning-DAG 编辑和 runtime 检查，同时保持 Python runtime
+  规则权威。
 
 ## 快速开始
 
+在新 checkout 中安装 Python 和 workspace 依赖：
+
 ```bash
-uv run python -m bureauless validate examples/optimization_dag.yaml
+uv sync --dev
+npm install
+```
+
+在第一个终端启动 Python API：
+
+```bash
+npm run api:dev
+```
+
+在第二个终端启动浏览器 Workbench：
+
+```bash
+npm run web:dev
+```
+
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。API 默认使用
+`http://127.0.0.1:8000`；如果端口被占用，`api:dev` 会选择其他本地端口，Web 启动器
+会从 `.bureauless-api-url` 读取实际地址。
+
+API 与 Web server 运行后，可以启动使用同一套 UI 的 Electron shell：
+
+```bash
+npm run desktop:dev
+```
+
+只检查 CLI 时可以运行：
+
+```bash
 uv run python -m bureauless mission validate examples/missions/demo/mission.yaml
 uv run python -m bureauless workflow compile examples/missions/demo/workflows/coder_reviewer_committer.yaml
-uv run python -m bureauless ready examples/optimization_dag.yaml
-uv run python -m bureauless prompt examples/optimization_dag.yaml baseline-inventory
-uv run python -m bureauless record examples/optimization_dag.yaml baseline-inventory \
-  --model gpt-5-mini \
-  --status passed \
-  --output-commit abc1234 \
-  --changed-file docs/baseline.md \
-  --verification "pytest -q"
-uv run python -m bureauless review examples/optimization_dag.yaml field-resolver-skeleton \
-  --status orchestrator_approved
+uv run python -m bureauless ledger replay \
+  examples/missions/demo/workflows/coder_reviewer_committer.yaml \
+  examples/missions/demo/ledger.yaml
 ```
 
-新 checkout 后可以直接用 `uv run`：
+运行当前维护的验证：
 
 ```bash
-uv run python -m bureauless ready examples/optimization_dag.yaml
+uv run python -m pytest -q
+npm run web:build
+npm run web:smoke
 ```
 
-安装 package 后，等价命令是：
-
-```bash
-bureauless ready examples/optimization_dag.yaml
-```
+`web:smoke` 会由 Playwright 自动启动或复用 Vite dev server。
 
 ## 核心想法
 
@@ -126,26 +148,19 @@ human review。
 
 ## 建议流程
 
-1. 编写或生成 DAG 文件。
-2. 运行 `ready` 找出可并行的任务。
-3. 为 ready 任务渲染 prompt。
-4. 把 prompt 发送给选定模型或线程。
-5. 记录执行结果。
-6. 审查带 gate 的节点。
-7. 重复直到 DAG 完成。
+1. 定义或加载 planning DAG、mission、workflow 和 ledger。
+2. 通过 Workbench 或 gatekeeper CLI 检查 runnable 与 blocked 状态。
+3. 导出带必要 context 和 review policy 的有边界 assignment。
+4. 手工执行，或通过受支持的 bounded session adapter 执行。
+5. 导入并 review result，再记录 accepted finding 和 event。
+6. replay ledger，只在下游 gate 满足后继续执行。
 
 ## 工作台
 
-Workbench 用来在自动化更多执行之前，先看清 DAG state、run、gate 和 record。它使用
-同一套 React UI 支持浏览器和 Electron。DAG 行为仍由 Python 通过本地 FastAPI API
-提供。
-
-安装依赖：
-
-```bash
-uv sync --dev
-npm install
-```
+Workbench 同时处理 planning-DAG 编辑，以及 mission、workflow、ledger、replay、
+gatekeeper、mutation、routing、outcome、evidence、context、telemetry、assignment、
+result、turn-report 和 dispatch artifact 的 runtime 检查。它使用同一套 React UI 支持
+浏览器和 Electron，Python 通过本地 FastAPI API 保持规则权威。
 
 运行本地 API：
 
@@ -167,7 +182,7 @@ npm run web:dev
 Vite dev server 会在启动时读取 `.bureauless-api-url`。如果 API 启动器从 `8000`
 切到了别的端口，重启一次 `web:dev`，前端代理就会跟上新的 API 地址。
 
-API 和 web server 运行后，可以执行浏览器 smoke test：
+执行浏览器 smoke test：
 
 ```bash
 npm run web:smoke
@@ -189,11 +204,9 @@ npm run mutation-demo:prepare
 npm run desktop:dev
 ```
 
-如果本地 npm 安装出来的 Electron 二进制不完整，启动器会自动回退到系统里的
-`electron39` 这类可执行文件。
-
-UI 默认跟随系统配色，也提供 `system / light / dark` 控制。DAG 文档和运行记录保持
-YAML-only。
+Playwright 会自动启动或复用 Vite dev server。如果本地 npm 安装出来的 Electron
+二进制不完整，启动器会自动回退到系统里的 `electron39` 这类可执行文件。UI 默认跟随
+系统配色，也提供 `system / light / dark` 控制。DAG 文档和运行记录保持 YAML-only。
 
 ## 源码结构
 
@@ -211,18 +224,14 @@ YAML-only。
 
 ## 文档
 
-设计笔记、协议草案和路线图在这里：
+先从文档地图开始，再通过两个 milestone 索引查看当前交付状态：
 
 - [`docs/README.md`](docs/README.md)
 - [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
 - [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_1_tasklist.md`](docs/tasks/runtime_harness_milestone_1_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_2_tasklist.md`](docs/tasks/runtime_harness_milestone_2_tasklist.md)
 - [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
-- [`docs/tasks/workbench_milestone_1_tasklist.md`](docs/tasks/workbench_milestone_1_tasklist.md)
-- [`docs/architecture/research_and_design_notes.md`](docs/architecture/research_and_design_notes.md)
-- [`docs/architecture/orchestrator_system_prompt.md`](docs/architecture/orchestrator_system_prompt.md)
-- [`docs/architecture/context_economy.md`](docs/architecture/context_economy.md)
+- [`docs/rfcs/README.md`](docs/rfcs/README.md)
+- [`docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
 - [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md)
 - [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
 - [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)
