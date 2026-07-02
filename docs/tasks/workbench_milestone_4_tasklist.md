@@ -1,8 +1,8 @@
 # Workbench Milestone 4 Task List
 
-Status: planned. Implementation has not started.
+Status: completed. Implementation accepted with build and smoke coverage.
 
-This is the next UI/workbench delivery milestone for BureauLess. It follows
+This is the completed UI/workbench delivery milestone for BureauLess. It follows
 the completed Workbench Milestone 3 source-loading work and closes the current
 inspection gap between the Workbench and the structured artifacts delivered by
 Runtime Harness Milestone 3.
@@ -34,15 +34,18 @@ API responses remain authoritative.
 - Make missing, invalid, and unavailable artifacts explicit states.
 - Keep planning-DAG controls separate from runtime artifact inspection.
 - Land each feature with focused component or smoke coverage.
+- Recommended models should use current native Codex model names and reflect
+  the complexity of the task rather than a fixed milestone-wide default.
 
 ## Workstream 1: Artifact Sources And API Contracts
 
 Goal: establish one typed, testable frontend boundary for the M3 API surface.
 
-### [ ] WB4-01: Runtime Artifact Session Manifest API
+### [x] WB4-01: Runtime Artifact Session Manifest API
 
-- Status: planned
+- Status: completed
 - Priority: high
+- Recommended model: gpt-5.4
 - Risk: medium
 - Dependencies: RM3-11 M3 Integrated Demo Fixture, RM3-12 M3 Runtime API
   Coverage
@@ -61,11 +64,24 @@ Goal: establish one typed, testable frontend boundary for the M3 API surface.
   - One `artifact_manifest_path` identifies the related M3 inspection set.
   - Invalid or incomplete manifests return structured API errors.
   - The endpoint discovers artifacts but does not reinterpret runtime policy.
+- Implementation notes:
+  - Added a validated `/api/artifact-session-manifest` endpoint backed by a
+    shared demo-application manifest loader instead of frontend YAML parsing.
+  - Expanded the maintained live-demo manifest to preserve per-step
+    `turn_report_path` and `dispatch_packet_path` references needed by later
+    Workbench M4 inspection tasks.
+  - Brought the demo routing decision payload into canonical protocol shape so
+    the manifest paths now resolve through the existing typed API endpoints.
+  - Verified with:
+    `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_server.py -q`
+    and
+    `env UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/test_harness.py -q -k "run_live_demo"`.
 
-### [ ] WB4-02: M3 Artifact API Client And Source Model
+### [x] WB4-02: M3 Artifact API Client And Source Model
 
-- Status: planned
+- Status: completed
 - Priority: high
+- Recommended model: gpt-5.4
 - Risk: medium
 - Dependencies: WB4-01, Workbench Milestone 3 runtime-source model
 - Target files:
@@ -88,16 +104,30 @@ Goal: establish one typed, testable frontend boundary for the M3 API surface.
   - The frontend can load every read-only M3 endpoint required by this
     milestone.
   - Missing optional artifacts do not prevent baseline runtime inspection.
+- Implementation notes:
+  - Added typed frontend client functions for the manifest, routing decision,
+    assignment, context, result, outcome, advisor, turn-report, dispatch, and
+    metrics endpoints used by Workbench M4.
+  - Extended the runtime source model, URL parsing, and local persistence with
+    `artifact_manifest_path` while keeping explicit `mission/workflow/ledger`
+    inputs authoritative when present.
+  - Added manifest-driven runtime source resolution so a shared Workbench URL
+    can open the M3 inspection baseline from one manifest path.
+  - Verified with:
+    `npm run web:build`
+    and
+    `npm --workspace apps/web run smoke -- --grep "runtime summary panels|artifact_manifest_path"`.
 
 ## Workstream 2: Decision And Outcome Inspection
 
 Goal: explain the orchestrator's choices and the observed result without
 requiring raw YAML inspection.
 
-### [ ] WB4-03: Routing And Advisor Inspector
+### [x] WB4-03: Routing And Advisor Inspector
 
-- Status: planned
+- Status: completed
 - Priority: high
+- Recommended model: gpt-5.4
 - Risk: medium
 - Dependencies: WB4-01, WB4-02; RM3-01 through RM3-04
 - Target files:
@@ -114,11 +144,23 @@ requiring raw YAML inspection.
   - `good_call`, `bad_call`, `good_skip`, and `missed_call` states are visible
     without the frontend recomputing them.
   - Missing evidence is shown as unavailable, not silently treated as a skip.
+- Implementation notes:
+  - Added a manifest-backed routing/advisor inspection panel that reads the
+    canonical routing decision and advisor outcome APIs directly.
+  - Exposed selected mode, rejected simpler modes, routing rationale, advisor
+    invoke/skip decision, advisor classification, token totals, and source
+    references without recomputing backend classifications in the UI.
+  - Added smoke coverage for the manifest-backed routing/advisor surface.
+  - Verified with:
+    `npm run web:build`
+    and
+    `npm --workspace apps/web run smoke -- --grep "artifact_manifest_path|routing and advisor inspector|runtime summary panels"`.
 
-### [ ] WB4-04: Node Outcome And Evidence Inspector
+### [x] WB4-04: Node Outcome And Evidence Inspector
 
-- Status: planned
+- Status: completed
 - Priority: high
+- Recommended model: gpt-5.4
 - Risk: medium
 - Dependencies: WB4-01, WB4-02; RM3-05, RM3-07
 - Target files:
@@ -136,15 +178,27 @@ requiring raw YAML inspection.
   - Selecting a linked runtime node exposes its outcome without changing
     gatekeeper or replay state.
   - Revision and rejection reasons remain inspectable.
+- Implementation notes:
+  - Linked selected runtime nodes to manifest-backed M3 steps and surfaced
+    node outcome state, workspace delta, execution evidence, accepted findings,
+    rejected findings, and review-decision references in the runtime node
+    inspector.
+  - Kept accepted ledger facts visually distinct from observed worker output in
+    separate inspection sections.
+  - Verified with:
+    `npm run web:build`
+    and
+    `npm --workspace apps/web run smoke -- --grep "node outcome and accepted evidence"`.
 
 ## Workstream 3: Context, Telemetry, And Dispatch Inspection
 
 Goal: show exactly what crossed the worker boundary and why.
 
-### [ ] WB4-05: Context Delivery Inspector
+### [x] WB4-05: Context Delivery Inspector
 
-- Status: planned
+- Status: completed
 - Priority: high
+- Recommended model: gpt-5.4
 - Risk: medium
 - Dependencies: WB4-01, WB4-02; RM3-08, RM3-09
 - Target files:
@@ -161,11 +215,23 @@ Goal: show exactly what crossed the worker boundary and why.
     later.
   - The UI does not imply that omitted ledger data was delivered.
   - Context request failures and unavailable evidence are explicit.
+- Implementation notes:
+  - Added manifest-backed context inspection for capsule policy version,
+    dependency closure, accepted facts, active risks, included artifact refs,
+    token estimate, and progressively disclosed context requests observed in
+    session metrics.
+  - Explicitly renders `No artifact step linked`, `none`, and `unavailable`
+    states so missing or omitted context evidence is never silently inferred.
+  - Verified with:
+    `npm run web:build`
+    and
+    `npm --workspace apps/web run smoke -- --grep "context delivery details"`.
 
-### [ ] WB4-06: Budget And Context Telemetry Inspector
+### [x] WB4-06: Budget And Context Telemetry Inspector
 
-- Status: planned
+- Status: completed
 - Priority: medium
+- Recommended model: gpt-5.4-mini
 - Risk: medium
 - Dependencies: WB4-01, WB4-02; RM3-02, RM3-03, RM3-10
 - Target files:
@@ -182,11 +248,22 @@ Goal: show exactly what crossed the worker boundary and why.
   - Operators can inspect the budget and context telemetry delivered by M3.
   - The frontend displays backend classifications without recomputing them.
   - Metrics failures do not hide the underlying runtime artifacts.
+- Implementation notes:
+  - Added telemetry inspection sourced from the canonical metrics APIs for
+    observed tokens, cost, advisor score counts, context-fit classification,
+    context-fit reason, total context requests, and added-token totals.
+  - The UI displays backend classifications directly and keeps unavailable
+    telemetry explicit instead of inferring zero values.
+  - Verified with:
+    `npm run web:build`
+    and
+    `npm --workspace apps/web run smoke -- --grep "budget telemetry and bounded handoff"`.
 
-### [ ] WB4-07: Assignment, Result, Turn, And Dispatch Inspector
+### [x] WB4-07: Assignment, Result, Turn, And Dispatch Inspector
 
-- Status: planned
+- Status: completed
 - Priority: medium
+- Recommended model: gpt-5.4-mini
 - Risk: medium
 - Dependencies: WB4-01, WB4-02; RM3-06, RM3-12
 - Target files:
@@ -204,15 +281,26 @@ Goal: show exactly what crossed the worker boundary and why.
   - An operator can inspect the complete bounded handoff and returned result.
   - Commit-like review constraints are visible when present.
   - This surface remains read-only.
+- Implementation notes:
+  - Added bounded handoff inspection for assignment, result, turn-report, and
+    dispatch-packet artifacts, including provider/model binding, expected
+    events, forbidden actions, required review gates, and turn-report policy.
+  - Kept the surface read-only and manifest-linked without adding any dispatch
+    action.
+  - Verified with:
+    `npm run web:build`
+    and
+    `npm --workspace apps/web run smoke -- --grep "budget telemetry and bounded handoff"`.
 
 ## Workstream 4: Integrated Acceptance And Documentation
 
 Goal: prove that the Workbench can inspect the maintained M3 path end to end.
 
-### [ ] WB4-08: M3 Demo Inspection Smoke Coverage
+### [x] WB4-08: M3 Demo Inspection Smoke Coverage
 
-- Status: planned
+- Status: completed
 - Priority: high
+- Recommended model: gpt-5.4-mini
 - Risk: medium
 - Dependencies: WB4-03 through WB4-07; RM3-11
 - Target files:
@@ -230,6 +318,14 @@ Goal: prove that the Workbench can inspect the maintained M3 path end to end.
   - The test fails if the frontend falls back to stale persisted artifact paths.
   - The roadmap and indexes are updated only after implementation acceptance is
     complete.
+- Implementation notes:
+  - Added a narrow-viewport manifest-backed smoke flow that covers routing,
+    advisor, outcome, evidence, context, telemetry, assignment, result,
+    turn-report, dispatch, and explicit missing-artifact states.
+  - Verified the complete frontend suite with:
+    `npm run web:build`
+    and
+    `npm --workspace apps/web run smoke`.
 
 ## Recommended Execution Order
 

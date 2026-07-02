@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import yaml
 
 from ..agents import doctor_agent, list_agent_specs
-from ..application.demo import prepare_demo_workspace
+from ..application.demo import load_artifact_session_manifest, prepare_demo_workspace
 from ..core import (
     Dag,
     create_node,
@@ -237,6 +237,10 @@ def create_app() -> FastAPI:
     @app.get("/api/routing-decision")
     def api_routing_decision(path: str) -> dict[str, Any]:
         return load_routing_decision(_load_yaml(path)).to_dict()
+
+    @app.get("/api/artifact-session-manifest")
+    def api_artifact_session_manifest(path: str) -> dict[str, Any]:
+        return load_artifact_session_manifest(Path(path))
 
     @app.get("/api/assignment")
     def api_assignment(path: str) -> dict[str, Any]:

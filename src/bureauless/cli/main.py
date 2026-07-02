@@ -13,6 +13,7 @@ from ..errors import ProtocolError
 from ..protocol.advisors import load_advisor_outcome
 from ..protocol.artifacts import sha256_file
 from ..protocol.assignments import export_assignment, load_assignment
+from ..protocol.dispatch import compile_dispatch_packet
 from ..protocol.harness import load_ledger, load_mission, load_workflow
 from ..protocol.ledger import append_ledger_event, write_ledger
 from ..protocol.outcomes import load_node_outcome, node_outcome_from_session
@@ -372,6 +373,7 @@ def run_live_demo(
     telemetry_dir = paths["telemetry_dir"]
     artifact_root = workspace
     workflow = load_workflow(workflow_path)
+    mission = load_mission(paths["mission"])
 
     routing_decision = _build_demo_routing_decision(workflow)
     routing_decision_path = decisions_dir / "routing_decision.yaml"
@@ -488,6 +490,25 @@ def run_live_demo(
         outcome_path = outcomes_dir / f"{node_id}_node_outcome.yaml"
         _write_yaml(outcome_path, outcome.to_dict())
 
+        dispatch_packet = compile_dispatch_packet(
+            mission,
+            workflow,
+            load_routing_decision(routing_decision),
+            assignment,
+            packet_id=f"packet-{session_id}",
+        )
+        dispatch_packet_path = decisions_dir / f"{node_id}_dispatch_packet.yaml"
+        _write_yaml(dispatch_packet_path, dispatch_packet.to_dict())
+
+        turn_report_payload = _build_demo_turn_report(
+            assignment=assignment,
+            session_record=telemetry_record,
+            packaged_result=packaged.to_dict(),
+            node_id=node_id,
+        )
+        turn_report_path = telemetry_dir / f"{node_id}_turn_report.yaml"
+        _write_yaml(turn_report_path, turn_report_payload)
+
         ledger = import_session_record(
             workflow,
             load_ledger(ledger_path),
@@ -523,10 +544,13 @@ def run_live_demo(
                 "node_id": node_id,
                 "assignment_path": str(assignment_path),
                 "context_capsule_path": str(capsule_path),
+                "context_request_path": None,
                 "session_path": str(session_path),
                 "result_path": str(result_path),
                 "node_outcome_path": str(outcome_path),
                 "review_decision_path": str(review_decision_path),
+                "turn_report_path": str(turn_report_path),
+                "dispatch_packet_path": str(dispatch_packet_path),
                 "record_status": record.status,
                 "emitted_events": (
                     packaged.emitted_events if record.status == "completed" else []
@@ -613,6 +637,23 @@ def _build_demo_routing_decision(workflow: Any) -> dict[str, Any]:
         ],
         "estimated_coordination_ratio": 0.18,
         "budget_confidence": "high",
+        "reason": (
+            "The demo workflow keeps implementation, review, and commit as separate "
+            "bounded nodes so replay, review, and dispatch remain inspectable."
+        ),
+        "budget_reason": "The staged demo remains well within the small_dag coordination target.",
+        "risk_reason": "The commit step stays explicitly gated behind the prior review outcome.",
+        "advisor_gate_decision": {
+            "invoked": False,
+            "policy_version": "0.1",
+            "reason": [
+                "parallel_width < 3",
+                "review_or_human_gate_count == 1",
+                "estimated_total_tokens < 80000",
+                "estimated_context_fanout_tokens < advisor_expected_tokens * 2",
+            ],
+            "decision_basis": "first_run_heuristic",
+        },
     }
 
 
@@ -630,6 +671,45 @@ def _build_demo_advisor_gate_decision(workflow: Any) -> dict[str, Any]:
                 "estimated_context_fanout_tokens < advisor_expected_tokens * 2",
             ],
             "decision_basis": "first_run_heuristic",
+        },
+    }
+
+
+def _build_demo_turn_report(
+    *,
+    assignment: Any,
+    session_record: dict[str, Any],
+    packaged_result: dict[str, Any],
+    node_id: str,
+) -> dict[str, Any]:
+    emitted_events = packaged_result.get("emitted_events", [])
+    summary = f"Completed node {node_id} and emitted {', '.join(emitted_events) or 'no workflow events'}."
+    return {
+        "report_id": f"turn-{session_record['session_id']}",
+        "assignment_id": assignment.assignment_id,
+        "agent_id": session_record["agent_id"],
+        "status": "completed",
+        "tool_calls_since_last_report": 1,
+        "summary": summary,
+        "new_findings": [
+            {
+                "finding_id": f"finding-{node_id}-live",
+                "kind": "execution_outcome",
+                "summary": summary,
+                "source_event": f"event-outcome-{session_record['session_id']}-decision",
+            }
+        ],
+        "artifact_refs": packaged_result.get("artifacts", []),
+        "blockers": [],
+        "suggested_ledger_updates": [
+            {
+                "type": "events_emitted",
+                "events": emitted_events,
+            }
+        ],
+        "token_usage": {
+            "input_tokens": int(session_record.get("outcome_metrics", {}).get("input_tokens", 0)),
+            "output_tokens": int(session_record.get("outcome_metrics", {}).get("output_tokens", 0)),
         },
     }
 

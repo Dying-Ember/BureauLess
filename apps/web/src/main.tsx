@@ -54,18 +54,35 @@ import {
   DEFAULT_LEDGER_PATH,
   DEFAULT_RUNS_DIR,
   DEFAULT_WORKFLOW_PATH,
+  fetchAssignment,
+  fetchAdvisorOutcome,
+  fetchArtifactSessionManifest,
+  fetchContextCapsuleByPath,
+  fetchContextRequest,
   fetchDag,
   fetchLedger,
   fetchGatekeeper,
+  fetchMetricsSummary,
   fetchMission,
   fetchMutations,
+  fetchNodeOutcome,
   fetchReplay,
   fetchPrompt,
+  fetchDispatchPacket,
+  fetchResult,
+  fetchRoutingDecision,
   fetchRuns,
   fetchState,
+  fetchTurnReport,
   fetchValidation,
+  type AdvisorOutcomeResponse,
+  type AssignmentResponse,
+  type ArtifactSessionManifestResponse,
+  type ContextCapsuleResponse,
   type GatekeeperBlockedReason,
   type GatekeeperDecision,
+  type MetricsSummaryResponse,
+  type RoutingDecisionResponse,
   type WorkbenchPaths,
   updateNodeDependencies,
   updateNodeMetadata,
@@ -74,6 +91,7 @@ import {
   type MutationProposalInspection,
   type MutationWorkbenchPaths,
   type MissionResponse,
+  type NodeOutcomeResponse,
   type LedgerResponse,
   type RuntimeWorkflow,
   type RuntimeWorkflowNode,
@@ -84,6 +102,7 @@ import {
   type ReviewAction,
   type RunRecord,
   type TaskNode,
+  type TurnReportResponse,
   type ValidationError,
 } from './api/client';
 import { type ThemeMode, useThemeMode } from './theme/theme';
@@ -509,41 +528,133 @@ function Workbench() {
   const { mode, setMode } = useThemeMode();
   const desktopBridge = getDesktopBridge();
   const graphDependencyMutation = useDependencySave(paths);
+  const artifactManifestPath = mutationPaths.artifactManifestPath.trim();
+  const artifactSessionManifest = useQuery({
+    queryKey: ['artifact-session-manifest', artifactManifestPath],
+    queryFn: () => fetchArtifactSessionManifest(artifactManifestPath),
+    enabled: viewMode === 'runtime' && artifactManifestPath.length > 0,
+  });
+  const routingDecisionPath = artifactSessionManifest.data?.routing_decision_path?.trim() ?? '';
+  const advisorOutcomePath = artifactSessionManifest.data?.advisor_gate_outcome_path?.trim() ?? '';
+  const routingDecision = useQuery({
+    queryKey: ['routing-decision', routingDecisionPath],
+    queryFn: () => fetchRoutingDecision(routingDecisionPath),
+    enabled: viewMode === 'runtime' && routingDecisionPath.length > 0,
+  });
+  const advisorOutcome = useQuery({
+    queryKey: ['advisor-outcome', advisorOutcomePath],
+    queryFn: () => fetchAdvisorOutcome(advisorOutcomePath),
+    enabled: viewMode === 'runtime' && advisorOutcomePath.length > 0,
+  });
+  const resolvedMutationPaths = useMemo(
+    () => resolveMutationWorkbenchPaths(mutationPaths, artifactSessionManifest.data),
+    [artifactSessionManifest.data, mutationPaths],
+  );
+  const selectedArtifactStep = useMemo(
+    () => {
+      const steps = artifactSessionManifest.data?.steps ?? [];
+      if (steps.length === 0) {
+        return null;
+      }
+      if (selectedRuntimeNodeId) {
+        return steps.find((step) => step.node_id === selectedRuntimeNodeId) ?? null;
+      }
+      return steps[0] ?? null;
+    },
+    [artifactSessionManifest.data, selectedRuntimeNodeId],
+  );
+  const selectedAssignmentPath = selectedArtifactStep?.assignment_path?.trim() ?? '';
+  const selectedContextCapsulePath = selectedArtifactStep?.context_capsule_path?.trim() ?? '';
+  const selectedContextRequestPath = selectedArtifactStep?.context_request_path?.trim() ?? '';
+  const selectedNodeOutcomePath = selectedArtifactStep?.node_outcome_path?.trim() ?? '';
+  const selectedResultPath = selectedArtifactStep?.result_path?.trim() ?? '';
+  const selectedTurnReportPath = selectedArtifactStep?.turn_report_path?.trim() ?? '';
+  const selectedDispatchPacketPath = selectedArtifactStep?.dispatch_packet_path?.trim() ?? '';
+  const selectedSessionMetricsPath = selectedArtifactStep?.session_path?.trim() ?? '';
+  const aggregateMetricsPath = artifactSessionManifest.data?.metrics_summary_path?.trim() ?? '';
+  const assignment = useQuery({
+    queryKey: ['assignment', selectedAssignmentPath],
+    queryFn: () => fetchAssignment(selectedAssignmentPath),
+    enabled: viewMode === 'runtime' && selectedAssignmentPath.length > 0,
+  });
+  const contextCapsule = useQuery({
+    queryKey: ['context-capsule', selectedContextCapsulePath],
+    queryFn: () => fetchContextCapsuleByPath(selectedContextCapsulePath),
+    enabled: viewMode === 'runtime' && selectedContextCapsulePath.length > 0,
+  });
+  const contextRequest = useQuery({
+    queryKey: ['context-request', selectedContextRequestPath],
+    queryFn: () => fetchContextRequest(selectedContextRequestPath),
+    enabled: viewMode === 'runtime' && selectedContextRequestPath.length > 0,
+  });
+  const nodeOutcome = useQuery({
+    queryKey: ['node-outcome', selectedNodeOutcomePath],
+    queryFn: () => fetchNodeOutcome(selectedNodeOutcomePath),
+    enabled: viewMode === 'runtime' && selectedNodeOutcomePath.length > 0,
+  });
+  const result = useQuery({
+    queryKey: ['result', selectedResultPath],
+    queryFn: () => fetchResult(selectedResultPath),
+    enabled: viewMode === 'runtime' && selectedResultPath.length > 0,
+  });
+  const turnReport = useQuery({
+    queryKey: ['turn-report', selectedTurnReportPath],
+    queryFn: () => fetchTurnReport(selectedTurnReportPath),
+    enabled: viewMode === 'runtime' && selectedTurnReportPath.length > 0,
+  });
+  const dispatchPacket = useQuery({
+    queryKey: ['dispatch-packet', selectedDispatchPacketPath],
+    queryFn: () => fetchDispatchPacket(selectedDispatchPacketPath),
+    enabled: viewMode === 'runtime' && selectedDispatchPacketPath.length > 0,
+  });
+  const sessionMetrics = useQuery({
+    queryKey: ['metrics', selectedSessionMetricsPath],
+    queryFn: () => fetchMetricsSummary(selectedSessionMetricsPath),
+    enabled: viewMode === 'runtime' && selectedSessionMetricsPath.length > 0,
+  });
+  const aggregateMetrics = useQuery({
+    queryKey: ['metrics-summary', aggregateMetricsPath],
+    queryFn: () => fetchMetricsSummary(aggregateMetricsPath),
+    enabled: viewMode === 'runtime' && aggregateMetricsPath.length > 0,
+  });
   const mutations = useQuery({
-    queryKey: ['mutations', mutationPaths.workflowPath, mutationPaths.ledgerPath],
-    queryFn: () => fetchMutations(mutationPaths.workflowPath, mutationPaths.ledgerPath),
+    queryKey: ['mutations', resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath],
+    queryFn: () => fetchMutations(resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath),
+    enabled: viewMode !== 'runtime' || hasResolvedRuntimePaths(resolvedMutationPaths),
   });
   const runtimeMissionPath = useMemo(
-    () => normalizeMutationWorkbenchPaths(mutationPaths).missionPath,
-    [mutationPaths],
+    () => resolvedMutationPaths.missionPath,
+    [resolvedMutationPaths],
   );
   const mission = useQuery({
     queryKey: ['mission', runtimeMissionPath],
     queryFn: () => fetchMission(runtimeMissionPath),
-    enabled: viewMode === 'runtime',
+    enabled: viewMode === 'runtime' && runtimeMissionPath.trim().length > 0,
   });
   const ledger = useQuery({
-    queryKey: ['ledger', mutationPaths.ledgerPath],
-    queryFn: () => fetchLedger(mutationPaths.ledgerPath),
-    enabled: viewMode === 'runtime',
+    queryKey: ['ledger', resolvedMutationPaths.ledgerPath],
+    queryFn: () => fetchLedger(resolvedMutationPaths.ledgerPath),
+    enabled: viewMode === 'runtime' && resolvedMutationPaths.ledgerPath.trim().length > 0,
   });
   const replay = useQuery({
-    queryKey: ['replay', mutationPaths.workflowPath, mutationPaths.ledgerPath],
-    queryFn: () => fetchReplay(mutationPaths.workflowPath, mutationPaths.ledgerPath),
+    queryKey: ['replay', resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath],
+    queryFn: () => fetchReplay(resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath),
+    enabled: viewMode !== 'runtime' || hasResolvedRuntimePaths(resolvedMutationPaths),
   });
   const gatekeeper = useQuery({
-    queryKey: ['gatekeeper', mutationPaths.workflowPath, mutationPaths.ledgerPath],
-    queryFn: () => fetchGatekeeper(mutationPaths.workflowPath, mutationPaths.ledgerPath),
+    queryKey: ['gatekeeper', resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath],
+    queryFn: () => fetchGatekeeper(resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath),
+    enabled: viewMode !== 'runtime' || hasResolvedRuntimePaths(resolvedMutationPaths),
   });
   const mutationDecision = useMutation({
     mutationFn: decideMutation,
     onSuccess: async (response) => {
       queryClient.setQueryData(
-        ['mutations', mutationPaths.workflowPath, mutationPaths.ledgerPath],
+        ['mutations', resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath],
         response,
       );
       await queryClient.invalidateQueries({
-        queryKey: ['gatekeeper', mutationPaths.workflowPath, mutationPaths.ledgerPath],
+        queryKey: ['gatekeeper', resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath],
       });
     },
   });
@@ -571,6 +682,15 @@ function Workbench() {
   useEffect(() => {
     setMutationPathDraft(mutationPaths);
   }, [mutationPaths]);
+
+  useEffect(() => {
+    if (!artifactSessionManifest.data) {
+      return;
+    }
+    setMutationPaths((current) =>
+      hydrateMutationWorkbenchPathsFromManifest(current, artifactSessionManifest.data),
+    );
+  }, [artifactSessionManifest.data]);
 
   const validationErrors = useMemo(
     () =>
@@ -875,30 +995,55 @@ function Workbench() {
   };
 
   const applyMutationPathDraft = () => {
-    const nextPaths = normalizeMutationWorkbenchPaths(mutationPathDraft);
+    const nextPaths = sanitizeMutationWorkbenchPaths(mutationPathDraft);
     setMutationPaths(nextPaths);
     persistMutationWorkbenchPaths(nextPaths);
   };
 
   const mutationPathDraftChanged = useMemo(
     () => {
-      const committed = normalizeMutationWorkbenchPaths(mutationPaths);
-      const draft = normalizeMutationWorkbenchPaths(mutationPathDraft);
+      const committed = sanitizeMutationWorkbenchPaths(mutationPaths);
+      const draft = sanitizeMutationWorkbenchPaths(mutationPathDraft);
       return (
         draft.missionPath !== committed.missionPath ||
         draft.workflowPath !== committed.workflowPath ||
-        draft.ledgerPath !== committed.ledgerPath
+        draft.ledgerPath !== committed.ledgerPath ||
+        draft.artifactManifestPath !== committed.artifactManifestPath
       );
     },
     [mutationPathDraft, mutationPaths],
   );
   const runtimeSourceError =
+    artifactSessionManifest.isError ||
+    routingDecision.isError ||
+    advisorOutcome.isError ||
+    assignment.isError ||
+    contextCapsule.isError ||
+    contextRequest.isError ||
+    nodeOutcome.isError ||
+    result.isError ||
+    turnReport.isError ||
+    dispatchPacket.isError ||
+    sessionMetrics.isError ||
+    aggregateMetrics.isError ||
     mission.isError ||
     ledger.isError ||
     mutations.isError ||
     replay.isError ||
     gatekeeper.isError;
   const runtimeSourceLoading =
+    artifactSessionManifest.isFetching ||
+    routingDecision.isFetching ||
+    advisorOutcome.isFetching ||
+    assignment.isFetching ||
+    contextCapsule.isFetching ||
+    contextRequest.isFetching ||
+    nodeOutcome.isFetching ||
+    result.isFetching ||
+    turnReport.isFetching ||
+    dispatchPacket.isFetching ||
+    sessionMetrics.isFetching ||
+    aggregateMetrics.isFetching ||
     mission.isFetching ||
     ledger.isFetching ||
     mutations.isFetching ||
@@ -1278,6 +1423,16 @@ function Workbench() {
               </div>
               <div className="metadata-form runtime-source-form">
                 <label className="field">
+                  <span>Artifact manifest path</span>
+                  <input
+                    type="text"
+                    value={mutationPathDraft.artifactManifestPath}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, artifactManifestPath: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
                   <span>Mission path</span>
                   <input
                     type="text"
@@ -1326,7 +1481,7 @@ function Workbench() {
                 </div>
               </div>
               <p className="runtime-source-note">
-                Runtime mode reads the workflow, mission, and ledger directly. Switch back to Planning DAG to edit graph structure.
+                Runtime mode reads the workflow, mission, ledger, and optional artifact manifest directly. Switch back to Planning DAG to edit graph structure.
               </p>
             </section>
           )}
@@ -1487,10 +1642,24 @@ function Workbench() {
           <>
             <RuntimeWorkflowOverview
               workflowId={mutations.data?.workflow_id ?? 'unavailable'}
-              workflowPath={mutationPaths.workflowPath}
-              ledgerPath={mutationPaths.ledgerPath}
+              workflowPath={resolvedMutationPaths.workflowPath}
+              ledgerPath={resolvedMutationPaths.ledgerPath}
               missionPath={runtimeMissionPath}
+              artifactManifestPath={artifactManifestPath}
               workflow={runtimeWorkflow}
+              artifactManifestQuery={artifactSessionManifest}
+              routingDecisionQuery={routingDecision}
+              advisorOutcomeQuery={advisorOutcome}
+              selectedArtifactStep={selectedArtifactStep}
+              assignmentQuery={assignment}
+              contextCapsuleQuery={contextCapsule}
+              contextRequestQuery={contextRequest}
+              nodeOutcomeQuery={nodeOutcome}
+              resultQuery={result}
+              turnReportQuery={turnReport}
+              dispatchPacketQuery={dispatchPacket}
+              sessionMetricsQuery={sessionMetrics}
+              aggregateMetricsQuery={aggregateMetrics}
               missionQuery={mission}
               ledgerQuery={ledger}
               runtimeFlow={runtimeFlow}
@@ -1510,7 +1679,7 @@ function Workbench() {
             <MutationPanel
               proposals={mutations.data?.proposals ?? []}
               currentNodeIds={runtimeCurrentNodeIds}
-              ledgerPath={mutationPaths.ledgerPath}
+              ledgerPath={resolvedMutationPaths.ledgerPath}
               isLoading={mutations.isLoading}
               error={mutations.error instanceof Error ? mutations.error.message : null}
               decisionError={
@@ -1523,8 +1692,8 @@ function Workbench() {
               onSelectNode={(nodeId) => setSelectedRuntimeNodeId(nodeId)}
               onDecision={(proposalEventId, decision, reason) =>
                 mutationDecision.mutate({
-                  workflow_path: mutationPaths.workflowPath,
-                  ledger_path: mutationPaths.ledgerPath,
+                  workflow_path: resolvedMutationPaths.workflowPath,
+                  ledger_path: resolvedMutationPaths.ledgerPath,
                   proposal_event_id: proposalEventId,
                   decision,
                   actor: 'human',
@@ -1597,7 +1766,21 @@ function RuntimeWorkflowOverview({
   workflowPath,
   ledgerPath,
   missionPath,
+  artifactManifestPath,
   workflow,
+  artifactManifestQuery,
+  routingDecisionQuery,
+  advisorOutcomeQuery,
+  selectedArtifactStep,
+  assignmentQuery,
+  contextCapsuleQuery,
+  contextRequestQuery,
+  nodeOutcomeQuery,
+  resultQuery,
+  turnReportQuery,
+  dispatchPacketQuery,
+  sessionMetricsQuery,
+  aggregateMetricsQuery,
   missionQuery,
   ledgerQuery,
   runtimeFlow,
@@ -1618,7 +1801,111 @@ function RuntimeWorkflowOverview({
   workflowPath: string;
   ledgerPath: string;
   missionPath: string;
+  artifactManifestPath: string;
   workflow: RuntimeWorkflow | null;
+  artifactManifestQuery: {
+    data?: ArtifactSessionManifestResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  routingDecisionQuery: {
+    data?: RoutingDecisionResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  advisorOutcomeQuery: {
+    data?: AdvisorOutcomeResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  selectedArtifactStep: {
+    node_id: string;
+    review_decision_path?: string;
+    review_event_id?: string;
+    node_outcome_path?: string;
+    assignment_path: string;
+    context_capsule_path: string;
+    session_path: string;
+    result_path?: string;
+  } | null;
+  assignmentQuery: {
+    data?: AssignmentResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  contextCapsuleQuery: {
+    data?: ContextCapsuleResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  contextRequestQuery: {
+    data?: {
+      context_request_id: string;
+      assignment_id: string;
+      missing_information: string;
+      requested_refs: string[];
+      expected_value?: string | null;
+    };
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  nodeOutcomeQuery: {
+    data?: NodeOutcomeResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  resultQuery: {
+    data?: {
+      result_id: string;
+      assignment_id: string;
+      status: string;
+      emitted_events: string[];
+      effective_model?: string | null;
+      effective_provider?: string | null;
+      verification: Record<string, unknown>;
+    };
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  turnReportQuery: {
+    data?: TurnReportResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  dispatchPacketQuery: {
+    data?: {
+      packet_id: string;
+      mission_id: string;
+      workflow_id: string;
+      review_constraints: Record<string, unknown>;
+      turn_report_policy: Record<string, unknown>;
+      assignment: AssignmentResponse;
+    };
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  sessionMetricsQuery: {
+    data?: MetricsSummaryResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  aggregateMetricsQuery: {
+    data?: MetricsSummaryResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
   missionQuery: {
     data?: MissionResponse;
     isLoading: boolean;
@@ -1670,6 +1957,24 @@ function RuntimeWorkflowOverview({
   const decisionCount = ledgerQuery.data?.decisions.length ?? 0;
   const missionGoal = missionQuery.data?.goal ?? ledgerQuery.data?.current_goal ?? 'unavailable';
   const missionStatus = missionQuery.data?.status ?? 'unavailable';
+  const manifestLoaded = Boolean(artifactManifestQuery.data);
+  const rejectedModes = routingDecisionQuery.data?.rejected_modes ?? [];
+  const advisorGateDecision = routingDecisionQuery.data?.advisor_gate_decision;
+  const advisorClassification = advisorOutcomeQuery.data?.classification ?? 'unavailable';
+  const priceSnapshotRef =
+    summarizePriceSnapshotAttribution(advisorOutcomeQuery.data?.price_snapshot_attribution) ?? 'unavailable';
+  const selectedReviewEvent =
+    selectedArtifactStep?.review_event_id && ledgerQuery.data?.event_log
+      ? ledgerQuery.data.event_log.find(
+          (event) =>
+            typeof event.event_id === 'string' &&
+            event.event_id === selectedArtifactStep.review_event_id,
+        ) ?? null
+      : null;
+  const selectedSessionMetricsEntry =
+    sessionMetricsQuery.data?.entries && sessionMetricsQuery.data.entries.length > 0
+      ? sessionMetricsQuery.data.entries[0]
+      : null;
 
   const handleRuntimeGraphPointerDownCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
@@ -1736,6 +2041,171 @@ function RuntimeWorkflowOverview({
           </small>
         </div>
       </div>
+      <section className="runtime-inspection-panel" aria-labelledby="runtime-routing-inspector-heading">
+        <div className="runtime-mini-panel-header">
+          <div className="pane-title" id="runtime-routing-inspector-heading">
+            <GitBranch size={16} />
+            Routing and advisor inspector
+          </div>
+          {artifactManifestPath ? <code title={artifactManifestPath}>{artifactManifestPath}</code> : null}
+        </div>
+        {artifactManifestQuery.isError ? (
+          <p className="runtime-mini-panel-note" role="alert">
+            {artifactManifestQuery.error instanceof Error
+              ? artifactManifestQuery.error.message
+              : 'Artifact manifest load failed'}
+          </p>
+        ) : !manifestLoaded ? (
+          <div className="empty-state-card" role="status" aria-live="polite">
+            <strong>Artifact manifest unavailable</strong>
+            <p>Add an artifact manifest path to inspect routing and advisor evidence.</p>
+          </div>
+        ) : (
+          <div className="runtime-inspection-grid">
+            <div className="runtime-inspection-card">
+              <div className="runtime-inspection-card-header">
+                <strong>Routing decision</strong>
+                <span className="pane-count">
+                  {routingDecisionQuery.data?.selected_mode ?? 'unavailable'}
+                </span>
+              </div>
+              {routingDecisionQuery.isError ? (
+                <p className="runtime-mini-panel-note" role="alert">
+                  {routingDecisionQuery.error instanceof Error
+                    ? routingDecisionQuery.error.message
+                    : 'Routing decision load failed'}
+                </p>
+              ) : routingDecisionQuery.isLoading ? (
+                <p className="runtime-mini-panel-note">Loading routing decision.</p>
+              ) : (
+                <>
+                  <dl className="runtime-mini-facts runtime-mini-facts-wide">
+                    <div>
+                      <dt>Selected mode</dt>
+                      <dd>{routingDecisionQuery.data?.selected_mode ?? 'unavailable'}</dd>
+                    </div>
+                    <div>
+                      <dt>Budget confidence</dt>
+                      <dd>{routingDecisionQuery.data?.budget_confidence ?? 'unavailable'}</dd>
+                    </div>
+                    <div>
+                      <dt>Coordination ratio</dt>
+                      <dd>{formatRatio(routingDecisionQuery.data?.estimated_coordination_ratio)}</dd>
+                    </div>
+                    <div>
+                      <dt>Policy version</dt>
+                      <dd>{routingDecisionQuery.data?.selection_policy_version ?? 'unavailable'}</dd>
+                    </div>
+                  </dl>
+                  <div className="runtime-inspection-section">
+                    <strong>Routing rationale</strong>
+                    <p>{routingDecisionQuery.data?.reason ?? 'unavailable'}</p>
+                    <p>{routingDecisionQuery.data?.budget_reason ?? 'Budget evidence unavailable.'}</p>
+                    <p>{routingDecisionQuery.data?.risk_reason ?? 'Risk evidence unavailable.'}</p>
+                  </div>
+                  <div className="runtime-inspection-section">
+                    <div className="runtime-inspection-section-header">
+                      <strong>Rejected simpler modes</strong>
+                      <span className="pane-count">{rejectedModes.length}</span>
+                    </div>
+                    <div className="runtime-inspection-list">
+                      {rejectedModes.length > 0 ? (
+                        rejectedModes.map((entry) => (
+                          <article className="runtime-inspection-item" key={entry.mode}>
+                            <strong>{entry.mode}</strong>
+                            <p>{entry.rejected_because}</p>
+                          </article>
+                        ))
+                      ) : (
+                        <span className="runtime-link-empty">unavailable</span>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="runtime-inspection-card">
+              <div className="runtime-inspection-card-header">
+                <strong>Advisor gate</strong>
+                <span
+                  className={`state-pill runtime-state-pill ${
+                    advisorOutcomeQuery.data?.status === 'scored' ? 'completed' : 'blocked'
+                  }`}
+                >
+                  {advisorOutcomeQuery.data?.status ?? 'unavailable'}
+                </span>
+              </div>
+              {advisorOutcomeQuery.isError ? (
+                <p className="runtime-mini-panel-note" role="alert">
+                  {advisorOutcomeQuery.error instanceof Error
+                    ? advisorOutcomeQuery.error.message
+                    : 'Advisor outcome load failed'}
+                </p>
+              ) : advisorOutcomeQuery.isLoading ? (
+                <p className="runtime-mini-panel-note">Loading advisor outcome.</p>
+              ) : (
+                <>
+                  <dl className="runtime-mini-facts runtime-mini-facts-wide">
+                    <div>
+                      <dt>Invoke decision</dt>
+                      <dd>{formatAdvisorInvokeDecision(advisorGateDecision?.invoked)}</dd>
+                    </div>
+                    <div>
+                      <dt>Classification</dt>
+                      <dd>{advisorClassification}</dd>
+                    </div>
+                    <div>
+                      <dt>Actual advisor tokens</dt>
+                      <dd>{formatOptionalNumber(advisorOutcomeQuery.data?.actual_advisor_tokens)}</dd>
+                    </div>
+                    <div>
+                      <dt>Actual total tokens</dt>
+                      <dd>{formatOptionalNumber(advisorOutcomeQuery.data?.actual_total_tokens)}</dd>
+                    </div>
+                    <div>
+                      <dt>Price snapshot</dt>
+                      <dd>{priceSnapshotRef}</dd>
+                    </div>
+                    <div>
+                      <dt>Duplicate context observed</dt>
+                      <dd>{formatOptionalBoolean(advisorOutcomeQuery.data?.duplicate_context_observed)}</dd>
+                    </div>
+                  </dl>
+                  <div className="runtime-inspection-section">
+                    <strong>Advisor decision basis</strong>
+                    <p>{advisorGateDecision?.decision_basis ?? 'unavailable'}</p>
+                    <div className="runtime-link-list">
+                      {(advisorGateDecision?.reason ?? []).length > 0 ? (
+                        (advisorGateDecision?.reason ?? []).map((reason) => (
+                          <code key={reason} className="runtime-link-chip">{reason}</code>
+                        ))
+                      ) : (
+                        <span className="runtime-link-empty">unavailable</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="runtime-inspection-section">
+                    <strong>Source references</strong>
+                    <div className="runtime-link-list">
+                      <code className="runtime-link-chip">
+                        {advisorOutcomeQuery.data?.source_decision_ref ?? 'unavailable'}
+                      </code>
+                      <code className="runtime-link-chip">
+                        {advisorOutcomeQuery.data?.advisor_decision_ref ?? 'unavailable'}
+                      </code>
+                    </div>
+                    {advisorOutcomeQuery.data?.status === 'pending' ? (
+                      <p>{advisorOutcomeQuery.data.pending_reason ?? 'Pending reason unavailable.'}</p>
+                    ) : (
+                      <p>{advisorOutcomeQuery.data?.notes ?? 'Advisor notes unavailable.'}</p>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
       <div className="runtime-summary-split">
         <section className="runtime-mini-panel" aria-labelledby="runtime-mission-summary-heading" aria-busy={missionQuery.isLoading}>
           <div className="runtime-mini-panel-header">
@@ -2148,6 +2618,346 @@ function RuntimeWorkflowOverview({
                   <dd>{selectedNode.data.gateCount}</dd>
                 </div>
               </dl>
+              <div className="runtime-blocked-reasons" aria-label="Outcome and evidence inspector">
+                <div className="runtime-blocked-reasons-header">
+                  <AlertCircle size={14} />
+                  <strong>Outcome and evidence</strong>
+                </div>
+                {!selectedArtifactStep ? (
+                  <div className="empty-state-card" role="status" aria-live="polite">
+                    <strong>No artifact step linked</strong>
+                    <p>The selected runtime node does not have a manifest-backed M3 artifact step.</p>
+                  </div>
+                ) : nodeOutcomeQuery.isError ? (
+                  <p className="mutation-error" role="alert">
+                    {nodeOutcomeQuery.error instanceof Error
+                      ? nodeOutcomeQuery.error.message
+                      : 'Node outcome load failed'}
+                  </p>
+                ) : nodeOutcomeQuery.isLoading ? (
+                  <p className="runtime-mini-panel-note">Loading node outcome.</p>
+                ) : (
+                  <>
+                    <dl className="runtime-node-inspector-facts">
+                      <div>
+                        <dt>Outcome status</dt>
+                        <dd>{nodeOutcomeQuery.data?.status ?? 'unavailable'}</dd>
+                      </div>
+                      <div>
+                        <dt>Workspace delta</dt>
+                        <dd>
+                          {formatObservedDeltaSummary(nodeOutcomeQuery.data?.observed_delta)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Pre state</dt>
+                        <dd>{nodeOutcomeQuery.data?.pre_state_ref ?? 'unavailable'}</dd>
+                      </div>
+                      <div>
+                        <dt>Post state</dt>
+                        <dd>{nodeOutcomeQuery.data?.post_state_ref ?? 'unavailable'}</dd>
+                      </div>
+                    </dl>
+                    <div className="runtime-replay-section">
+                      <div className="runtime-replay-section-header">
+                        <strong>Execution evidence</strong>
+                        <span className="pane-count">
+                          {(nodeOutcomeQuery.data?.diff_refs?.length ?? 0) +
+                            (selectedReviewEvent?.evidence_refs instanceof Array
+                              ? selectedReviewEvent.evidence_refs.length
+                              : 0)}
+                        </span>
+                      </div>
+                      <div className="runtime-link-list">
+                        {(nodeOutcomeQuery.data?.diff_refs?.length ?? 0) > 0 ? (
+                          nodeOutcomeQuery.data?.diff_refs.map((ref, index) => (
+                            <code className="runtime-link-chip" key={`diff:${index}`}>
+                              {formatArtifactReference(ref)}
+                            </code>
+                          ))
+                        ) : (
+                          <span className="runtime-link-empty">unavailable</span>
+                        )}
+                        {selectedReviewEvent?.evidence_refs instanceof Array
+                          ? selectedReviewEvent.evidence_refs.map((ref) =>
+                              typeof ref === 'string' ? (
+                                <code className="runtime-link-chip" key={`evidence:${ref}`}>{ref}</code>
+                              ) : null,
+                            )
+                          : null}
+                      </div>
+                    </div>
+                    <div className="runtime-replay-section">
+                      <div className="runtime-replay-section-header">
+                        <strong>Accepted ledger facts</strong>
+                        <span className="pane-count">
+                          {selectedReviewEvent?.accepted_findings instanceof Array
+                            ? selectedReviewEvent.accepted_findings.length
+                            : 0}
+                        </span>
+                      </div>
+                      <div className="runtime-replay-list">
+                        {selectedReviewEvent?.accepted_findings instanceof Array &&
+                        selectedReviewEvent.accepted_findings.length > 0 ? (
+                          selectedReviewEvent.accepted_findings.map((finding, index) => (
+                            <article className="runtime-replay-card" key={`accepted:${index}`}>
+                              <div className="runtime-replay-card-head">
+                                <strong>{stringField(finding, 'finding_id') ?? `finding-${index + 1}`}</strong>
+                                <span className="state-pill runtime-state-pill completed">accepted</span>
+                              </div>
+                              <p>{stringField(finding, 'content') ?? 'unavailable'}</p>
+                            </article>
+                          ))
+                        ) : (
+                          <span className="runtime-link-empty">none</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="runtime-replay-section">
+                      <div className="runtime-replay-section-header">
+                        <strong>Rejected findings</strong>
+                        <span className="pane-count">
+                          {selectedReviewEvent?.rejected_findings instanceof Array
+                            ? selectedReviewEvent.rejected_findings.length
+                            : 0}
+                        </span>
+                      </div>
+                      <div className="runtime-replay-list">
+                        {selectedReviewEvent?.rejected_findings instanceof Array &&
+                        selectedReviewEvent.rejected_findings.length > 0 ? (
+                          selectedReviewEvent.rejected_findings.map((finding, index) => (
+                            <article className="runtime-replay-card" key={`rejected:${index}`}>
+                              <div className="runtime-replay-card-head">
+                                <strong>{stringField(finding, 'finding_id') ?? `finding-${index + 1}`}</strong>
+                                <span className="state-pill runtime-state-pill blocked">rejected</span>
+                              </div>
+                              <p>{stringField(finding, 'reason') ?? 'unavailable'}</p>
+                            </article>
+                          ))
+                        ) : (
+                          <span className="runtime-link-empty">none</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="runtime-link-list">
+                      <code className="runtime-link-chip">
+                        {selectedArtifactStep.review_decision_path ?? 'unavailable'}
+                      </code>
+                      <code className="runtime-link-chip">
+                        {selectedArtifactStep.node_outcome_path ?? 'unavailable'}
+                      </code>
+                    </div>
+                    <div className="runtime-replay-section">
+                      <div className="runtime-replay-section-header">
+                        <strong>Context delivery</strong>
+                        <span className="pane-count">
+                          {arrayLength(contextCapsuleQuery.data?.accepted_facts)}
+                        </span>
+                      </div>
+                      {contextCapsuleQuery.isError ? (
+                        <p className="mutation-error" role="alert">
+                          {contextCapsuleQuery.error instanceof Error
+                            ? contextCapsuleQuery.error.message
+                            : 'Context capsule load failed'}
+                        </p>
+                      ) : contextCapsuleQuery.isLoading ? (
+                        <p className="runtime-mini-panel-note">Loading context capsule.</p>
+                      ) : (
+                        <>
+                          <dl className="runtime-node-inspector-facts">
+                            <div>
+                              <dt>Policy version</dt>
+                              <dd>{stringField(contextCapsuleQuery.data ?? {}, 'policy_version') ?? 'unavailable'}</dd>
+                            </div>
+                            <div>
+                              <dt>Token estimate</dt>
+                              <dd>{formatMetricNumber(selectedSessionMetricsEntry, 'context_capsule_tokens')}</dd>
+                            </div>
+                            <div>
+                              <dt>Dependency closure</dt>
+                              <dd>{joinStringArray(contextCapsuleQuery.data?.dependency_node_ids)}</dd>
+                            </div>
+                            <div>
+                              <dt>Context fit</dt>
+                              <dd>{formatMetricString(selectedSessionMetricsEntry, 'context_fit_classification')}</dd>
+                            </div>
+                          </dl>
+                          <div className="runtime-link-list">
+                            {recordStringArray(contextCapsuleQuery.data?.artifact_refs).length > 0 ? (
+                              recordStringArray(contextCapsuleQuery.data?.artifact_refs).map((ref, index) => (
+                                <code className="runtime-link-chip" key={`context-ref:${index}`}>{ref}</code>
+                              ))
+                            ) : (
+                              <span className="runtime-link-empty">unavailable</span>
+                            )}
+                          </div>
+                          <div className="runtime-replay-list">
+                            {recordArray(contextCapsuleQuery.data?.accepted_facts).map((finding, index) => (
+                              <article className="runtime-replay-card" key={`context-fact:${index}`}>
+                                <div className="runtime-replay-card-head">
+                                  <strong>{stringField(finding, 'finding_id') ?? `fact-${index + 1}`}</strong>
+                                  <span className="state-pill runtime-state-pill completed">included</span>
+                                </div>
+                                <p>{stringField(finding, 'content') ?? 'unavailable'}</p>
+                              </article>
+                            ))}
+                            {recordArray(contextCapsuleQuery.data?.active_risks).map((risk, index) => (
+                              <article className="runtime-replay-card" key={`context-risk:${index}`}>
+                                <div className="runtime-replay-card-head">
+                                  <strong>{stringField(risk, 'risk_id') ?? `risk-${index + 1}`}</strong>
+                                  <span className="state-pill runtime-state-pill blocked">risk</span>
+                                </div>
+                                <p>{stringField(risk, 'summary') ?? 'unavailable'}</p>
+                              </article>
+                            ))}
+                          </div>
+                          {contextRequestQuery.data ? (
+                            <article className="runtime-replay-card">
+                              <div className="runtime-replay-card-head">
+                                <strong>{contextRequestQuery.data.context_request_id}</strong>
+                                <span className="state-pill runtime-state-pill completed">granted later</span>
+                              </div>
+                              <p>{contextRequestQuery.data.missing_information}</p>
+                              <div className="runtime-link-list">
+                                {contextRequestQuery.data.requested_refs.map((ref) => (
+                                  <code className="runtime-link-chip" key={ref}>{ref}</code>
+                                ))}
+                              </div>
+                            </article>
+                          ) : null}
+                          {recordArray(selectedSessionMetricsEntry?.context_requests).map((request, index) => (
+                            <article className="runtime-replay-card" key={`context-request-metric:${index}`}>
+                              <div className="runtime-replay-card-head">
+                                <strong>{stringField(request, 'reason') ?? `request-${index + 1}`}</strong>
+                                <span className="state-pill runtime-state-pill completed">progressive disclosure</span>
+                              </div>
+                              <div className="runtime-link-list">
+                                {joinStringArray(request.requested_refs)
+                                  .split(', ')
+                                  .filter((item) => item !== 'none')
+                                  .map((ref) => (
+                                    <code className="runtime-link-chip" key={`requested-ref:${ref}`}>{ref}</code>
+                                  ))}
+                              </div>
+                            </article>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                    <div className="runtime-replay-section">
+                      <div className="runtime-replay-section-header">
+                        <strong>Budget and context telemetry</strong>
+                        <span className="pane-count">
+                          {formatMetricNumber(aggregateMetricsQuery.data?.observed_budget, 'total_tokens_used')}
+                        </span>
+                      </div>
+                      {sessionMetricsQuery.isError || aggregateMetricsQuery.isError ? (
+                        <p className="mutation-error" role="alert">
+                          {sessionMetricsQuery.error instanceof Error
+                            ? sessionMetricsQuery.error.message
+                            : aggregateMetricsQuery.error instanceof Error
+                              ? aggregateMetricsQuery.error.message
+                              : 'Metrics load failed'}
+                        </p>
+                      ) : sessionMetricsQuery.isLoading || aggregateMetricsQuery.isLoading ? (
+                        <p className="runtime-mini-panel-note">Loading telemetry.</p>
+                      ) : (
+                        <>
+                          <dl className="runtime-node-inspector-facts">
+                            <div>
+                              <dt>Observed tokens</dt>
+                              <dd>{formatMetricNumber(selectedSessionMetricsEntry, 'total_tokens')}</dd>
+                            </div>
+                            <div>
+                              <dt>Observed cost</dt>
+                              <dd>{formatCurrency(selectedSessionMetricsEntry?.cost_usd)}</dd>
+                            </div>
+                            <div>
+                              <dt>Price snapshot</dt>
+                              <dd>{formatMetricNumber(mappingField(aggregateMetricsQuery.data?.advisor_score_summary, 'classification_counts'), 'good_skip')}</dd>
+                            </div>
+                            <div>
+                              <dt>Context fit reason</dt>
+                              <dd>{formatMetricString(selectedSessionMetricsEntry, 'context_fit_reason')}</dd>
+                            </div>
+                          </dl>
+                          <div className="runtime-link-list">
+                            <code className="runtime-link-chip">
+                              total context requests: {formatMetricNumber(aggregateMetricsQuery.data?.context_summary, 'total_context_requests')}
+                            </code>
+                            <code className="runtime-link-chip">
+                              added tokens: {formatMetricNumber(aggregateMetricsQuery.data?.context_summary, 'total_added_tokens')}
+                            </code>
+                            <code className="runtime-link-chip">
+                              good_skip: {formatMetricNumber(mappingField(aggregateMetricsQuery.data?.advisor_score_summary, 'classification_counts'), 'good_skip')}
+                            </code>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                    <div className="runtime-replay-section">
+                      <div className="runtime-replay-section-header">
+                        <strong>Assignment, result, turn, and dispatch</strong>
+                        <span className="pane-count">{assignmentQuery.data?.assignment_id ?? 'unavailable'}</span>
+                      </div>
+                      {assignmentQuery.isError || resultQuery.isError || turnReportQuery.isError || dispatchPacketQuery.isError ? (
+                        <p className="mutation-error" role="alert">
+                          {assignmentQuery.error instanceof Error
+                            ? assignmentQuery.error.message
+                            : resultQuery.error instanceof Error
+                              ? resultQuery.error.message
+                              : turnReportQuery.error instanceof Error
+                                ? turnReportQuery.error.message
+                                : dispatchPacketQuery.error instanceof Error
+                                  ? dispatchPacketQuery.error.message
+                                  : 'Dispatch inspection load failed'}
+                        </p>
+                      ) : assignmentQuery.isLoading ||
+                        resultQuery.isLoading ||
+                        turnReportQuery.isLoading ||
+                        dispatchPacketQuery.isLoading ? (
+                        <p className="runtime-mini-panel-note">Loading bounded handoff artifacts.</p>
+                      ) : (
+                        <>
+                          <dl className="runtime-node-inspector-facts">
+                            <div>
+                              <dt>Agent</dt>
+                              <dd>{assignmentQuery.data?.role ?? 'unavailable'}</dd>
+                            </div>
+                            <div>
+                              <dt>Provider / model</dt>
+                              <dd>{formatProviderModel(resultQuery.data)}</dd>
+                            </div>
+                            <div>
+                              <dt>Result status</dt>
+                              <dd>{resultQuery.data?.status ?? 'unavailable'}</dd>
+                            </div>
+                            <div>
+                              <dt>Turn report</dt>
+                              <dd>{turnReportQuery.data?.status ?? 'unavailable'}</dd>
+                            </div>
+                          </dl>
+                          <div className="runtime-link-list">
+                            <code className="runtime-link-chip">
+                              expected events: {joinStringArray(assignmentQuery.data?.expected_events)}
+                            </code>
+                            <code className="runtime-link-chip">
+                              forbidden actions: {joinStringArray(assignmentQuery.data?.forbidden_actions)}
+                            </code>
+                            <code className="runtime-link-chip">
+                              review gates: {joinStringArray(readRequiredGateIds(dispatchPacketQuery.data?.review_constraints))}
+                            </code>
+                            <code className="runtime-link-chip">
+                              report tokens: {formatMetricNumber(dispatchPacketQuery.data?.turn_report_policy, 'max_report_tokens')}
+                            </code>
+                          </div>
+                          <p className="runtime-mini-panel-note">{turnReportQuery.data?.summary ?? 'Turn summary unavailable.'}</p>
+                        </>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           )}
         </section>
@@ -4985,34 +5795,55 @@ function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
       missionPath: deriveMissionPath(DEFAULT_LEDGER_PATH),
       workflowPath: DEFAULT_WORKFLOW_PATH,
       ledgerPath: DEFAULT_LEDGER_PATH,
+      artifactManifestPath: '',
     };
   }
   const search = new URLSearchParams(window.location.search);
   const searchLedgerPath = search.get('ledger_path')?.trim();
   const searchWorkflowPath = search.get('workflow_path')?.trim();
   const searchMissionPath = search.get('mission_path')?.trim();
+  const searchArtifactManifestPath = search.get('artifact_manifest_path')?.trim();
   if (hasExplicitRuntimeSourceQuery(search)) {
-    const ledgerPath = searchLedgerPath || DEFAULT_LEDGER_PATH;
-    return {
-      missionPath: searchMissionPath || deriveMissionPath(ledgerPath),
-      workflowPath: searchWorkflowPath || DEFAULT_WORKFLOW_PATH,
-      ledgerPath,
-    };
+    const explicitArtifactOnly =
+      Boolean(searchArtifactManifestPath) &&
+      !searchMissionPath &&
+      !searchWorkflowPath &&
+      !searchLedgerPath;
+    if (explicitArtifactOnly) {
+      return sanitizeMutationWorkbenchPaths({
+        missionPath: '',
+        workflowPath: '',
+        ledgerPath: '',
+        artifactManifestPath: searchArtifactManifestPath ?? '',
+      });
+    }
+    return sanitizeMutationWorkbenchPaths({
+      missionPath: searchMissionPath ?? (searchLedgerPath ? deriveMissionPath(searchLedgerPath) : ''),
+      workflowPath: searchWorkflowPath ?? '',
+      ledgerPath: searchLedgerPath ?? '',
+      artifactManifestPath: searchArtifactManifestPath ?? '',
+    });
   }
 
   const storedMissionPath = window.localStorage.getItem('bureauless.missionPath');
   const storedWorkflowPath = window.localStorage.getItem('bureauless.workflowPath');
   const storedLedgerPath = window.localStorage.getItem('bureauless.ledgerPath');
-  const ledgerPath = storedLedgerPath?.trim() || DEFAULT_LEDGER_PATH;
-  return {
-    missionPath: storedMissionPath?.trim() || deriveMissionPath(ledgerPath),
+  const storedArtifactManifestPath = window.localStorage.getItem('bureauless.artifactManifestPath');
+  return sanitizeMutationWorkbenchPaths({
+    missionPath: storedMissionPath?.trim() || deriveMissionPath(storedLedgerPath?.trim() || DEFAULT_LEDGER_PATH),
     workflowPath: storedWorkflowPath?.trim() || DEFAULT_WORKFLOW_PATH,
-    ledgerPath,
-  };
+    ledgerPath: storedLedgerPath?.trim() || DEFAULT_LEDGER_PATH,
+    artifactManifestPath: storedArtifactManifestPath?.trim() || '',
+  });
 }
 
 function hasExplicitRuntimeSourceQuery(search: URLSearchParams): boolean {
-  return search.has('mission_path') || search.has('workflow_path') || search.has('ledger_path');
+  return (
+    search.has('mission_path') ||
+    search.has('workflow_path') ||
+    search.has('ledger_path') ||
+    search.has('artifact_manifest_path')
+  );
 }
 
 function deriveMissionPath(ledgerPath: string): string {
@@ -5020,12 +5851,12 @@ function deriveMissionPath(ledgerPath: string): string {
   return missionFromLedger === ledgerPath ? DEFAULT_MISSION_PATH : missionFromLedger;
 }
 
-function normalizeMutationWorkbenchPaths(paths: MutationWorkbenchPaths): MutationWorkbenchPaths {
-  const ledgerPath = paths.ledgerPath.trim() || DEFAULT_LEDGER_PATH;
+function sanitizeMutationWorkbenchPaths(paths: MutationWorkbenchPaths): MutationWorkbenchPaths {
   return {
-    missionPath: paths.missionPath.trim() || deriveMissionPath(ledgerPath),
-    workflowPath: paths.workflowPath.trim() || DEFAULT_WORKFLOW_PATH,
-    ledgerPath,
+    missionPath: paths.missionPath.trim(),
+    workflowPath: paths.workflowPath.trim(),
+    ledgerPath: paths.ledgerPath.trim(),
+    artifactManifestPath: paths.artifactManifestPath.trim(),
   };
 }
 
@@ -5034,10 +5865,200 @@ function persistMutationWorkbenchPaths(paths: MutationWorkbenchPaths): void {
     return;
   }
 
-  const normalized = normalizeMutationWorkbenchPaths(paths);
+  const normalized = sanitizeMutationWorkbenchPaths(paths);
   window.localStorage.setItem('bureauless.missionPath', normalized.missionPath);
   window.localStorage.setItem('bureauless.workflowPath', normalized.workflowPath);
   window.localStorage.setItem('bureauless.ledgerPath', normalized.ledgerPath);
+  window.localStorage.setItem('bureauless.artifactManifestPath', normalized.artifactManifestPath);
+}
+
+function resolveMutationWorkbenchPaths(
+  paths: MutationWorkbenchPaths,
+  artifactManifest: ArtifactSessionManifestResponse | undefined,
+): MutationWorkbenchPaths {
+  const sanitized = sanitizeMutationWorkbenchPaths(paths);
+  if (
+    sanitized.artifactManifestPath &&
+    !artifactManifest &&
+    !sanitized.missionPath &&
+    !sanitized.workflowPath &&
+    !sanitized.ledgerPath
+  ) {
+    return sanitized;
+  }
+  const manifestLedgerPath = artifactManifest?.ledger_path?.trim() ?? '';
+  const ledgerPath = sanitized.ledgerPath || manifestLedgerPath || DEFAULT_LEDGER_PATH;
+  return {
+    missionPath:
+      sanitized.missionPath ||
+      artifactManifest?.mission_path?.trim() ||
+      deriveMissionPath(ledgerPath),
+    workflowPath:
+      sanitized.workflowPath ||
+      artifactManifest?.workflow_path?.trim() ||
+      DEFAULT_WORKFLOW_PATH,
+    ledgerPath,
+    artifactManifestPath: sanitized.artifactManifestPath,
+  };
+}
+
+function hydrateMutationWorkbenchPathsFromManifest(
+  paths: MutationWorkbenchPaths,
+  artifactManifest: ArtifactSessionManifestResponse,
+): MutationWorkbenchPaths {
+  const sanitized = sanitizeMutationWorkbenchPaths(paths);
+  if (sanitized.missionPath || sanitized.workflowPath || sanitized.ledgerPath) {
+    return sanitized;
+  }
+  return {
+    ...sanitized,
+    missionPath: artifactManifest.mission_path,
+    workflowPath: artifactManifest.workflow_path,
+    ledgerPath: artifactManifest.ledger_path,
+  };
+}
+
+function hasResolvedRuntimePaths(paths: MutationWorkbenchPaths): boolean {
+  return paths.workflowPath.trim().length > 0 && paths.ledgerPath.trim().length > 0;
+}
+
+function formatRatio(value: number | undefined): string {
+  return typeof value === 'number' ? value.toFixed(2) : 'unavailable';
+}
+
+function formatOptionalNumber(value: number | undefined): string {
+  return typeof value === 'number' ? String(value) : 'unavailable';
+}
+
+function formatOptionalBoolean(value: boolean | undefined): string {
+  if (typeof value !== 'boolean') {
+    return 'unavailable';
+  }
+  return value ? 'yes' : 'no';
+}
+
+function formatAdvisorInvokeDecision(value: boolean | undefined): string {
+  if (typeof value !== 'boolean') {
+    return 'unavailable';
+  }
+  return value ? 'invoked' : 'skipped';
+}
+
+function summarizePriceSnapshotAttribution(
+  attribution: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!attribution) {
+    return null;
+  }
+  const provider = typeof attribution.provider === 'string' ? attribution.provider : null;
+  const model = typeof attribution.model === 'string' ? attribution.model : null;
+  if (provider && model) {
+    return `${provider}/${model}`;
+  }
+  if (provider) {
+    return provider;
+  }
+  if (model) {
+    return model;
+  }
+  return 'available';
+}
+
+function formatObservedDeltaSummary(delta: Record<string, unknown> | undefined): string {
+  if (!delta) {
+    return 'unavailable';
+  }
+  const changedFilesCount =
+    typeof delta.changed_files_count === 'number' ? delta.changed_files_count : null;
+  const patchBytes = typeof delta.patch_bytes === 'number' ? delta.patch_bytes : null;
+  const parts = [
+    changedFilesCount !== null ? `${changedFilesCount} changed file${changedFilesCount === 1 ? '' : 's'}` : null,
+    patchBytes !== null ? `${patchBytes} patch bytes` : null,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(', ') || 'unavailable';
+}
+
+function formatArtifactReference(reference: Record<string, unknown>): string {
+  return (
+    stringField(reference, 'artifact_id') ??
+    stringField(reference, 'path') ??
+    stringField(reference, 'ref') ??
+    'unavailable'
+  );
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function recordArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object') : [];
+}
+
+function recordStringArray(value: unknown): string[] {
+  return recordArray(value).map((item) => formatArtifactReference(item)).filter((item) => item !== 'unavailable');
+}
+
+function arrayLength(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function joinStringArray(value: unknown): string {
+  if (!Array.isArray(value)) {
+    return 'none';
+  }
+  const items = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+  return items.length > 0 ? items.join(', ') : 'none';
+}
+
+function formatMetricNumber(record: Record<string, unknown> | null | undefined, key: string): string {
+  if (!record) {
+    return 'unavailable';
+  }
+  const value = record[key];
+  return typeof value === 'number' ? String(value) : 'unavailable';
+}
+
+function formatMetricString(record: Record<string, unknown> | null | undefined, key: string): string {
+  if (!record) {
+    return 'unavailable';
+  }
+  return stringField(record, key) ?? 'unavailable';
+}
+
+function formatCurrency(value: unknown): string {
+  return typeof value === 'number' ? `$${value.toFixed(3)}` : 'unavailable';
+}
+
+function formatProviderModel(
+  record:
+    | {
+        effective_provider?: string | null;
+        effective_model?: string | null;
+      }
+    | undefined,
+): string {
+  const provider = record?.effective_provider?.trim();
+  const model = record?.effective_model?.trim();
+  if (provider && model) {
+    return `${provider}/${model}`;
+  }
+  return provider || model || 'unavailable';
+}
+
+function readRequiredGateIds(reviewConstraints: Record<string, unknown> | undefined): string[] {
+  const value = reviewConstraints?.required_gate_ids;
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : [];
+}
+
+function mappingField(record: Record<string, unknown> | null | undefined, key: string): Record<string, unknown> | undefined {
+  const value = record?.[key];
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function loadWorkbenchViewMode(): WorkbenchViewMode {

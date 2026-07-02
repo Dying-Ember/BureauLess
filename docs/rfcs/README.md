@@ -22,3 +22,8 @@ Use this directory for candidate changes that need review before they move into
 - [`003-engineering-boundary-refactor.md`](003-engineering-boundary-refactor.md):
   RFC-003, implemented engineering-boundary refactor for shared errors, CLI
   split, application services, and narrower protocol exports.
+- [`004-temporal-replay-mutation-intake-and-retry-control.md`](004-temporal-replay-mutation-intake-and-retry-control.md):
+  RFC-004, draft design for universal inert worker mutation intents, trusted
+  proposal intake, bounded retry control, workflow versions, and linear temporal
+  replay in Runtime Milestone 4. Tracked by
+  [GitHub issue #3](https://github.com/Dying-Ember/BureauLess/issues/3).

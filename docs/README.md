@@ -26,6 +26,9 @@ acceptance criteria.
 - [`tasks/runtime_harness_milestone_3_tasklist.md`](tasks/runtime_harness_milestone_3_tasklist.md):
   completed runtime milestone for node outcomes, bounded context delivery,
   orchestrator decision artifacts, and advisor outcome learning.
+- [`tasks/runtime_harness_milestone_4_tasklist.md`](tasks/runtime_harness_milestone_4_tasklist.md):
+  planned runtime milestone for universal inert mutation intents, trusted
+  proposal intake, retry control, workflow versions, and linear temporal replay.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
@@ -36,8 +39,8 @@ acceptance criteria.
 - [`tasks/workbench_milestone_3_tasklist.md`](tasks/workbench_milestone_3_tasklist.md):
   completed runtime-source loading and planning-action clarity milestone.
 - [`tasks/workbench_milestone_4_tasklist.md`](tasks/workbench_milestone_4_tasklist.md):
-  planned next milestone for visual inspection of Runtime Harness Milestone 3
-  decisions, outcomes, context delivery, and dispatch artifacts.
+  completed milestone for visual inspection of Runtime Harness Milestone 3
+  decisions, outcomes, context delivery, telemetry, and dispatch artifacts.
 - [`tasks/engineering_boundary_refactor_tasklist.md`](tasks/engineering_boundary_refactor_tasklist.md):
   RFC-003 implementation task list for shared errors, CLI split, application
   services, and protocol exports.
@@ -57,6 +60,9 @@ behavior is promoted into `protocol/`; the RFC remains as provenance.
 - [`rfcs/003-engineering-boundary-refactor.md`](rfcs/003-engineering-boundary-refactor.md):
   RFC-003, implemented engineering-boundary refactor for shared errors, CLI
   split, application services, and narrower protocol exports.
+- [`rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](rfcs/004-temporal-replay-mutation-intake-and-retry-control.md):
+  RFC-004, draft Runtime Milestone 4 design for mutation intent intake, bounded
+  retry control, workflow versions, and linear temporal replay.
 
 ## ADRs
 
