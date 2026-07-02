@@ -2,6 +2,8 @@
 
 **English** | [中文](README.zh-CN.md)
 
+[![CI](https://github.com/Dying-Ember/BureauLess/actions/workflows/ci.yml/badge.svg)](https://github.com/Dying-Ember/BureauLess/actions/workflows/ci.yml)
+
 BureauLess is a small, local-first orchestration layer for DAG-shaped agent
 workflows.
 
@@ -229,6 +231,22 @@ back to a system install such as `electron39`.
 Playwright starts or reuses the Vite dev server. The UI follows the system color
 scheme by default and also exposes `system / light / dark` controls. DAG
 documents and run records remain YAML-only.
+
+## Continuous Integration
+
+GitHub Actions runs two deterministic checks for every pull request, every push
+to `main`, merge-queue groups, and manual dispatches:
+
+- `backend`: installs locked Python dependencies with uv on Python 3.10 and runs
+  the complete pytest suite.
+- `workbench`: installs locked npm dependencies on Node 24, builds the Web and
+  Electron applications, installs Playwright Chromium, and runs the browser
+  smoke suite.
+
+CI does not invoke a real agent or model provider and requires no provider
+secrets. After both checks have completed successfully in GitHub at least once,
+the `main` ruleset should require `backend` and `workbench`, require pull
+requests to be up to date, and block force pushes and branch deletion.
 
 ## Source Layout
 
