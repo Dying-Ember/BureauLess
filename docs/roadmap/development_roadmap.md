@@ -424,6 +424,7 @@ Source tasks:
 Draft design:
 
 - [`../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
+- [#3 RFC-004: Temporal Replay, Mutation Intake, And Retry Control](https://github.com/Dying-Ember/BureauLess/issues/3)
 
 Current gap:
 

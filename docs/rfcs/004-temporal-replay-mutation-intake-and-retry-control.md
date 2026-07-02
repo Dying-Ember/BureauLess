@@ -5,6 +5,9 @@
 Draft for Runtime Harness Milestone 4. No ADR has been accepted and no runtime
 implementation has started.
 
+Tracking issue:
+[#3 RFC-004: Temporal Replay, Mutation Intake, And Retry Control](https://github.com/Dying-Ember/BureauLess/issues/3)
+
 Implementation planning:
 [`docs/tasks/runtime_harness_milestone_4_tasklist.md`](../tasks/runtime_harness_milestone_4_tasklist.md)
 

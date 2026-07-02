@@ -14,6 +14,9 @@ advance the draft
 [`RFC-004`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
 to an accepted ADR before temporal replay implementation begins.
 
+RFC review and ADR acceptance are tracked by
+[#3 RFC-004: Temporal Replay, Mutation Intake, And Retry Control](https://github.com/Dying-Ember/BureauLess/issues/3).
+
 ## Current Capability Gap
 
 Milestone 2.5 implemented the mutation proposal schema, mutation ledger events,
