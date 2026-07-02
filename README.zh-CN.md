@@ -2,6 +2,8 @@
 
 [English](README.md) | **中文**
 
+[![CI](https://github.com/Dying-Ember/BureauLess/actions/workflows/ci.yml/badge.svg)](https://github.com/Dying-Ember/BureauLess/actions/workflows/ci.yml)
+
 BureauLess 是一个本地优先的小型编排层，用来管理 DAG 形态的 agent 工作流。
 
 BureauLess 不是 Agent。它是一套带 token 经济意识的 harness：判断何时值得使用
@@ -194,6 +196,19 @@ npm run desktop:dev
 
 UI 默认跟随系统配色，也提供 `system / light / dark` 控制。DAG 文档和运行记录保持
 YAML-only。
+
+## 持续集成
+
+GitHub Actions 会在每个 pull request、每次向 `main` push、merge queue group 和手工
+触发时运行两个确定性检查：
+
+- `backend`：在 Python 3.10 上通过 uv 安装锁定依赖，并运行完整 pytest suite。
+- `workbench`：在 Node 24 上安装锁定的 npm 依赖，构建 Web 与 Electron 应用，安装
+  Playwright Chromium，并运行浏览器 smoke suite。
+
+CI 不会调用真实 Agent 或模型供应商，也不需要 provider secret。两个 check 至少在
+GitHub 成功运行一次后，再把 `main` ruleset 配置为强制通过 `backend` 和 `workbench`、
+要求 pull request 基于最新分支，并禁止 force push 和删除分支。
 
 ## 源码结构
 
