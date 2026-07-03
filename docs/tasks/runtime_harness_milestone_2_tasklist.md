@@ -13,6 +13,14 @@ surface. It is on proving that assignment export, isolated session execution,
 result packaging, review, replay, and metrics hold together against actual
 agent runtimes.
 
+Post-completion correction, 2026-07-02: Milestone 2 remains complete for its
+declared record, replay, isolation, packaging, and compatibility scope. The
+[`runtime execution gap analysis`](../audits/2026-07-02-runtime-execution-gap-analysis.md)
+confirmed that cancellation is represented and replayed after a session record
+exists, but the runtime cannot yet terminate an in-flight agent process. That
+live lifecycle work is owned by RM35-04 rather than being hidden by this
+historical completion status.
+
 Within this document, `milestone` names the user-visible delivery target and
 `workstream` names an internal implementation grouping inside that milestone.
 
@@ -168,6 +176,10 @@ Goal: run real agent sessions in bounded execution sandboxes.
   - Timed-out or cancelled sessions replay cleanly without corrupting ready
     state.
   - Superseded sessions remain auditable and do not masquerade as completed.
+
+Implementation boundary correction: timeout and terminal-record replay are
+implemented. Live external cancellation currently updates a returned record
+rather than signalling an active process; see RM35-04 and audit finding REX-005.
 
 ## Workstream 4: Result Packaging, Review, And Replay Loop
 

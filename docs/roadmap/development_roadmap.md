@@ -10,6 +10,12 @@ task lists own task status, implementation notes, and acceptance evidence. When
 these documents disagree, shipped behavior and the checked task list must be
 used to repair the roadmap and indexes in the same change.
 
+Post-completion capability gaps are handled through
+[`../audits/README.md`](../audits/README.md). An audit preserves historical task
+status, narrows overstated capability language, and assigns remediation to a
+new or existing milestone. RFCs and ADRs are required only when the remediation
+still needs a semantic or architectural decision.
+
 ## Current Position
 
 The project currently has two runtime layers:
@@ -21,15 +27,28 @@ The project currently has two runtime layers:
   checks, isolated sessions, result packaging, outcome metrics, and dispatch
   readiness checks.
 
-Milestones 1, 2, 2.5, and 3 are complete for the runtime/harness line. The
-current runtime now includes advisor outcome learning, routing/dispatch
-decision artifacts, bounded deterministic context delivery, context telemetry,
-and the integrated M3 acceptance spine on top of the earlier ledger/replay and
-gatekeeper baseline. Milestone 3 also landed the initial narrow real-agent
-binding spine: `codex-cli` is the first real worker target for the maintained
-demo path. This is still not a full provider platform milestone. Broader agent
-and provider expansion, including deeper `opencode` customization, remains
-post-M3 work.
+Milestones 1, 2, 2.5, and 3 delivered their declared protocol, validation,
+fixture, API, and maintained-demo scopes. The runtime includes advisor outcome
+learning, routing/dispatch decision artifacts, bounded deterministic context
+artifacts, context telemetry, and a narrow `codex-cli` worker path.
+
+The closed
+[`runtime execution gap analysis`](../audits/2026-07-02-runtime-execution-gap-analysis.md)
+found that several M2/M3 artifacts did not authoritatively control the live
+session path. Runtime M3.5 is complete: it closes result acceptance, executable
+dispatch, context continuation, cancellation, truthful telemetry, generic run
+bundles, advisor invocation, and cross-capability acceptance. Broader agent and
+provider expansion remains outside this remediation.
+
+RM35-01 through RM35-08 are complete. Ledger v2 and staged acceptance
+close REX-002; the validated pre-launch dispatch bridge closes REX-003; live
+process-group cancellation, supersession, and partial-evidence retention close
+REX-005; bounded context continuation closes REX-004; observed/degraded
+turn-report telemetry closes REX-006; reusable ordinary-session run bundles and
+Workbench inspection close REX-007; deterministic skip/invoke policy,
+recommendation-only calls, observed cost linkage, and scored outcomes close
+REX-008. The maintained execution-spine command closes end-to-end acceptance.
+REX-001 remains explicitly deferred to Runtime M4 and is not implemented.
 
 The project has one UI surface:
 
@@ -40,9 +59,10 @@ Workbench Milestones 1, 2, 3, and 4 are complete. The UI now separates
 planning-DAG editing from runtime workflow inspection, can load explicit
 runtime sources directly from live-demo URLs, and can present mission, ledger,
 gatekeeper, replay, and mutation state without reimplementing runtime rules in
-the frontend. It now provides manifest-backed visual inspection for the
-decision, outcome, context, telemetry, and dispatch artifacts added in Runtime
-Harness Milestone 3.
+the frontend. It provides manifest-backed visual inspection for the decision,
+outcome, context, telemetry, and dispatch artifacts added in Runtime Harness
+Milestone 3. The same manifest API now inspects maintained demo and
+ordinary-session bundles, with missing optional evidence represented explicitly.
 
 ## Milestone History
 
@@ -69,8 +89,19 @@ without reconstructing it from commits.
 - Runtime Harness Milestone 3:
   advisor outcome learning, orchestrator decision artifacts, node outcomes,
   bounded deterministic context delivery, context telemetry, and one
-  maintained `codex-cli` demo path.
+  maintained `codex-cli` demo path. This is complete for its artifact and demo
+  boundary; the post-completion execution-spine audit is tracked separately.
   Source: [`../tasks/runtime_harness_milestone_3_tasklist.md`](../tasks/runtime_harness_milestone_3_tasklist.md)
+
+### Implemented Runtime Remediation
+
+- Runtime Harness Milestone 3.5:
+  authoritative result acceptance, executable pre-launch dispatch, real context
+  continuation and cancellation, truthful turn reports, reusable run bundles,
+  advisor invocation evidence, and one failing-on-error execution-spine
+  acceptance path.
+  Source: [`../tasks/runtime_harness_milestone_3_5_tasklist.md`](../tasks/runtime_harness_milestone_3_5_tasklist.md)
+  Audit: [`2026-07-02 Runtime Execution Gap Analysis`](../audits/2026-07-02-runtime-execution-gap-analysis.md)
 
 ### Implemented Workbench Milestones
 
@@ -108,10 +139,11 @@ capability can span several milestones.
 | Delivery milestone | Roadmap capability contribution | State |
 | --- | --- | --- |
 | Runtime Harness M1 | A1 mission/workflow foundation, A2 ledger/replay, A3 gatekeeper, plus the first A4 budget and A5/A5.5 assignment/session boundaries | completed |
-| Runtime Harness M2 | Hardened the A4 dispatch-readiness policy and A5.5 isolated real-agent execution loop | completed |
+| Runtime Harness M2 | Hardened the A4 dispatch-readiness policy and A5.5 isolated real-agent execution loop; live process cancellation was later delivered in M3.5 | completed declared scope |
 | Runtime Harness M2.5 | A6 controlled workflow mutation and current-state replay | completed |
-| Runtime Harness M3 | Extended A1 with node outcomes, completed the current A4 and A5 scope, and proved the initial `codex-cli` A5.5 path | completed |
-| Runtime Harness M4 | Close the A6 real-agent mutation intake loop and add A7 retry control plus linear temporal replay | planned |
+| Runtime Harness M3 | Extended A1 with node outcomes, added A4/A5 artifacts, and proved the initial demo-scoped `codex-cli` A5.5 path | completed artifact/demo scope |
+| Runtime Harness M3.5 | Acceptance, dispatch, context continuation, lifecycle control, truthful turn reports, reusable run bundles, advisor invocation, and execution-spine E2E acceptance | completed |
+| Runtime Harness M4 | Close the A6 real-agent mutation intake loop and add A7 retry control plus linear temporal replay | in progress; RM4-00 complete, RM4-01 next |
 | Workbench M1 | B1 through B5 planning-DAG inspection, editing, and dispatch preparation | completed |
 | Workbench M2 | B6 runtime console for mission, workflow, ledger, gatekeeper, replay, and mutation state | completed |
 | Workbench M3 | B7 runtime-source trust and planning/runtime action clarity | completed |
@@ -127,19 +159,32 @@ exposed by the backend: routing and advisor decisions, node outcomes and
 evidence, context capsules and requests, assignments and results, turn reports,
 and dispatch packets.
 
-Runtime Harness Milestone 4 is the next planned runtime delivery. Its task list
-is [`../tasks/runtime_harness_milestone_4_tasklist.md`](../tasks/runtime_harness_milestone_4_tasklist.md).
-It first closes the existing real-agent mutation intake gap, then adds
-bounded retry/circuit-break semantics, deterministic workflow versions, and
-linear temporal replay through ledger event cursors. Provider expansion is not
-part of this milestone.
+Runtime Harness Milestone 3.5 is complete. Its task list is
+[`../tasks/runtime_harness_milestone_3_5_tasklist.md`](../tasks/runtime_harness_milestone_3_5_tasklist.md).
+It closes the confirmed execution-spine gaps and proves the accepted ledger
+history on which Runtime M4 may build.
 
-RM4-00 has produced draft
-[`RFC-004`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md).
-Implementation remains blocked until its worker-intent, retry, inclusive cursor,
-version transition, stale proposal, historical assignment, and compatibility
-semantics are accepted into an ADR. The existing RFC-001 remains implemented
-M2.5 design history rather than being silently expanded.
+RM35-01 produced
+[`RFC-005`](../rfcs/005-authoritative-result-acceptance-spine.md). Runtime code
+for acceptance compatibility is implemented under accepted
+[`ADR-005`](../adrs/005-authoritative-result-acceptance-spine/001-accepted-design.md).
+
+Runtime Harness Milestone 4 is the active runtime delivery. Its task list is
+[`../tasks/runtime_harness_milestone_4_tasklist.md`](../tasks/runtime_harness_milestone_4_tasklist.md).
+It closes the existing real-agent mutation intake gap, then adds bounded
+retry/circuit-break semantics, deterministic workflow versions, and linear
+temporal replay through ledger event cursors. Provider expansion is not part of
+either milestone.
+
+RM4-00 accepted
+[`RFC-004`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
+through
+[`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md).
+Worker-intent, retry, inclusive cursor, version transition, stale proposal,
+historical assignment, and compatibility semantics are settled. RM4-01 is next.
+The required M3.5 foundations are closed.
+The existing RFC-001 remains implemented M2.5 design history rather than
+being silently expanded.
 
 No additional engineering-cleanup milestone is planned. Documentation indexes,
 task status, and API boundaries remain part of each delivery milestone's
@@ -186,7 +231,7 @@ external agent runtimes at assignment/session/result boundaries and records
 session-level outcome metrics.
 
 The completed runtime line already includes one explicit manual-harness golden
-path for the demo mission. The next runtime milestone builds on that
+path for the demo mission. The active runtime milestone builds on that
 acceptance spine instead of replacing it.
 
 The current runtime line also exposes a reviewable semi-automatic demo through
@@ -300,9 +345,11 @@ Acceptance:
 
 ### A4: Advisor Policy And Budget Estimator
 
-Status: completed for the Milestone 3 scope. Budget snapshots, pre-dispatch
+Status: artifact and scoring scope completed in Milestone 3. Budget snapshots,
 workflow selection, advisor outcome events, price-snapshot attribution, and
-deterministic scoring are implemented.
+deterministic scoring are implemented. RM35-07 adds maintained skip and invoked
+paths with recommendation-only authority, observed call cost, independent
+orchestrator disposition, and scored outcomes.
 
 Goal: make advisor usage measurable instead of instinctive.
 
@@ -323,9 +370,10 @@ Acceptance:
 
 ### A5: Orchestrator Decision Artifacts
 
-Status: completed for the Milestone 3 scope. Assignment, result, review
-decision, routing decision, turn report, and dispatch packet artifacts are now
-implemented and validated.
+Status: schema, validation, API, and demo-inspection scope completed in
+Milestone 3. Acceptance, dispatch, context continuation, turn-report
+integration, reusable run-bundle discovery, advisor invocation evidence, and
+cross-capability acceptance are implemented in RM35-01 through RM35-08.
 
 Goal: persist orchestrator decisions as structured YAML.
 
@@ -339,13 +387,15 @@ Work:
 
 Acceptance:
 
-- A complete orchestrator proposal can be compiled before worker dispatch.
+- A complete orchestrator proposal can be compiled and validated independently.
+- Runtime M3.5 must make that validated packet the pre-launch executable handoff.
 
 The API surface now exposes the minimum M3 artifact set directly: routing
 decisions, assignments, context capsules, context requests and resolutions,
 result proposals, node outcomes, advisor outcomes, turn reports, and compiled
-dispatch packets. That keeps the workbench on authoritative runtime shapes
-instead of file scraping or frontend-side policy reconstruction.
+dispatch packets. That keeps the workbench on validated backend-owned shapes
+instead of file scraping or frontend-side policy reconstruction. It does not by
+itself prove that every shape is an authoritative live runtime control input.
 
 ### A5.5: Real Agent Binding Spine
 
@@ -412,7 +462,8 @@ Acceptance:
 
 ### A7: Agent Mutation Intake, Retry Control, And Temporal History
 
-Status: planned for Runtime Harness Milestone 4. Implementation has not started.
+Status: in progress for Runtime Harness Milestone 4. RM4-00 design is accepted;
+runtime implementation begins with RM4-01.
 
 Goal: turn controlled mutation from a current-state protocol into a complete
 real-agent proposal path with deterministic, read-only historical replay.
@@ -421,9 +472,10 @@ Source tasks:
 
 - [`../tasks/runtime_harness_milestone_4_tasklist.md`](../tasks/runtime_harness_milestone_4_tasklist.md)
 
-Draft design:
+Accepted design:
 
 - [`../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
+- [`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md)
 - [#3 RFC-004: Temporal Replay, Mutation Intake, And Retry Control](https://github.com/Dying-Ember/BureauLess/issues/3)
 
 Current gap:
@@ -656,18 +708,13 @@ Acceptance boundary:
 
 ## Current Priority Order
 
-1. Review draft RFC-004 and accept temporal replay, mutation-intake, and retry
-   semantics into an ADR before implementation.
-2. Close the version-bound real-agent mutation proposal path before treating
-   mutation history as an end-to-end runtime capability.
-3. Implement failure classification and stuck-loop circuit breaking before the
-   maintained real-agent M4 demo.
-4. Implement linear event-cursor replay and its read-only API after workflow
-   version semantics are fixed.
-5. Keep provider expansion, replay branches, rollback, and Workbench history UI
-   outside Runtime Harness Milestone 4.
-6. Defer policy auto-tuning and broader automatic dispatch until a later
-   runtime milestone explicitly owns them.
+1. Implement RM4-01 worker intent and trusted proposal envelope contracts.
+2. Close the version-bound real-agent mutation proposal path on the completed
+   M3.5 acceptance and dispatch foundations.
+3. Implement failure classification, circuit breaking, workflow versions, and
+   linear event-cursor replay in Runtime M4.
+4. Keep provider expansion, replay branches, rollback, and Workbench history UI
+   outside Runtime M3.5 and M4.
 
 ## Decision Rules
 

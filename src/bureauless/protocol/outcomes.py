@@ -154,6 +154,10 @@ def build_node_outcome_decision_event(
     accepted_event_types: list[str] | None = None,
     validation_rule: str | None = None,
     created_at: str | None = None,
+    source_result_event_id: str | None = None,
+    source_review_event_id: str | None = None,
+    acceptance_policy_version: str | None = None,
+    verification_status: str | None = None,
 ) -> dict[str, Any]:
     if disposition not in VALID_NODE_OUTCOME_DISPOSITIONS:
         raise ProtocolError(
@@ -181,6 +185,14 @@ def build_node_outcome_decision_event(
         payload["post_state_ref"] = outcome.post_state_ref
     if validation_rule is not None:
         payload["validation_rule"] = validation_rule
+    if source_result_event_id is not None:
+        payload["source_result_event_id"] = source_result_event_id
+    if source_review_event_id is not None:
+        payload["source_review_event_id"] = source_review_event_id
+    if acceptance_policy_version is not None:
+        payload["acceptance_policy_version"] = acceptance_policy_version
+    if verification_status is not None:
+        payload["verification_status"] = verification_status
     if created_at is not None:
         payload["created_at"] = created_at
     return payload

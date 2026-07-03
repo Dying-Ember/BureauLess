@@ -1823,13 +1823,13 @@ function RuntimeWorkflowOverview({
   };
   selectedArtifactStep: {
     node_id: string;
-    review_decision_path?: string;
+    review_decision_path?: string | null;
     review_event_id?: string;
-    node_outcome_path?: string;
+    node_outcome_path?: string | null;
     assignment_path: string;
     context_capsule_path: string;
     session_path: string;
-    result_path?: string;
+    result_path?: string | null;
   } | null;
   assignmentQuery: {
     data?: AssignmentResponse;

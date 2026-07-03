@@ -2,8 +2,11 @@
 
 ## Status
 
-Draft for Runtime Harness Milestone 4. No ADR has been accepted and no runtime
-implementation has started.
+Accepted for Runtime Harness Milestone 4 by
+[`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md).
+Runtime implementation has not started.
+
+Decision: accepted on 2026-07-03.
 
 Tracking issue:
 [#3 RFC-004: Temporal Replay, Mutation Intake, And Retry Control](https://github.com/Dying-Ember/BureauLess/issues/3)
@@ -13,6 +16,9 @@ Implementation planning:
 
 Related accepted design history:
 [`RFC-001: Controlled Workflow Mutation`](001-controlled-workflow-mutation.md)
+
+ADR archive:
+[`docs/adrs/004-temporal-replay-mutation-intake-and-retry-control/`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/)
 
 ## Problem
 
@@ -158,7 +164,8 @@ Result import and intent intake are separate stages:
 1. Validate and import the execution result.
 2. Validate the optional intent.
 3. If valid, create the immutable canonical proposal artifact and proposal event.
-4. If invalid, preserve the valid result and record a distinct intake disposition.
+4. If invalid, preserve the valid result and record a distinct session/run
+   evidence disposition without appending a canonical proposal event.
 
 An invalid intent is not a review rejection. `workflow_mutation_rejected` remains
 reserved for a valid proposal that an approver explicitly rejects.
@@ -303,21 +310,163 @@ blocked with an explanation.
 - Mutation/version budgets limit repeated structural churn at assignment, branch,
   and mission scope.
 
-## Open Questions Before ADR Acceptance
+## Resolved Decisions For ADR Acceptance
 
-1. Which exact event or session disposition records invalid, duplicate, stale,
-   and unsupported intent intake without conflating them with review rejection?
-2. Which retry limits and token budgets are defaults versus assignment policy?
-3. Which mutation operations require a second approver when the orchestrator is
-   also the proposer?
-4. Should `review_overdue` be derived from policy and time metadata or recorded as
-   an explicit event?
-5. Does the first Codex CLI implementation expose a native tool call, structured
-   final output, or both, given the available non-interactive control surface?
+### Intake Disposition And Transaction Boundary
 
-## Acceptance Path
+The intake service returns a `mutation_intake_disposition` evidence artifact
+with one of these statuses:
 
-This RFC may advance to an ADR only after RM4-00 resolves the open questions,
-defines compatibility fixtures, and confirms that the proposed contracts can be
-validated without adding a mandatory secondary agent. Canonical implemented
-rules then move into `docs/protocol/harness_protocol.md`.
+- `registered`: a new canonical proposal artifact and
+  `workflow_mutation_proposed` event were committed;
+- `duplicate`: the deterministic proposal identity already exists, so the
+  existing artifact/event is returned and no event is appended;
+- `invalid`: schema, reference, or semantic validation failed;
+- `stale`: the assignment-observed base version is no longer current;
+- `unsupported`: the intent requests an operation outside the accepted M4
+  mutation vocabulary.
+
+`invalid`, `stale`, and `unsupported` dispositions are session/run evidence,
+not canonical ledger events. This preserves the RM4-01 invariant that failed
+validation is inert. Review rejection remains a separate
+`workflow_mutation_rejected` event for a valid registered proposal.
+
+Result staging commits first. Intent validation then writes the disposition
+atomically. For `registered`, the immutable proposal artifact is atomically
+renamed before its proposal event is appended. Recovery may delete an orphan
+temporary file, return an existing deterministic artifact, or report a missing
+artifact as corruption; it may never infer acceptance.
+
+Canonical proposal identity is the first 16 hexadecimal characters of SHA-256
+over the source result event ID, intent ordinal (`0` in M4), base workflow
+version ID, and canonical intent payload. The runtime owns all IDs and
+provenance.
+
+### Retry Defaults And Overrides
+
+Retry policy version `retry-v1` defines total attempts, including the original:
+
+| Failure class | Default total attempts | Additional requirement |
+| --- | ---: | --- |
+| transient infrastructure | 3 | bounded backoff; no evidence change required |
+| malformed output contract | 2 | validator errors become new bounded evidence |
+| verification/compilation | 2 | failure evidence plus declared repair strategy |
+| capability mismatch | 2 | new routing decision and changed agent/model strategy |
+| repeated deterministic fingerprint | 2 | second identical failure opens the circuit |
+| workflow structure | 1 | mutation review or `needs_replan`; no execution retry |
+| stale/superseded | 1 | new assignment against current version required |
+| safety/policy rejection | 1 | no retry intended to bypass policy |
+
+The default aggregate token budget for retry turns of one assignment is 20,000
+tokens, additionally bounded by remaining assignment and mission budgets. An
+assignment retry policy may lower the limit or raise it only within the
+recorded mission remainder. Missing or unknown mission remainder cannot justify
+raising the default. A retry is denied when either its class attempt limit or
+token limit is exhausted.
+
+Every scheduled retry appends `assignment_retry_scheduled` with a new
+`attempt_id`, prior attempt reference, failure class/fingerprint, changed-input
+evidence, strategy identity, and budget snapshot. Opening the circuit appends
+`assignment_circuit_opened` and derives `needs_review` or `needs_replan`.
+Backoff timestamps control launch timing only; ledger order controls replay.
+
+### Approval Separation
+
+The runtime derives approval policy from mutation impact. A distinct human
+second approver is required when the proposal:
+
+- removes or weakens a review, human, permission, commit, merge, deploy, or
+  terminal safety dependency;
+- removes a node or event that participates in such a dependency;
+- supersedes an in-flight high-risk or protected-operation assignment; or
+- expands role permissions or introduces a protected side effect.
+
+The proposer cannot satisfy either approval slot. For lower-risk worker
+proposals, one authorized orchestrator or human approval is sufficient. For an
+orchestrator-authored proposal, approval must always come from a distinct actor.
+Deterministic policy may approve only operations explicitly classified low risk
+and may never stand in for the required human second approval.
+
+### Review Deadline
+
+`review_overdue` is activated only by an explicit
+`workflow_mutation_review_overdue` event. Policy deadlines and timestamps tell a
+scheduler when it may append that event, but timestamps do not change replay by
+themselves. The event may trigger escalation, explicit rejection, or a blocked
+branch; it never accepts a proposal.
+
+### Codex MVP Transport
+
+The first maintained Codex CLI implementation uses the structured final-output
+`control_intents` channel. A native tool transport is deferred until the
+non-interactive adapter exposes a reliable control surface. Future transports
+must call the same validator and intake service and cannot change semantics.
+
+### Exact Workflow Version Identity
+
+Runtime M4 introduces `ledger_version: 3` for maintained mutation/version
+writes. Version 1 remains historical-read only; version 2 retains strict result
+acceptance and gains read-only temporal compatibility. Migration to v3 is
+explicit and appends `workflow_version_initialized`; existing events are not
+rewritten.
+
+Workflow content is hashed as UTF-8 SHA-256 over the validated workflow mapping
+serialized as canonical JSON with sorted keys and compact separators. Version
+IDs use:
+
+```text
+<workflow_id>:v<accepted-mutation-sequence:04d>:<first-12-hash-characters>
+```
+
+Version zero uses sequence `0000`. Every accepted mutation appends exactly one
+child version and records `workflow_version_before`, `workflow_version_after`,
+full before/after content hashes, and parent version. Proposal and rejection
+events do not advance the sequence.
+
+For a `workflow_mutation_accepted` event, replay through that event observes the
+child version. Every other event observes the version active immediately before
+it unless that event explicitly creates a version. Event IDs remain unique and
+ledger append order is the only ordering authority.
+
+### Historical Cursor And Assignment Validity
+
+`through_event_id` is inclusive. An omitted cursor means current replay through
+the final event. An unknown cursor is an error. Historical replay reads only the
+selected prefix; replay through the final event must equal current replay.
+
+An assignment records its workflow version at creation. It remains valid in a
+child version only when deterministic mutation impact says its node, role,
+waits, emits, gates, scoped evidence, and forbidden actions are unchanged.
+Otherwise acceptance appends supersession, requests cancellation for in-flight
+work, and prevents late results from satisfying gates. Gatekeeper evaluation at
+a cursor uses that cursor's workflow version and only effective accepted events
+from assignments valid in that version.
+
+Proposal acceptance uses compare-and-swap over both expected ledger-tail event
+ID and expected current workflow version. A mismatch fails without appending a
+decision. Proposals whose base is no longer current derive `stale`; M4 never
+auto-rebases them.
+
+### Compatibility Fixtures And External Drift
+
+RM4 maintains fixtures for:
+
+1. v1 ledgers under historical current-state compatibility;
+2. v2 strict-acceptance ledgers with no explicit version metadata, projected
+   read-only from version zero and accepted mutation order;
+3. explicitly migrated v3 ledgers with `workflow_version_initialized`;
+4. native v3 ledgers whose accepted mutations carry full version transitions.
+
+The version-zero hash detects external workflow edits. A mismatch blocks
+dispatch, mutation intake/application, and temporal replay beyond the last
+verified version, and records `workflow_external_drift_detected` when a writer
+observes it. Recovery requires an explicit human-approved migration or mutation;
+the runtime does not silently treat external files as a new canonical version.
+
+## Acceptance Outcome
+
+RM4-00 resolves the prior open questions, defines compatibility fixtures, and
+confirms a deterministic validator/application-service boundary without a
+mandatory secondary agent. ADR-004 accepts these semantics. Implementation now
+proceeds task-by-task under RM4-01 through RM4-11; implemented canonical rules
+must be kept aligned in `docs/protocol/harness_protocol.md`.

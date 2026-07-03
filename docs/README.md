@@ -10,6 +10,17 @@ Use this path for implementation order and product/runtime sequencing.
 - [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md): project
   roadmap that keeps the harness/runtime line and the workbench/UI line separate.
 
+## Audits
+
+Use this path for evidence-backed differences between documented capability
+claims and shipped behavior. Audits route remediation into roadmaps, task lists,
+RFCs, and ADRs without replacing any of them.
+
+- [`audits/README.md`](audits/README.md): gap-analysis format, severity,
+  completion vocabulary, and processing workflow.
+- [`audits/2026-07-02-runtime-execution-gap-analysis.md`](audits/2026-07-02-runtime-execution-gap-analysis.md):
+  closed real-agent execution-spine audit with REX-001 deferred to Runtime M4.
+
 ## Tasks
 
 Use this path for concrete implementation task cards, milestone indexes, and
@@ -24,8 +35,11 @@ acceptance criteria.
 - [`tasks/runtime_harness_milestone_2_5_tasklist.md`](tasks/runtime_harness_milestone_2_5_tasklist.md):
   completed runtime/harness bridge milestone for controlled workflow mutation.
 - [`tasks/runtime_harness_milestone_3_tasklist.md`](tasks/runtime_harness_milestone_3_tasklist.md):
-  completed runtime milestone for node outcomes, bounded context delivery,
-  orchestrator decision artifacts, and advisor outcome learning.
+  completed artifact/protocol milestone for node outcomes, bounded context
+  delivery, orchestrator decision artifacts, and advisor outcome learning.
+- [`tasks/runtime_harness_milestone_3_5_tasklist.md`](tasks/runtime_harness_milestone_3_5_tasklist.md):
+  planned remediation milestone that makes M2/M3 artifacts authoritative in the
+  real-agent execution path.
 - [`tasks/runtime_harness_milestone_4_tasklist.md`](tasks/runtime_harness_milestone_4_tasklist.md):
   planned runtime milestone for universal inert mutation intents, trusted
   proposal intake, retry control, workflow versions, and linear temporal replay.
@@ -61,8 +75,13 @@ behavior is promoted into `protocol/`; the RFC remains as provenance.
   RFC-003, implemented engineering-boundary refactor for shared errors, CLI
   split, application services, and narrower protocol exports.
 - [`rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](rfcs/004-temporal-replay-mutation-intake-and-retry-control.md):
-  RFC-004, draft Runtime Milestone 4 design for mutation intent intake, bounded
-  retry control, workflow versions, and linear temporal replay.
+  RFC-004, accepted Runtime Milestone 4 design for mutation intent intake,
+  bounded retry control, workflow versions, and linear temporal replay.
+- [`rfcs/005-authoritative-result-acceptance-spine.md`](rfcs/005-authoritative-result-acceptance-spine.md):
+  RFC-005, implemented Runtime Milestone 3.5 design for staged result intake and
+  one authoritative review/outcome/replay acceptance chain.
+- [`rfcs/006-bounded-context-continuation.md`](rfcs/006-bounded-context-continuation.md):
+  RFC-006, implemented Runtime Milestone 3.5 bounded context continuation design.
 
 ## ADRs
 
@@ -77,6 +96,12 @@ choice.
   ADR-002 archive for ledger evidence and progressive context.
 - [`adrs/003-engineering-boundary-refactor/README.md`](adrs/003-engineering-boundary-refactor/README.md):
   ADR-003 archive index for the engineering boundary refactor RFC.
+- [`adrs/004-temporal-replay-mutation-intake-and-retry-control/README.md`](adrs/004-temporal-replay-mutation-intake-and-retry-control/README.md):
+  ADR-004 accepted mutation intake, retry, ledger v3, and temporal replay design.
+- [`adrs/005-authoritative-result-acceptance-spine/README.md`](adrs/005-authoritative-result-acceptance-spine/README.md):
+  ADR-005 accepted result, review, outcome, and strict ledger acceptance design.
+- [`adrs/006-bounded-context-continuation/README.md`](adrs/006-bounded-context-continuation/README.md):
+  ADR-006 accepted bounded context continuation design.
 
 ## Architecture
 
@@ -108,11 +133,13 @@ Use this path for machine-readable contracts and validation targets.
 For a new implementation session:
 
 1. Read [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md).
-2. Read the relevant protocol file for the runtime feature being changed.
-3. Read any relevant RFC in [`rfcs/`](rfcs/) if the work touches a proposed
+2. Read any open relevant audit in [`audits/`](audits/) when the work touches a
+   known capability gap.
+3. Read the relevant protocol file for the runtime feature being changed.
+4. Read any relevant RFC in [`rfcs/`](rfcs/) if the work touches a proposed
    but not yet accepted design.
-4. Read the relevant milestone index and task list in [`tasks/`](tasks/).
-5. Read the relevant architecture note only when the design rationale matters.
+5. Read the relevant milestone index and task list in [`tasks/`](tasks/).
+6. Read the relevant architecture note only when the design rationale matters.
 
 ## Source Layout
 
@@ -132,3 +159,8 @@ documentation, but not a literal one-to-one directory mirror:
 When changing runtime behavior, update both the relevant `docs/protocol/*` file
 and the matching source package so future sessions do not have to reconstruct
 the boundary from chat history.
+
+When an implementation review discovers that a completed milestone claim is
+broader than shipped behavior, follow [`audits/README.md`](audits/README.md):
+preserve the historical task record, add a dated correction, and route every
+confirmed gap to an owned task or explicit roadmap deferral.

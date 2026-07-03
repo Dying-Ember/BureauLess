@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any, Callable
 from uuid import uuid4
@@ -19,7 +21,19 @@ from ..errors import ProtocolError
 from ..protocol.artifacts import sha256_file
 from ..protocol.assignments import AssignmentPacket
 from ..protocol.assignments import render_assignment_prompt
-from ..protocol.harness import Workflow
+from ..protocol.context import (
+    build_context_lifecycle_events,
+    build_context_request,
+    load_context_request_intent,
+    resolve_context_request,
+)
+from ..protocol.dispatch import (
+    DispatchPacket,
+    load_dispatch_packet,
+    load_turn_report,
+    validate_dispatch_packet,
+)
+from ..protocol.harness import Ledger, Mission, STRICT_ACCEPTANCE_LEDGER_VERSION, Workflow
 from ..protocol.ledger import append_ledger_event
 from ..protocol.outcomes import (
     build_node_outcome_decision_event,
@@ -41,6 +55,62 @@ SUPPORTED_SESSION_AGENTS = {"fake", "shell-dummy", "codex-cli"}
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+class _ProcessController:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen[str] | None = None
+        self._terminal_status: str | None = None
+        self._reason: str | None = None
+        self._forced = False
+
+    def attach(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._process = process
+            pending = self._terminal_status is not None
+        if pending:
+            self._terminate(process, grace_seconds=0.0)
+
+    def request(
+        self,
+        status: str,
+        reason: str,
+        *,
+        grace_seconds: float,
+    ) -> bool:
+        with self._lock:
+            if self._terminal_status is not None:
+                return False
+            self._terminal_status = status
+            self._reason = reason
+            process = self._process
+        if process is not None:
+            self._terminate(process, grace_seconds=grace_seconds)
+        return True
+
+    def terminal_intent(self) -> tuple[str, str, bool] | None:
+        with self._lock:
+            if self._terminal_status is None or self._reason is None:
+                return None
+            return self._terminal_status, self._reason, self._forced
+
+    def _terminate(
+        self,
+        process: subprocess.Popen[str],
+        *,
+        grace_seconds: float,
+    ) -> None:
+        if process.poll() is not None:
+            return
+        _signal_process_group(process, force=False)
+        deadline = time.monotonic() + max(0.0, grace_seconds)
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if process.poll() is None:
+            with self._lock:
+                self._forced = True
+            _signal_process_group(process, force=True)
+
+
 @dataclass(frozen=True)
 class SessionSpec:
     session_id: str
@@ -58,6 +128,7 @@ class SessionSpec:
     provider_base_url: str | None = None
     provider_api_key_env: str | None = None
     provider_wire_api: str | None = None
+    reuse_workspace_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +147,7 @@ class SessionSpec:
             "provider_base_url": self.provider_base_url,
             "provider_api_key_env": self.provider_api_key_env,
             "provider_wire_api": self.provider_wire_api,
+            "reuse_workspace_path": self.reuse_workspace_path,
         }
 
 
@@ -95,6 +167,7 @@ class SessionRecord:
     outcome_metrics: dict[str, Any]
     extraction: dict[str, Any]
     result_proposal: dict[str, Any] | None
+    dispatch: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,7 +185,105 @@ class SessionRecord:
             "outcome_metrics": self.outcome_metrics,
             "extraction": self.extraction,
             "result_proposal": self.result_proposal,
+            "dispatch": self.dispatch,
         }
+
+
+class LiveSessionHandle:
+    def __init__(
+        self,
+        session_id: str,
+        target: Callable[[_ProcessController], SessionRecord],
+    ) -> None:
+        self.session_id = session_id
+        self._target = target
+        self._controller = _ProcessController()
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._record: SessionRecord | None = None
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"bureauless-{session_id}",
+            daemon=True,
+        )
+
+    def start(self) -> "LiveSessionHandle":
+        self._thread.start()
+        return self
+
+    def cancel(
+        self,
+        reason: str = "cancelled",
+        *,
+        grace_seconds: float = 1.0,
+    ) -> bool:
+        return self._request_terminal(
+            "cancelled",
+            reason,
+            grace_seconds=grace_seconds,
+        )
+
+    def supersede(
+        self,
+        reason: str = "superseded",
+        *,
+        grace_seconds: float = 1.0,
+    ) -> bool:
+        return self._request_terminal(
+            "superseded",
+            reason,
+            grace_seconds=grace_seconds,
+        )
+
+    def wait(self, timeout: float | None = None) -> SessionRecord:
+        if not self._done.wait(timeout):
+            raise TimeoutError(f"Session {self.session_id} is still running")
+        if self._error is not None:
+            raise self._error
+        if self._record is None:
+            raise ProtocolError(f"Session {self.session_id} finished without a record")
+        return self._record
+
+    @property
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    def _request_terminal(
+        self,
+        status: str,
+        reason: str,
+        *,
+        grace_seconds: float,
+    ) -> bool:
+        with self._lock:
+            if self._done.is_set():
+                return False
+        return self._controller.request(
+            status,
+            reason,
+            grace_seconds=grace_seconds,
+        )
+
+    def _run(self) -> None:
+        try:
+            record = self._target(self._controller)
+            terminal_intent = self._controller.terminal_intent()
+            if terminal_intent is not None:
+                status, reason, forced = terminal_intent
+                record = _terminalize_live_record(
+                    record,
+                    status=status,
+                    reason=reason,
+                    forced=forced,
+                )
+            with self._lock:
+                self._record = record
+        except BaseException as exc:
+            with self._lock:
+                self._error = exc
+        finally:
+            self._done.set()
 
 
 def create_session_spec(
@@ -131,6 +302,7 @@ def create_session_spec(
     provider_api_key_env: str | None = None,
     provider_wire_api: str | None = None,
     session_id: str | None = None,
+    reuse_workspace_path: str | None = None,
 ) -> SessionSpec:
     if agent_id not in SUPPORTED_SESSION_AGENTS:
         raise ProtocolError(f"Unsupported session agent: {agent_id}")
@@ -167,7 +339,213 @@ def create_session_spec(
         provider_base_url=provider_base_url,
         provider_api_key_env=provider_api_key_env,
         provider_wire_api=provider_wire_api,
+        reuse_workspace_path=reuse_workspace_path,
     )
+
+
+def start_dispatch_session(
+    mission: Mission,
+    workflow: Workflow,
+    packet: DispatchPacket,
+    *,
+    agent_id: str,
+    workdir: Path,
+    dispatch_packet_path: Path,
+    timeout_seconds: float = 30.0,
+    dry_run: bool = False,
+    isolation_mode: str = "copy",
+    cleanup_policy: str = "retain_session_root",
+    sandbox_mode: str = "workspace-write",
+    shell_command: str | None = None,
+    target_model: str | None = None,
+    target_provider: str | None = None,
+    provider_base_url: str | None = None,
+    provider_api_key_env: str | None = None,
+    provider_wire_api: str | None = None,
+    session_id: str | None = None,
+    command_runner: CommandRunner | None = None,
+    context_ledger: Ledger | None = None,
+    max_added_context_tokens: int = 2000,
+) -> LiveSessionHandle:
+    """Validate and persist one dispatch, then return its live session handle."""
+    validate_dispatch_packet(mission, workflow, packet)
+    if target_model is not None and mission.models and target_model not in mission.models:
+        raise ProtocolError(
+            f"Dispatch target_model {target_model!r} is not allowed by mission"
+        )
+
+    spec = create_session_spec(
+        assignment=packet.assignment,
+        agent_id=agent_id,
+        workdir=workdir,
+        timeout_seconds=timeout_seconds,
+        dry_run=dry_run,
+        isolation_mode=isolation_mode,
+        cleanup_policy=cleanup_policy,
+        sandbox_mode=sandbox_mode,
+        shell_command=shell_command,
+        target_model=target_model,
+        target_provider=target_provider,
+        provider_base_url=provider_base_url,
+        provider_api_key_env=provider_api_key_env,
+        provider_wire_api=provider_wire_api,
+        session_id=session_id,
+    )
+    _validate_dispatch_binding(packet, spec)
+    _write_dispatch_packet(dispatch_packet_path, packet)
+    packet_path = dispatch_packet_path.resolve()
+    packet_sha256 = sha256_file(packet_path)
+
+    dispatch_evidence = {
+        "packet_id": packet.packet_id,
+        "packet_path": str(packet_path),
+        "packet_sha256": packet_sha256,
+        "mission_id": packet.mission_id,
+        "workflow_id": packet.workflow_id,
+        "assignment_id": packet.assignment.assignment_id,
+        "session_spec": spec.to_dict(),
+        "review_constraints": packet.review_constraints,
+        "turn_report_policy": packet.turn_report_policy,
+    }
+
+    def run(controller: _ProcessController) -> SessionRecord:
+        if context_ledger is not None:
+            record = run_session_with_context_continuation(
+                spec,
+                packet.assignment,
+                workflow,
+                context_ledger,
+                command_runner=command_runner,
+                dispatch_packet=packet,
+                process_controller=controller,
+                max_added_context_tokens=max_added_context_tokens,
+            )
+        else:
+            record = run_session(
+                spec,
+                packet.assignment,
+                command_runner=command_runner,
+                dispatch_packet=packet,
+                process_controller=controller,
+            )
+        record = _attach_dispatch_turn_report(record, packet)
+        return replace(
+            record,
+            dispatch=dispatch_evidence,
+        )
+
+    return LiveSessionHandle(spec.session_id, run).start()
+
+
+def dispatch_session(
+    mission: Mission,
+    workflow: Workflow,
+    packet: DispatchPacket,
+    *,
+    agent_id: str,
+    workdir: Path,
+    dispatch_packet_path: Path,
+    timeout_seconds: float = 30.0,
+    dry_run: bool = False,
+    isolation_mode: str = "copy",
+    cleanup_policy: str = "retain_session_root",
+    sandbox_mode: str = "workspace-write",
+    shell_command: str | None = None,
+    target_model: str | None = None,
+    target_provider: str | None = None,
+    provider_base_url: str | None = None,
+    provider_api_key_env: str | None = None,
+    provider_wire_api: str | None = None,
+    session_id: str | None = None,
+    command_runner: CommandRunner | None = None,
+    context_ledger: Ledger | None = None,
+    max_added_context_tokens: int = 2000,
+) -> SessionRecord:
+    return start_dispatch_session(
+        mission,
+        workflow,
+        packet,
+        agent_id=agent_id,
+        workdir=workdir,
+        dispatch_packet_path=dispatch_packet_path,
+        timeout_seconds=timeout_seconds,
+        dry_run=dry_run,
+        isolation_mode=isolation_mode,
+        cleanup_policy=cleanup_policy,
+        sandbox_mode=sandbox_mode,
+        shell_command=shell_command,
+        target_model=target_model,
+        target_provider=target_provider,
+        provider_base_url=provider_base_url,
+        provider_api_key_env=provider_api_key_env,
+        provider_wire_api=provider_wire_api,
+        session_id=session_id,
+        command_runner=command_runner,
+        context_ledger=context_ledger,
+        max_added_context_tokens=max_added_context_tokens,
+    ).wait()
+
+
+def reconstruct_dispatched_session(
+    record: SessionRecord,
+) -> tuple[DispatchPacket, SessionSpec]:
+    """Reconstruct and verify the exact packet and binding used for a session."""
+    evidence = record.dispatch
+    if not isinstance(evidence, dict):
+        raise ProtocolError("Session record is missing dispatch evidence")
+    packet_path = Path(_as_string(evidence, "packet_path"))
+    expected_sha256 = _as_string(evidence, "packet_sha256")
+    if not packet_path.is_file():
+        raise ProtocolError("Session dispatch packet artifact does not exist")
+    if sha256_file(packet_path) != expected_sha256:
+        raise ProtocolError("Session dispatch packet artifact hash does not match evidence")
+    with packet_path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle)
+    if not isinstance(payload, dict):
+        raise ProtocolError("Session dispatch packet artifact must contain an object")
+    packet = load_dispatch_packet(payload)
+    spec = _load_session_spec(_as_mapping(evidence, "session_spec"))
+    _validate_dispatch_binding(packet, spec)
+    canonical_spec = create_session_spec(
+        packet.assignment,
+        spec.agent_id,
+        Path(spec.workdir),
+        timeout_seconds=spec.timeout_seconds,
+        dry_run=spec.dry_run,
+        isolation_mode=spec.isolation_mode,
+        cleanup_policy=spec.cleanup_policy,
+        sandbox_mode=spec.sandbox_mode,
+        shell_command=spec.shell_command,
+        target_model=spec.target_model,
+        target_provider=spec.target_provider,
+        provider_base_url=spec.provider_base_url,
+        provider_api_key_env=spec.provider_api_key_env,
+        provider_wire_api=spec.provider_wire_api,
+        session_id=spec.session_id,
+        reuse_workspace_path=spec.reuse_workspace_path,
+    )
+    if canonical_spec != spec:
+        raise ProtocolError("Session dispatch binding is not in canonical form")
+    if packet.packet_id != _as_string(evidence, "packet_id"):
+        raise ProtocolError("Session dispatch packet_id does not match evidence")
+    for field, expected in (
+        ("mission_id", packet.mission_id),
+        ("workflow_id", packet.workflow_id),
+        ("assignment_id", packet.assignment.assignment_id),
+    ):
+        if _as_string(evidence, field) != expected:
+            raise ProtocolError(f"Session dispatch {field} does not match packet")
+    if _as_mapping(evidence, "review_constraints") != packet.review_constraints:
+        raise ProtocolError("Session dispatch review_constraints do not match packet")
+    if _as_mapping(evidence, "turn_report_policy") != packet.turn_report_policy:
+        raise ProtocolError("Session dispatch turn_report_policy does not match packet")
+    if record.session_id != spec.session_id:
+        raise ProtocolError("Session record session_id does not match dispatch binding")
+    if record.assignment_id != spec.assignment_id:
+        raise ProtocolError("Session record assignment_id does not match dispatch binding")
+    if record.agent_id != spec.agent_id:
+        raise ProtocolError("Session record agent_id does not match dispatch binding")
+    return packet, spec
 
 
 def run_session(
@@ -175,9 +553,16 @@ def run_session(
     assignment: AssignmentPacket,
     *,
     command_runner: CommandRunner | None = None,
+    dispatch_packet: DispatchPacket | None = None,
+    process_controller: _ProcessController | None = None,
+    context_resolution: dict[str, Any] | None = None,
 ) -> SessionRecord:
     if assignment.assignment_id != spec.assignment_id:
         raise ProtocolError("Session assignment_id does not match assignment packet")
+    if dispatch_packet is not None:
+        if dispatch_packet.assignment.to_dict() != assignment.to_dict():
+            raise ProtocolError("Launched assignment does not match dispatch packet")
+        _validate_dispatch_binding(dispatch_packet, spec)
 
     started_at = _now()
     started_monotonic = time.monotonic()
@@ -269,9 +654,125 @@ def run_session(
             started_at,
             started_monotonic,
             command_runner=command_runner,
+            dispatch_packet=dispatch_packet,
+            process_controller=process_controller,
+            context_resolution=context_resolution,
         )
 
-    return _run_shell_dummy_session(spec, assignment, started_at, started_monotonic)
+    return _run_shell_dummy_session(
+        spec,
+        assignment,
+        started_at,
+        started_monotonic,
+        process_controller=process_controller,
+    )
+
+
+def run_session_with_context_continuation(
+    spec: SessionSpec,
+    assignment: AssignmentPacket,
+    workflow: Workflow,
+    ledger: Ledger,
+    *,
+    command_runner: CommandRunner | None = None,
+    dispatch_packet: DispatchPacket | None = None,
+    process_controller: _ProcessController | None = None,
+    max_context_requests: int = 1,
+    max_context_artifacts: int = 1,
+    max_added_context_tokens: int = 2000,
+    context_request_ttl_seconds: int = 300,
+    clock: Callable[[], datetime] | None = None,
+) -> SessionRecord:
+    if max_context_requests != 1:
+        raise ProtocolError("The maintained continuation policy requires exactly one request")
+    current_time = clock or (lambda: datetime.now(timezone.utc))
+    first = run_session(
+        spec,
+        assignment,
+        command_runner=command_runner,
+        dispatch_packet=dispatch_packet,
+        process_controller=process_controller,
+    )
+    intent_payload = first.extraction.get("context_request")
+    if not isinstance(intent_payload, dict):
+        return first
+    if first.extraction.get("result_status") != "context_requested":
+        raise ProtocolError("Context request requires result status context_requested")
+
+    intent = load_context_request_intent(intent_payload)
+    continuation_id = f"continuation-{spec.session_id}"
+    request = build_context_request(
+        intent,
+        assignment_id=assignment.assignment_id,
+        session_id=spec.session_id,
+        continuation_id=continuation_id,
+        request_index=1,
+        now=current_time(),
+        ttl_seconds=context_request_ttl_seconds,
+    )
+    resolution = resolve_context_request(
+        assignment,
+        ledger,
+        request,
+        max_artifacts=max_context_artifacts,
+        max_added_tokens=max_added_context_tokens,
+        now=current_time(),
+    )
+    resumed = resolution.status in {"granted", "partially_granted"}
+    lifecycle_events = build_context_lifecycle_events(
+        request,
+        resolution,
+        mission_id=workflow.mission_id,
+        workflow_id=workflow.workflow_id,
+        node_id=assignment.node_id,
+        role=assignment.role,
+        resumed=resumed,
+    )
+    context_entry = {
+        "continuation_id": continuation_id,
+        "context_request_id": request.context_request_id,
+        "status": resolution.status,
+        "requested_refs": request.requested_refs,
+        "added_tokens_estimate": resolution.added_tokens_estimate,
+        "request": request.to_dict(),
+        "resolution": resolution.to_dict(),
+        "resumed": resumed,
+    }
+    if not resumed:
+        return _context_terminal_record(
+            first,
+            context_entry=context_entry,
+            lifecycle_events=lifecycle_events,
+            reason=f"context_{resolution.status}",
+        )
+
+    resumed_spec = replace(
+        spec,
+        workdir=first.workspace["path"],
+        reuse_workspace_path=first.workspace["path"],
+    )
+    final = run_session(
+        resumed_spec,
+        assignment,
+        command_runner=command_runner,
+        dispatch_packet=dispatch_packet,
+        process_controller=process_controller,
+        context_resolution=resolution.to_dict(),
+    )
+    if isinstance(final.extraction.get("context_request"), dict):
+        return _context_terminal_record(
+            final,
+            context_entry=context_entry,
+            lifecycle_events=lifecycle_events,
+            reason="context_request_limit_exhausted",
+        )
+    return _merge_context_continuation_records(
+        first,
+        final,
+        context_entry=context_entry,
+        lifecycle_events=lifecycle_events,
+        added_tokens=resolution.added_tokens_estimate,
+    )
 
 
 def cancel_session_record(record: SessionRecord, reason: str = "cancelled") -> SessionRecord:
@@ -366,7 +867,52 @@ def load_session_record(data: dict[str, Any]) -> SessionRecord:
         outcome_metrics=_as_mapping(data, "outcome_metrics", default={}),
         extraction=_as_mapping(data, "extraction", default={}),
         result_proposal=data.get("result_proposal"),
+        dispatch=data.get("dispatch") if isinstance(data.get("dispatch"), dict) else None,
     )
+
+
+def _load_session_spec(data: dict[str, Any]) -> SessionSpec:
+    timeout_seconds = data.get("timeout_seconds")
+    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+        raise ProtocolError("Dispatch session_spec.timeout_seconds must be > 0")
+    return SessionSpec(
+        session_id=_as_string(data, "session_id"),
+        assignment_id=_as_string(data, "assignment_id"),
+        agent_id=_as_string(data, "agent_id"),
+        workdir=_as_string(data, "workdir"),
+        timeout_seconds=float(timeout_seconds),
+        dry_run=_as_bool(data, "dry_run"),
+        isolation_mode=_as_string(data, "isolation_mode"),
+        cleanup_policy=_as_string(data, "cleanup_policy"),
+        sandbox_mode=_as_string(data, "sandbox_mode"),
+        shell_command=_string_or_none(data.get("shell_command")),
+        target_model=_string_or_none(data.get("target_model")),
+        target_provider=_string_or_none(data.get("target_provider")),
+        provider_base_url=_string_or_none(data.get("provider_base_url")),
+        provider_api_key_env=_string_or_none(data.get("provider_api_key_env")),
+        provider_wire_api=_string_or_none(data.get("provider_wire_api")),
+        reuse_workspace_path=_string_or_none(data.get("reuse_workspace_path")),
+    )
+
+
+def _validate_dispatch_binding(packet: DispatchPacket, spec: SessionSpec) -> None:
+    if spec.assignment_id != packet.assignment.assignment_id:
+        raise ProtocolError("Dispatch binding assignment_id does not match packet")
+    if spec.agent_id == "codex-cli" and (
+        spec.target_model is None or spec.target_provider is None
+    ):
+        raise ProtocolError("Dispatch binding is missing Codex model or provider")
+
+
+def _write_dispatch_packet(path: Path, packet: DispatchPacket) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(packet.to_dict(), handle, sort_keys=False)
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def package_session_result(
@@ -442,6 +988,11 @@ def import_session_record(
     accepted_event_types: list[str] | None = None,
     validation_rule: str | None = None,
 ) -> Any:
+    if ledger.ledger_version >= STRICT_ACCEPTANCE_LEDGER_VERSION:
+        raise ProtocolError(
+            "Strict session import must use application.acceptance.stage_session_record "
+            "and decide_staged_result"
+        )
     result = package_session_result(
         record,
         assignment,
@@ -479,6 +1030,8 @@ def _run_shell_dummy_session(
     assignment: AssignmentPacket,
     started_at: str,
     started_monotonic: float,
+    *,
+    process_controller: _ProcessController | None = None,
 ) -> SessionRecord:
     source_root = Path(spec.workdir).resolve()
     source_root.mkdir(parents=True, exist_ok=True)
@@ -487,13 +1040,13 @@ def _run_shell_dummy_session(
     baseline = _capture_workspace_baseline(workdir)
     _set_workspace_state_refs(workspace, baseline.files)
     try:
-        completed = subprocess.run(
+        completed = _run_live_process(
             ["bash", "-lc", spec.shell_command or ""],
             cwd=workdir,
-            check=False,
-            capture_output=True,
-            text=True,
             timeout=spec.timeout_seconds,
+            env=None,
+            input_text=None,
+            controller=process_controller,
         )
     except subprocess.TimeoutExpired as exc:
         finished_at = _now()
@@ -613,6 +1166,9 @@ def _run_codex_cli_session(
     started_monotonic: float,
     *,
     command_runner: CommandRunner | None = None,
+    dispatch_packet: DispatchPacket | None = None,
+    process_controller: _ProcessController | None = None,
+    context_resolution: dict[str, Any] | None = None,
 ) -> SessionRecord:
     source_root = Path(spec.workdir).resolve()
     source_root.mkdir(parents=True, exist_ok=True)
@@ -631,7 +1187,11 @@ def _run_codex_cli_session(
     env = _build_codex_environment(binding)
     codex_home = _prepare_codex_home(workspace, binding, env)
     command = _build_codex_command(spec, binding, workdir)
-    prompt = _render_codex_assignment_prompt(assignment)
+    prompt = _render_codex_assignment_prompt(
+        assignment,
+        dispatch_packet=dispatch_packet,
+        context_resolution=context_resolution,
+    )
 
     try:
         try:
@@ -642,6 +1202,7 @@ def _run_codex_cli_session(
                 env=env,
                 timeout=spec.timeout_seconds,
                 input_text=prompt,
+                process_controller=process_controller,
             )
         finally:
             _cleanup_codex_home(codex_home)
@@ -714,6 +1275,12 @@ def _run_codex_cli_session(
     extraction["effective_provider"] = binding.provider_id
     extraction["warnings"].extend(codex_extraction.get("warnings", []))
     extraction["parsed_fields"].extend(_string_list_value(codex_extraction.get("parsed_fields")))
+    extraction["native_event_stream_observed"] = (
+        codex_extraction.get("native_event_stream_observed") is True
+    )
+    extraction["native_tool_events"] = _mapping_list_value(
+        codex_extraction.get("native_tool_events")
+    )
     assistant_text = _string_or_none(codex_extraction.get("assistant_text"))
     if assistant_text is not None:
         extraction["assistant_text"] = assistant_text
@@ -725,6 +1292,7 @@ def _run_codex_cli_session(
         "verification",
         "native_log_refs",
         "mutation_proposal_refs",
+        "context_request",
     ):
         if field in codex_extraction:
             extraction[field] = codex_extraction[field]
@@ -778,28 +1346,65 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _render_codex_assignment_prompt(assignment: AssignmentPacket) -> str:
-    return "\n\n".join(
-        [
-            render_assignment_prompt(assignment),
+def _render_codex_assignment_prompt(
+    assignment: AssignmentPacket,
+    *,
+    dispatch_packet: DispatchPacket | None = None,
+    context_resolution: dict[str, Any] | None = None,
+) -> str:
+    sections = [render_assignment_prompt(assignment)]
+    if dispatch_packet is not None:
+        sections.append(
             "\n".join(
                 [
-                    "## Output Contract",
-                    "Return a YAML object as your final answer.",
-                    "Required fields:",
-                    "- status: completed | blocked | completed_with_proposal",
-                    "- emitted_events: list of workflow events you actually satisfied",
-                    "- verification: object with at least status",
-                    "Optional fields:",
-                    "- review_status",
-                    "- mutation_proposal_refs",
-                    "- artifacts",
-                    "Use plain YAML scalars only. Do not use markdown backticks or code fences inside values.",
-                    "Do not wrap the YAML in code fences.",
+                    "## Dispatch Constraints",
+                    f"Packet: {dispatch_packet.packet_id}",
+                    f"Routing mode: {dispatch_packet.routing_decision.selected_mode}",
+                    "Review constraints:",
+                    yaml.safe_dump(
+                        dispatch_packet.review_constraints,
+                        sort_keys=False,
+                    ).strip(),
+                    "Turn report policy:",
+                    yaml.safe_dump(
+                        dispatch_packet.turn_report_policy,
+                        sort_keys=False,
+                    ).strip(),
+                    "These constraints are authoritative for this session.",
                 ]
-            ),
-        ]
+            )
+        )
+    if context_resolution is not None:
+        sections.append(
+            "\n".join(
+                [
+                    "## Context Continuation",
+                    "This is a resumed turn for the same assignment and workspace.",
+                    "Use only this bounded resolution; do not infer unrelated ledger history.",
+                    yaml.safe_dump(context_resolution, sort_keys=False).strip(),
+                ]
+            )
+        )
+    sections.append(
+        "\n".join(
+            [
+                "## Output Contract",
+                "Return a YAML object as your final answer.",
+                "Required fields:",
+                "- status: completed | blocked | completed_with_proposal | context_requested",
+                "- emitted_events: list of workflow events you actually satisfied",
+                "- verification: object with at least status",
+                "Optional fields:",
+                "- review_status",
+                "- mutation_proposal_refs",
+                "- artifacts",
+                "When status is context_requested, include exactly one context_request object.",
+                "Use plain YAML scalars only. Do not use markdown backticks or code fences inside values.",
+                "Do not wrap the YAML in code fences.",
+            ]
+        )
     )
+    return "\n\n".join(sections)
 
 
 def _terminal_event_type(status: str) -> str | None:
@@ -905,6 +1510,11 @@ def _extract_structured_output(
         extraction["mutation_proposal_refs"] = mutation_proposal_refs
         extraction["parsed_fields"].append("mutation_proposal_refs")
 
+    context_request = payload.get("context_request")
+    if isinstance(context_request, dict):
+        extraction["context_request"] = dict(context_request)
+        extraction["parsed_fields"].append("context_request")
+
     diff_refs = _mapping_list_or_none(payload.get("diff_refs"))
     if diff_refs is not None:
         extraction["diff_refs"] = diff_refs
@@ -975,6 +1585,20 @@ def _parse_structured_yaml(text: str) -> tuple[dict[str, Any] | Any, yaml.YAMLEr
 
 
 def _prepare_session_workspace(spec: SessionSpec, source_root: Path) -> dict[str, Any]:
+    if spec.reuse_workspace_path is not None:
+        workspace_path = Path(spec.reuse_workspace_path).resolve()
+        if not workspace_path.is_dir():
+            raise ProtocolError("Continuation workspace does not exist")
+        return {
+            "mode": "continuation",
+            "requested_mode": spec.isolation_mode,
+            "source_root": str(source_root),
+            "path": str(workspace_path),
+            "session_root": str(workspace_path.parent),
+            "cleanup_policy": spec.cleanup_policy,
+            "retained_paths": [str(workspace_path)],
+            "warnings": [],
+        }
     session_root = source_root / ".bureauless" / "sessions" / spec.session_id
     session_root.mkdir(parents=True, exist_ok=True)
     workspace_path = session_root / "workspace"
@@ -1200,18 +1824,282 @@ def _run_command_runner(
     env: dict[str, str],
     timeout: float,
     input_text: str,
+    process_controller: _ProcessController | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    runner = command_runner or subprocess.run
-    return runner(
+    if command_runner is not None:
+        return command_runner(
+            command,
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            input=input_text,
+        )
+    return _run_live_process(
         command,
         cwd=cwd,
-        check=False,
-        capture_output=True,
-        text=True,
         timeout=timeout,
         env=env,
-        input=input_text,
+        input_text=input_text,
+        controller=process_controller,
     )
+
+
+def _run_live_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    env: dict[str, str] | None,
+    input_text: str | None,
+    controller: _ProcessController | None,
+) -> subprocess.CompletedProcess[str]:
+    process_controller = controller or _ProcessController()
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name == "posix",
+    )
+    process_controller.attach(process)
+    try:
+        stdout, stderr = process.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process_controller.request(
+            "timed_out",
+            "timed_out",
+            grace_seconds=0.25,
+        )
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=stdout,
+            stderr=stderr,
+        )
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _signal_process_group(process: subprocess.Popen[str], *, force: bool) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        elif force:
+            process.kill()
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+
+
+def _terminalize_live_record(
+    record: SessionRecord,
+    *,
+    status: str,
+    reason: str,
+    forced: bool,
+) -> SessionRecord:
+    extraction = dict(record.extraction)
+    warnings = list(_string_list_value(extraction.get("warnings")))
+    warnings.append(f"live session terminated as {status}: {reason}")
+    extraction["warnings"] = warnings
+    return replace(
+        record,
+        status=status,
+        finished_at=_now(),
+        exit={
+            "code": record.exit.get("code"),
+            "reason": reason,
+            "termination": {
+                "status": status,
+                "process_group": os.name == "posix",
+                "forced": forced,
+            },
+        },
+        extraction=extraction,
+        result_proposal=None,
+    )
+
+
+def _context_terminal_record(
+    record: SessionRecord,
+    *,
+    context_entry: dict[str, Any],
+    lifecycle_events: list[dict[str, Any]],
+    reason: str,
+) -> SessionRecord:
+    extraction = dict(record.extraction)
+    extraction["context_requests"] = [context_entry]
+    extraction["context_events"] = lifecycle_events
+    metrics = dict(record.outcome_metrics)
+    metrics.update(
+        {
+            "context_request_count": 1,
+            "continuation_turn_count": 0,
+            "added_context_tokens_estimate": 0,
+        }
+    )
+    return replace(
+        record,
+        status="blocked",
+        finished_at=_now(),
+        exit={"code": record.exit.get("code"), "reason": reason},
+        outcome_metrics=metrics,
+        extraction=extraction,
+        result_proposal=None,
+    )
+
+
+def _merge_context_continuation_records(
+    first: SessionRecord,
+    final: SessionRecord,
+    *,
+    context_entry: dict[str, Any],
+    lifecycle_events: list[dict[str, Any]],
+    added_tokens: int,
+) -> SessionRecord:
+    stdout = first.native_logs.get("stdout", "") + final.native_logs.get("stdout", "")
+    stderr = first.native_logs.get("stderr", "") + final.native_logs.get("stderr", "")
+    native_logs = _persist_native_logs(final.workspace, stdout, stderr)
+    metrics = dict(final.outcome_metrics)
+    for field in (
+        "wall_time_ms",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "changed_files_count",
+        "patch_bytes",
+    ):
+        first_value = first.outcome_metrics.get(field)
+        final_value = final.outcome_metrics.get(field)
+        if isinstance(first_value, int) or isinstance(final_value, int):
+            metrics[field] = (
+                first_value if isinstance(first_value, int) else 0
+            ) + (final_value if isinstance(final_value, int) else 0)
+    metrics.update(
+        {
+            "context_request_count": 1,
+            "continuation_turn_count": 1,
+            "granted_context_artifact_count": len(
+                context_entry["resolution"].get("granted_artifacts", [])
+            ),
+            "added_context_tokens_estimate": added_tokens,
+        }
+    )
+    extraction = dict(final.extraction)
+    extraction["native_event_stream_observed"] = bool(
+        first.extraction.get("native_event_stream_observed")
+        or final.extraction.get("native_event_stream_observed")
+    )
+    extraction["native_tool_events"] = [
+        *_mapping_list_value(first.extraction.get("native_tool_events")),
+        *_mapping_list_value(final.extraction.get("native_tool_events")),
+    ]
+    extraction["context_requests"] = [context_entry]
+    extraction["context_events"] = lifecycle_events
+    extraction["continuation_status"] = "completed"
+    return replace(
+        final,
+        session_id=first.session_id,
+        started_at=first.started_at,
+        native_logs=native_logs,
+        diff_refs=[*first.diff_refs, *final.diff_refs],
+        artifacts=[*first.artifacts, *final.artifacts],
+        outcome_metrics=metrics,
+        extraction=extraction,
+    )
+
+
+def _attach_dispatch_turn_report(
+    record: SessionRecord,
+    packet: DispatchPacket,
+) -> SessionRecord:
+    extraction = dict(record.extraction)
+    tool_events = _mapping_list_value(extraction.get("native_tool_events"))
+    stream_observed = extraction.get("native_event_stream_observed") is True
+    telemetry_mode = "observed" if stream_observed else "degraded"
+    compliance_reasons: list[str] = []
+    if not stream_observed:
+        compliance_status = "degraded"
+        compliance_reasons.append("adapter_native_progress_stream_unavailable")
+    elif packet.turn_report_policy.get("after_each_tool_call") and tool_events:
+        compliance_status = "violated"
+        compliance_reasons.append("native_events_aggregated_after_process_exit")
+    else:
+        compliance_status = "compliant"
+
+    report_status = "completed" if record.status == "completed" else "blocked"
+    summary = (
+        f"Session {record.session_id} finished with status {record.status}; "
+        f"observed {len(tool_events)} native tool events."
+    )
+    estimated_report_tokens = max(1, len(summary) // 4)
+    max_report_tokens = packet.turn_report_policy.get("max_report_tokens")
+    if isinstance(max_report_tokens, int) and estimated_report_tokens > max_report_tokens:
+        compliance_status = "violated"
+        compliance_reasons.append("report_token_budget_exceeded")
+    report = load_turn_report(
+        {
+            "report_id": f"turn-{record.session_id}",
+            "assignment_id": record.assignment_id,
+            "agent_id": record.agent_id,
+            "status": report_status,
+            "tool_calls_since_last_report": len(tool_events),
+            "summary": summary,
+            "new_findings": [],
+            "artifact_refs": record.artifacts,
+            "blockers": (
+                []
+                if record.status == "completed"
+                else [{"reason": record.exit.get("reason", record.status)}]
+            ),
+            "suggested_ledger_updates": [],
+            "token_usage": {
+                "input_tokens": _int_value(record.outcome_metrics.get("input_tokens")),
+                "output_tokens": _int_value(record.outcome_metrics.get("output_tokens")),
+            },
+            "observed_at": record.finished_at,
+            "telemetry_mode": telemetry_mode,
+            "source_event_ids": [
+                event["event_id"]
+                for event in tool_events
+                if isinstance(event.get("event_id"), str)
+            ],
+            "policy_compliance": {
+                "status": compliance_status,
+                "reasons": compliance_reasons,
+                "policy": packet.turn_report_policy,
+                "report_tokens_estimate": estimated_report_tokens,
+            },
+        }
+    )
+    for event in tool_events:
+        event.setdefault("observed_at", record.finished_at)
+        event.setdefault("timestamp_source", "native" if event.get("native_timestamp") else "wrapper_capture")
+    extraction["native_tool_events"] = tool_events
+    extraction["turn_reports"] = [report.to_dict()]
+    metrics = dict(record.outcome_metrics)
+    metrics["observed_tool_call_count"] = len(tool_events)
+    metrics["turn_report_telemetry_mode"] = telemetry_mode
+    metrics["turn_report_policy_status"] = compliance_status
+    return replace(record, extraction=extraction, outcome_metrics=metrics)
+
+
+def _int_value(value: Any) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
 
 
 def _collect_workspace_diff(workdir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -1313,6 +2201,8 @@ def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
     metrics: dict[str, Any] = {}
     extraction: dict[str, Any] = {"warnings": [], "parsed_fields": []}
     assistant_text: str | None = None
+    native_tool_events: list[dict[str, Any]] = []
+    native_event_stream_observed = False
 
     for line in stdout.splitlines():
         stripped = line.strip()
@@ -1326,7 +2216,27 @@ def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
         if not isinstance(payload, dict):
             continue
 
+        payload_type = _string_or_none(payload.get("type"))
+        if payload_type is not None:
+            native_event_stream_observed = True
+
         item = payload.get("item")
+        if payload_type == "item.completed" and isinstance(item, dict) and item.get("type") in {
+            "command_execution",
+            "mcp_tool_call",
+            "web_search",
+            "file_change",
+            "tool_call",
+        }:
+            event_id = _string_or_none(item.get("id")) or f"native-tool-{len(native_tool_events) + 1}"
+            native_tool_events.append(
+                {
+                    "event_id": event_id,
+                    "event_type": payload_type or "item.observed",
+                    "item_type": item["type"],
+                    "native_timestamp": _string_or_none(payload.get("timestamp")),
+                }
+            )
         if isinstance(item, dict) and item.get("type") == "agent_message":
             text = _string_or_none(item.get("text"))
             if text is not None:
@@ -1352,6 +2262,9 @@ def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
     if "input_tokens" in metrics or "output_tokens" in metrics:
         metrics["usage_confidence"] = "high"
+    extraction["native_event_stream_observed"] = native_event_stream_observed
+    extraction["native_tool_events"] = native_tool_events
+    extraction["parsed_fields"].append("native_tool_events")
     if assistant_text is not None:
         extraction["assistant_text"] = assistant_text
         extraction["parsed_fields"].append("item.agent_message.text")
@@ -1371,6 +2284,7 @@ def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
                 "verification",
                 "native_log_refs",
                 "mutation_proposal_refs",
+                "context_request",
             ):
                 if field in structured:
                     extraction[field] = structured[field]
@@ -1642,6 +2556,13 @@ def _as_mapping_list(
 
 def _string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _as_bool(data: dict[str, Any], key: str) -> bool:
+    value = data.get(key)
+    if not isinstance(value, bool):
+        raise ProtocolError(f"Session field {key!r} must be boolean")
+    return value
 
 
 def _text_value(value: Any) -> str:

@@ -3,14 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
-from ..protocol.harness import Ledger, Workflow, WorkflowGate, WorkflowNode
+from ..protocol.harness import (
+    STRICT_ACCEPTANCE_LEDGER_VERSION,
+    Ledger,
+    Workflow,
+    WorkflowGate,
+    WorkflowNode,
+)
 from ..protocol.mutations import materialize_current_workflow
 
 
 NodeRuntimeState = Literal["runnable", "blocked", "completed"]
 AssignmentAttemptStatus = Literal[
     "in_flight",
+    "awaiting_context",
+    "context_blocked",
+    "awaiting_acceptance",
     "completed",
+    "rejected",
     "timed_out",
     "cancelled",
     "superseded",
@@ -342,6 +352,55 @@ def _replay_node(
             assignment_id=attempt.assignment_id,
         )
         for attempt in active_assignments
+    )
+    awaiting_acceptance = [
+        attempt
+        for attempt in assignment_attempts
+        if attempt.state == "awaiting_acceptance"
+    ]
+    blocked_reasons.extend(
+        BlockedReason(
+            code="awaiting_acceptance",
+            message=f"Assignment {attempt.assignment_id} is awaiting outcome acceptance",
+            assignment_id=attempt.assignment_id,
+        )
+        for attempt in awaiting_acceptance
+    )
+    awaiting_context = [
+        attempt for attempt in assignment_attempts if attempt.state == "awaiting_context"
+    ]
+    blocked_reasons.extend(
+        BlockedReason(
+            code="awaiting_context",
+            message=f"Assignment {attempt.assignment_id} is awaiting bounded context",
+            assignment_id=attempt.assignment_id,
+        )
+        for attempt in awaiting_context
+    )
+    context_blocked = [
+        attempt for attempt in assignment_attempts if attempt.state == "context_blocked"
+    ]
+    blocked_reasons.extend(
+        BlockedReason(
+            code="context_unresolved",
+            message=f"Assignment {attempt.assignment_id} context request did not resume",
+            assignment_id=attempt.assignment_id,
+        )
+        for attempt in context_blocked
+    )
+    rejected_attempts = [
+        attempt for attempt in assignment_attempts if attempt.state == "rejected"
+    ]
+    blocked_reasons.extend(
+        BlockedReason(
+            code="outcome_rejected",
+            message=(
+                f"Assignment {attempt.assignment_id} outcome was rejected and "
+                "requires an explicit retry or escalation decision"
+            ),
+            assignment_id=attempt.assignment_id,
+        )
+        for attempt in rejected_attempts
     )
 
     for gate in workflow.gates:
@@ -724,6 +783,41 @@ def _derive_assignment_attempts(
             attempt["terminal_event_type"] = event_type
             if event_type == "assignment_superseded":
                 attempt["superseded_by"] = _string_or_none(event.get("superseded_by"))
+        elif event_type == "context_requested":
+            attempt["state"] = "awaiting_context"
+            attempt["terminal_event_id"] = _string_or_none(event.get("event_id"))
+            attempt["terminal_event_type"] = event_type
+        elif event_type == "context_resolved":
+            attempt["state"] = (
+                "awaiting_context"
+                if event.get("status") in {"granted", "partially_granted"}
+                else "context_blocked"
+            )
+            attempt["terminal_event_id"] = _string_or_none(event.get("event_id"))
+            attempt["terminal_event_type"] = event_type
+        elif event_type == "context_resumed":
+            attempt["state"] = "in_flight"
+            attempt["terminal_event_id"] = None
+            attempt["terminal_event_type"] = None
+        elif (
+            ledger.ledger_version >= STRICT_ACCEPTANCE_LEDGER_VERSION
+            and event_type == "result_submitted"
+        ):
+            attempt["state"] = "awaiting_acceptance"
+            attempt["terminal_event_id"] = _string_or_none(event.get("event_id"))
+            attempt["terminal_event_type"] = event_type
+        elif (
+            ledger.ledger_version >= STRICT_ACCEPTANCE_LEDGER_VERSION
+            and event_type == "node_outcome_decided"
+        ):
+            disposition = event.get("disposition")
+            attempt["state"] = (
+                "completed"
+                if disposition in {"accepted", "partially_accepted"}
+                else "rejected"
+            )
+            attempt["terminal_event_id"] = _string_or_none(event.get("event_id"))
+            attempt["terminal_event_type"] = event_type
         for accepted_event in accepted_events_by_index.get(index, []):
             _mark_assignment_completed(workflow, raw_attempts, accepted_event)
 
@@ -835,6 +929,7 @@ def _accepted_workflow_events(
 def _accepted_workflow_events_by_log_index(
     ledger: Ledger,
 ) -> dict[int, list[_AcceptedWorkflowEvent]]:
+    strict = ledger.ledger_version >= STRICT_ACCEPTANCE_LEDGER_VERSION
     decisions_by_assignment: dict[str, dict[str, Any]] = {}
     for event in ledger.event_log:
         if event.get("event_type") != "node_outcome_decided":
@@ -852,9 +947,13 @@ def _accepted_workflow_events_by_log_index(
             continue
         assignment_id = _string_or_none(event.get("assignment_id"))
         node_id = _string_or_none(event.get("node_id"))
-        if assignment_id is not None:
+        if assignment_id is not None and not strict:
             raw_workflow_keys.add((assignment_id, node_id, event_type))
-        if not _workflow_event_is_accepted(event, decisions_by_assignment.get(assignment_id)):
+        if not _workflow_event_is_accepted(
+            event,
+            decisions_by_assignment.get(assignment_id),
+            strict=strict,
+        ):
             continue
         accepted_by_index.setdefault(index, []).append(
             _AcceptedWorkflowEvent(
@@ -897,9 +996,13 @@ def _accepted_workflow_events_by_log_index(
 def _workflow_event_is_accepted(
     event: dict[str, Any],
     decision: dict[str, Any] | None,
+    *,
+    strict: bool,
 ) -> bool:
     event_type = _string_or_none(event.get("event_type"))
     if event_type is None:
+        return False
+    if strict:
         return False
     if decision is None:
         return True
