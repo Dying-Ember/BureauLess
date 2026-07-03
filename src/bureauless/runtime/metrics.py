@@ -194,10 +194,18 @@ def _advisor_outcomes_from_mapping(data: dict[str, Any]) -> list[dict[str, Any]]
             "source_decision_type": _string_or_unknown(event.get("source_decision_type")),
             "source_decision_ref": _string_or_unknown(event.get("source_decision_ref")),
             "advisor_decision_ref": _string_or_unknown(event.get("advisor_decision_ref")),
+            "advisor_recommendation_ref": _string_or_none(
+                event.get("advisor_recommendation_ref")
+            ),
+            "advisor_invocation_ref": _string_or_none(event.get("advisor_invocation_ref")),
+            "recommendation_applied": _bool_or_none(event.get("recommendation_applied")),
             "outcome_ref": _string_or_unknown(event.get("outcome_ref")),
             "classification": _string_or_none(event.get("classification")),
             "pending_reason": _string_or_none(event.get("pending_reason")),
             "actual_advisor_tokens": _int_or_none(event.get("actual_advisor_tokens")),
+            "actual_advisor_cost_usd": _float_or_none(
+                event.get("actual_advisor_cost_usd")
+            ),
             "actual_total_tokens": _int_or_none(event.get("actual_total_tokens")),
             "rework_count": _int_or_none(event.get("rework_count")),
             "broadcast_tokens": _int_or_none(event.get("broadcast_tokens")),
@@ -290,7 +298,10 @@ def _entry_from_session_mapping(data: dict[str, Any]) -> MetricsEntry:
     if not isinstance(verification, dict):
         verification = {}
     context_delivery = _mapping_or_empty(data.get("context_delivery"))
-    context_requests = _mapping_list_or_empty(data.get("context_requests"))
+    extraction = _mapping_or_empty(data.get("extraction"))
+    context_requests = _mapping_list_or_empty(
+        data.get("context_requests", extraction.get("context_requests"))
+    )
     outcome = _mapping_or_empty(data.get("outcome"))
     model = data.get("effective_model")
     if not isinstance(model, str) or not model:

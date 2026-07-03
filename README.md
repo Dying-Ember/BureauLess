@@ -103,7 +103,12 @@ uv run python -m bureauless workflow compile examples/missions/demo/workflows/co
 uv run python -m bureauless ledger replay \
   examples/missions/demo/workflows/coder_reviewer_committer.yaml \
   examples/missions/demo/ledger.yaml
+uv run python -m bureauless mission execution-spine-acceptance \
+  /tmp/bureauless-execution-spine
 ```
+
+The execution-spine command runs the deterministic Runtime M3.5 acceptance
+path and writes a failing-on-error evidence report into the target workspace.
 
 Run the maintained checks with:
 
@@ -270,10 +275,14 @@ delivery status:
 
 - [`docs/README.md`](docs/README.md)
 - [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
+- [`docs/audits/README.md`](docs/audits/README.md)
+- [`docs/audits/2026-07-02-runtime-execution-gap-analysis.md`](docs/audits/2026-07-02-runtime-execution-gap-analysis.md)
 - [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_3_5_tasklist.md`](docs/tasks/runtime_harness_milestone_3_5_tasklist.md)
 - [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
 - [`docs/rfcs/README.md`](docs/rfcs/README.md)
 - [`docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
+- [`docs/rfcs/005-authoritative-result-acceptance-spine.md`](docs/rfcs/005-authoritative-result-acceptance-spine.md)
 - [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md)
 - [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
 - [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)
@@ -283,6 +292,7 @@ The docs now use one shared vocabulary:
 
 - `milestone`: a user-visible delivery target
 - `workstream`: an internal implementation grouping inside a milestone
+- `audit`: evidence-backed capability gaps and their remediation ownership
 
 That keeps runtime and workbench planning aligned instead of letting one side
 talk in phases while the other talks in milestones.

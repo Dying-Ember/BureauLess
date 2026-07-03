@@ -1,6 +1,7 @@
 # Runtime Harness Milestone 3 Task List
 
-Status: completed.
+Status: completed for the declared artifact, validation, API, and maintained-demo
+scope. Runtime integration corrections are planned in Milestone 3.5.
 
 This is the completed Runtime Harness Milestone 3 task list for BureauLess. It
 built on the completed M1, M2, and M2.5 milestones and turned the current
@@ -26,6 +27,27 @@ build a complete multi-provider or multi-agent platform; it adds only the
 minimum binding spine needed to launch a bounded real task and inspect the
 result through the normal runtime surfaces. `opencode` remains the next
 strategic integration target after that first path is stable.
+
+## Post-Completion Integration Audit
+
+The
+[`2026-07-02 runtime execution gap analysis`](../audits/2026-07-02-runtime-execution-gap-analysis.md)
+confirmed that the M3 schemas, validators, APIs, demo artifacts, and Workbench
+inspection paths were delivered, while several artifacts do not yet control the
+real-agent path they describe:
+
+- review decisions do not authoritatively determine node-outcome event
+  acceptance;
+- dispatch packets are compiled after launch in the maintained live demo;
+- context requests have a resolver but no agent request/resume round trip;
+- turn reports are synthesized after completion;
+- advisor evidence proves the skip path but not an invoked path; and
+- artifact-session manifests are produced only by the maintained demo.
+
+These corrections are assigned to
+[`Runtime M3.5`](runtime_harness_milestone_3_5_tasklist.md). Historical M3 task
+cards remain checked because their original protocol/artifact deliverables
+exist; they must not be read as proof of generic end-to-end runtime integration.
 
 Within this document, `milestone` names the user-visible delivery target and
 `workstream` names an internal implementation grouping inside that milestone.
@@ -205,6 +227,10 @@ compilable.
   - Review decisions can be validated independently of worker result payloads.
   - Public findings cannot appear without review provenance.
 
+Post-completion boundary: the review artifact and public-finding projection are
+implemented. RM35-01 owns making review/outcome disposition authoritative for
+workflow event acceptance.
+
 ### [x] RM3-06: Turn Report And Dispatch Packet Compiler
 
 - Status: completed
@@ -224,6 +250,11 @@ compilable.
 - Acceptance criteria:
   - A complete orchestrator proposal can be compiled before worker dispatch.
   - Invalid packets fail before any external session starts.
+
+Post-completion boundary: compiler validation is implemented, but the maintained
+live demo launches from a separately constructed session spec and writes its
+packet afterward. RM35-02 makes the packet the executable pre-launch handoff;
+RM35-05 connects its turn-report policy to observed runtime telemetry.
 
 ## Workstream 3: Ledger Outcomes And Context Delivery
 
@@ -323,6 +354,10 @@ needed for safe continuation, replay, and targeted context delivery.
   - Context requests remain telemetry unless they expose a mission blocker,
     risk, or accepted decision.
 
+Post-completion boundary: request validation and bounded resolution are
+implemented and fixture-tested. RM35-03 owns the missing agent request,
+resolution, and continuation round trip.
+
 ### [x] RM3-10: Context Telemetry And Policy Feedback
 
 - Status: completed
@@ -383,6 +418,10 @@ of isolated unit tests.
   - A real `codex-cli` run has been exercised end to end and verified through
     the workbench against the emitted mission/workflow/ledger artifacts.
 
+Post-completion boundary: the real Codex demo and artifact inspection path are
+maintained. Some M3 artifacts are generated after execution rather than
+controlling it; Runtime M3.5 owns the authoritative end-to-end correction.
+
 ### [x] RM3-12: M3 Runtime API Coverage
 
 - Status: completed
@@ -434,3 +473,8 @@ of isolated unit tests.
 - Invalid orchestrator packets fail before worker launch.
 - Replay and metrics can explain not only what happened, but whether the
   orchestrator's higher-level calls were justified.
+
+Post-completion interpretation: these criteria describe the maintained M3 demo
+and artifact-validation boundary. Runtime M3.5 subsequently closed REX-002
+through REX-008 and added generic authoritative execution evidence without
+rewriting the historical M3 scope.

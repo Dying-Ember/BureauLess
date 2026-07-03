@@ -7,7 +7,7 @@ from typing import Any
 import yaml
 
 from ..errors import ProtocolError
-from .harness import Ledger, Workflow
+from .harness import STRICT_ACCEPTANCE_LEDGER_VERSION, Ledger, Workflow
 from .mutations import load_workflow_mutation_proposal
 
 
@@ -32,6 +32,9 @@ LIFECYCLE_EVENT_TYPES = {
     "workflow_mutation_rejected",
     "review_decision_recorded",
     "advisor_outcome_recorded",
+    "context_requested",
+    "context_resolved",
+    "context_resumed",
 }
 
 MUTATION_DECISION_EVENT_TYPES = {
@@ -47,6 +50,13 @@ def append_ledger_event(
 ) -> Ledger:
     validate_ledger_event(ledger, event, workflow)
     return rebuild_ledger_projection(replace(ledger, event_log=[*ledger.event_log, event]))
+
+
+def require_strict_writable_ledger(ledger: Ledger, operation: str) -> None:
+    if ledger.ledger_version < STRICT_ACCEPTANCE_LEDGER_VERSION:
+        raise ProtocolError(
+            f"{operation} requires ledger_version 2; migrate the legacy ledger first"
+        )
 
 
 def validate_ledger_event(
@@ -65,6 +75,15 @@ def validate_ledger_event(
         allowed_event_types.update(workflow.events)
     if event_type not in allowed_event_types:
         raise ProtocolError(f"Unknown ledger event type: {event_type}")
+    if (
+        ledger.ledger_version >= STRICT_ACCEPTANCE_LEDGER_VERSION
+        and workflow is not None
+        and event_type in workflow.events
+    ):
+        raise ProtocolError(
+            "Strict ledgers cannot append workflow completion events directly; "
+            "use node_outcome_decided accepted_event_types"
+        )
 
     if event_type == "workflow_mutation_proposed":
         _validate_mutation_proposed_event(ledger, event, workflow)
@@ -73,11 +92,13 @@ def validate_ledger_event(
     elif event_type == "assignment_superseded":
         _validate_mutation_supersession_event(ledger, event)
     elif event_type == "node_outcome_decided":
-        _validate_node_outcome_decision_event(event)
+        _validate_node_outcome_decision_event(ledger, event)
     elif event_type == "review_decision_recorded":
         _validate_review_decision_recorded_event(ledger, event)
     elif event_type == "advisor_outcome_recorded":
         _validate_advisor_outcome_recorded_event(event)
+    elif event_type in {"context_requested", "context_resolved", "context_resumed"}:
+        _validate_context_lifecycle_event(ledger, event, event_type)
 
     mission_id = event.get("mission_id")
     if mission_id is not None and mission_id != ledger.mission_id:
@@ -106,6 +127,54 @@ def validate_ledger_event(
                 raise ProtocolError(
                     f"Role {role} is not allowed to produce event {event_type}"
                 )
+
+
+def _validate_context_lifecycle_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+    event_type: str,
+) -> None:
+    assignment_id = _required_string(event, "assignment_id")
+    request_id = _required_string(event, "context_request_id")
+    if event_type == "context_requested":
+        from .context import load_context_request
+
+        request_payload = event.get("request")
+        if not isinstance(request_payload, dict):
+            raise ProtocolError("context_requested requires a request object")
+        request = load_context_request(request_payload)
+        if request.assignment_id != assignment_id:
+            raise ProtocolError("Context request assignment_id does not match event")
+        if request.context_request_id != request_id:
+            raise ProtocolError("Context request id does not match event")
+        return
+
+    source_event_id = _required_string(event, "source_event_id")
+    source = next(
+        (item for item in ledger.event_log if item.get("event_id") == source_event_id),
+        None,
+    )
+    expected_type = "context_requested" if event_type == "context_resolved" else "context_resolved"
+    if source is None or source.get("event_type") != expected_type:
+        raise ProtocolError(f"{event_type} source_event_id must reference {expected_type}")
+    if source.get("assignment_id") != assignment_id or source.get("context_request_id") != request_id:
+        raise ProtocolError("Context lifecycle identity does not match source event")
+    if event_type == "context_resolved":
+        resolution = event.get("resolution")
+        if not isinstance(resolution, dict):
+            raise ProtocolError("context_resolved requires a resolution object")
+        status = event.get("status")
+        if status not in {
+            "granted",
+            "partially_granted",
+            "denied",
+            "unavailable",
+            "expired",
+            "budget_exceeded",
+        }:
+            raise ProtocolError("context_resolved status is invalid")
+    elif source.get("status") not in {"granted", "partially_granted"}:
+        raise ProtocolError("context_resumed requires a granted resolution")
 
 
 def _validate_mutation_proposed_event(
@@ -259,8 +328,19 @@ def _validate_mutation_supersession_event(
         )
 
 
-def _validate_node_outcome_decision_event(event: dict[str, Any]) -> None:
-    _required_string(event, "source_outcome_id")
+def _validate_node_outcome_decision_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+) -> None:
+    source_outcome_id = _required_string(event, "source_outcome_id")
+    if any(
+        existing.get("event_type") == "node_outcome_decided"
+        and existing.get("source_outcome_id") == source_outcome_id
+        for existing in ledger.event_log
+    ):
+        raise ProtocolError(
+            "node_outcome_decided source_outcome_id already has a terminal decision"
+        )
     _required_string(event, "actor")
     disposition = _required_string(event, "disposition")
     if disposition not in {"accepted", "partially_accepted", "rejected"}:
@@ -288,12 +368,109 @@ def _validate_node_outcome_decision_event(event: dict[str, Any]) -> None:
         raise ProtocolError(
             "node_outcome_decided accepted_event_types must be a list of strings"
         )
+    if len(accepted_event_types) != len(set(accepted_event_types)):
+        raise ProtocolError(
+            "node_outcome_decided accepted_event_types must not contain duplicates"
+        )
+    if disposition == "rejected" and accepted_event_types:
+        raise ProtocolError(
+            "node_outcome_decided rejected disposition cannot accept workflow events"
+        )
+    if outcome_status in {
+        "failed",
+        "timed_out",
+        "cancelled",
+        "superseded",
+        "stale",
+        "needs_review",
+    } and accepted_event_types:
+        raise ProtocolError(
+            f"node_outcome_decided {outcome_status} outcome cannot accept workflow events"
+        )
+    if ledger.ledger_version >= STRICT_ACCEPTANCE_LEDGER_VERSION:
+        _validate_strict_node_outcome_decision(ledger, event, accepted_event_types)
     for field in ("pre_state_ref", "post_state_ref"):
         value = event.get(field)
         if value is not None and (not isinstance(value, str) or not value):
             raise ProtocolError(
                 f"node_outcome_decided {field} must be a non-empty string when present"
             )
+
+
+def _validate_strict_node_outcome_decision(
+    ledger: Ledger,
+    event: dict[str, Any],
+    accepted_event_types: list[str],
+) -> None:
+    result_event_id = _required_string(event, "source_result_event_id")
+    _required_string(event, "acceptance_policy_version")
+    _required_string(event, "verification_status")
+    _required_string(event, "validation_rule")
+    result_event = next(
+        (
+            existing
+            for existing in ledger.event_log
+            if existing.get("event_id") == result_event_id
+            and existing.get("event_type") == "result_submitted"
+        ),
+        None,
+    )
+    if result_event is None:
+        raise ProtocolError(
+            "node_outcome_decided source_result_event_id must reference result_submitted"
+        )
+    for field in ("assignment_id", "node_id", "workflow_id", "role", "agent_id"):
+        if event.get(field) != result_event.get(field):
+            raise ProtocolError(
+                f"node_outcome_decided {field} must match its result_submitted event"
+            )
+    result = result_event.get("result")
+    if not isinstance(result, dict):
+        raise ProtocolError("Strict result_submitted event must contain a result object")
+    claimed = result.get("emitted_events", [])
+    if not isinstance(claimed, list) or not all(
+        isinstance(item, str) and item for item in claimed
+    ):
+        raise ProtocolError("Strict result emitted_events must be a list of strings")
+    if not set(accepted_event_types) <= set(claimed):
+        raise ProtocolError(
+            "node_outcome_decided accepted events must be claimed by the staged result"
+        )
+    disposition = event.get("disposition")
+    if disposition == "accepted" and set(accepted_event_types) != set(claimed):
+        raise ProtocolError(
+            "node_outcome_decided accepted disposition must accept all claimed events"
+        )
+    if disposition == "partially_accepted" and (
+        not accepted_event_types or set(accepted_event_types) == set(claimed)
+    ):
+        raise ProtocolError(
+            "node_outcome_decided partially_accepted requires a non-empty strict subset"
+        )
+    review_event_id = event.get("source_review_event_id")
+    if review_event_id is None:
+        return
+    if not isinstance(review_event_id, str) or not review_event_id:
+        raise ProtocolError(
+            "node_outcome_decided source_review_event_id must be a non-empty string"
+        )
+    review_event = next(
+        (
+            existing
+            for existing in ledger.event_log
+            if existing.get("event_id") == review_event_id
+            and existing.get("event_type") == "review_decision_recorded"
+        ),
+        None,
+    )
+    if review_event is None or review_event.get("reviewed_event") != result_event_id:
+        raise ProtocolError(
+            "node_outcome_decided review decision must reference its staged result"
+        )
+    if accepted_event_types and review_event.get("verdict") != "approved":
+        raise ProtocolError(
+            "node_outcome_decided cannot accept events from a non-approved review"
+        )
 
 
 def _validate_review_decision_recorded_event(
@@ -357,6 +534,17 @@ def _validate_advisor_outcome_recorded_event(event: dict[str, Any]) -> None:
     _required_string(event, "source_decision_ref")
     _required_string(event, "advisor_decision_ref")
     _required_string(event, "outcome_ref")
+    for field in ("advisor_recommendation_ref", "advisor_invocation_ref"):
+        value = event.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ProtocolError(
+                f"advisor_outcome_recorded {field} must be a non-empty string when present"
+            )
+    recommendation_applied = event.get("recommendation_applied")
+    if recommendation_applied is not None and not isinstance(recommendation_applied, bool):
+        raise ProtocolError(
+            "advisor_outcome_recorded recommendation_applied must be boolean when present"
+        )
     classification = _string_or_none(event.get("classification"))
     pending_reason = _string_or_none(event.get("pending_reason"))
     if status == "pending":
@@ -395,6 +583,15 @@ def _validate_advisor_outcome_recorded_event(event: dict[str, Any]) -> None:
         raise ProtocolError(
             "advisor_outcome_recorded duplicate_context_observed must be boolean when present"
         )
+    actual_advisor_cost_usd = event.get("actual_advisor_cost_usd")
+    if actual_advisor_cost_usd is not None and (
+        not isinstance(actual_advisor_cost_usd, (int, float))
+        or isinstance(actual_advisor_cost_usd, bool)
+        or actual_advisor_cost_usd < 0
+    ):
+        raise ProtocolError(
+            "advisor_outcome_recorded actual_advisor_cost_usd must be non-negative when present"
+        )
     price_snapshot_attribution = event.get("price_snapshot_attribution")
     if price_snapshot_attribution is not None and not isinstance(
         price_snapshot_attribution, dict
@@ -402,6 +599,21 @@ def _validate_advisor_outcome_recorded_event(event: dict[str, Any]) -> None:
         raise ProtocolError(
             "advisor_outcome_recorded price_snapshot_attribution must be an object when present"
         )
+    if classification in {"good_call", "bad_call"}:
+        if not event.get("advisor_recommendation_ref") or not event.get(
+            "advisor_invocation_ref"
+        ):
+            raise ProtocolError(
+                "invoked advisor_outcome_recorded requires recommendation and invocation refs"
+            )
+        if recommendation_applied is None:
+            raise ProtocolError(
+                "invoked advisor_outcome_recorded requires recommendation disposition"
+            )
+        if event.get("actual_advisor_tokens") is None or actual_advisor_cost_usd is None:
+            raise ProtocolError(
+                "invoked advisor_outcome_recorded requires observed token and cost evidence"
+            )
 
 
 def write_ledger(path: Path, ledger: Ledger) -> None:

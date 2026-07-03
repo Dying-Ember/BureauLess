@@ -89,7 +89,7 @@ become ledger facts.
 
 ```yaml
 mission_id: optimize-worker-lifecycle
-ledger_version: 1
+ledger_version: 2
 current_goal: >
   Improve worker lifecycle behavior while preserving UI responsiveness.
 current_plan_ref: workflows/workflow-001.yaml
@@ -101,6 +101,12 @@ broadcasts: []
 open_questions: []
 event_log: []
 ```
+
+`ledger_version: 2` uses strict result acceptance. A worker result is staged as
+`result_submitted`, and only a later `node_outcome_decided` event can make its
+claimed workflow events effective. Version 1 remains readable with historical
+replay semantics but maintained mutating CLI/API paths require explicit
+conservative migration to v2.
 
 Accepted artifacts should use immutable artifact records.
 
@@ -205,30 +211,32 @@ outcome, evidence refs, and validation rule.
 ```yaml
 event_id: event-outcome-decision-017
 event_type: node_outcome_decided
+mission_id: optimize-worker-lifecycle
+workflow_id: workflow-001
+assignment_id: assign-017
+node_id: implement
+role: coder
+agent_id: coder-agent
+session_id: session-017
+source_result_event_id: event-result-017
 source_outcome_id: outcome-017
-outcome_ref: artifact-outcome-017
+source_review_event_id: event-review-017
+outcome_status: completed
 actor: harness
 disposition: partially_accepted
 pre_state_ref: workspace:abc123
 post_state_ref: workspace:def456
-validation_rule: low_risk_workspace_delta_v1
-accepted:
-  observation_ids:
-    - observation-workspace-delta-017
-    - observation-tests-passed-017
-  finding_ids:
-    - finding-017
-  risk_ids:
-    - risk-017
-rejected_claim_ids: []
-evidence_refs:
-  - artifact-patch-017
-  - artifact-test-report-017
+accepted_event_types:
+  - patch_ready
+acceptance_policy_version: acceptance-v1
+verification_status: passed
+validation_rule: reviewed_verified_result_v1
 ```
 
 The decision event supports `accepted`, `partially_accepted`, and `rejected`
-dispositions without copying the full outcome into the ledger. Effective
-workflow completion events reference this decision event.
+dispositions without copying the full outcome into the ledger. In ledger v2,
+replay materializes effective workflow events at this decision's log position.
+There is at most one terminal decision per `source_outcome_id`.
 
 An outcome's state claims are scoped to its `pre_state_ref`, `post_state_ref`,
 and workflow. If the accepted workspace has moved past the pre-state, the
@@ -300,6 +308,12 @@ Projected `public_findings` and `decisions` derive from
 review provenance through `source_event`, `source_agent`, `accepted_by`, and
 `review_decision_id`. Raw decision packets remain audit evidence; the accepted
 projection remains the canonical current-state view.
+
+A review decision does not complete a workflow node by itself. Harness-owned
+acceptance policy combines its verdict with independently supplied verification
+status and node-outcome state. Only `approved` may authorize accepted event
+types; `rejected` and `changes_requested` accept none. `next_action: retry` is a
+later control request, not permission to accept the current attempt.
 
 ## Artifact Integrity
 
@@ -471,7 +485,55 @@ suggested_ledger_updates: []
 token_usage:
   input_tokens: 0
   output_tokens: 0
+observed_at: "2026-07-03T00:00:02Z"
+telemetry_mode: observed
+source_event_ids:
+  - tool-001
+policy_compliance:
+  status: violated
+  reasons:
+    - native_events_aggregated_after_process_exit
 ```
+
+Turn-report counts and timestamps must come from adapter events or be marked
+degraded. Codex completed command, MCP, search, file-change, and tool events are
+observable through JSONL. The maintained runner currently aggregates them after
+process exit; therefore an `after_each_tool_call` policy with observed tools is
+reported as violated until a streaming adapter emits reports during execution.
+Adapters without an integrated event stream report `telemetry_mode: degraded`,
+zero observed calls, and the capability reason. Turn reports are inspection and
+policy evidence; they do not become canonical mission facts automatically.
+
+## Runtime Run Bundle
+
+A runtime run bundle is a discovery projection that links one maintained
+session to its mission, workflow, ledger, dispatch, session record, and
+available evidence. Demo and ordinary session paths use the same producer and
+validator. Optional artifacts are explicit null values so consumers do not
+infer evidence that was never produced.
+
+Each bundle has a stable `bundle_id`, a monotonic `bundle_revision`, and an
+artifact index containing immutable path and SHA-256 references. Updating the
+projection preserves its identity and replaces the file atomically. Loading a
+bundle rejects missing or changed indexed artifacts.
+
+The bundle is not canonical workflow state. It cannot satisfy gates, accept
+results, append ledger events, or replace replay. Mission, workflow, and
+accepted ledger history remain authoritative; Workbench treats the bundle only
+as an index into validated inspection endpoints.
+
+The maintained Runtime M3.5 acceptance command is:
+
+```bash
+python -m bureauless mission execution-spine-acceptance <workspace>
+```
+
+It verifies pre-launch dispatch, one bounded context continuation, observed
+turn telemetry, explicit result acceptance, process cancellation, advisor
+skip/invocation evidence, accepted replay, and ordinary-session bundle loading.
+It writes `execution_spine_acceptance.yaml` and exits unsuccessfully if any
+required check fails. This report is verification evidence, not a canonical
+ledger or an alternative replay source.
 
 ## Task Result
 
@@ -521,8 +583,16 @@ A result that discovers a structural workflow gap uses
 `mutation_proposal_refs`. Each reference must resolve to an immutable YAML
 artifact in the same result. `completed` and `blocked` results cannot carry
 mutation proposal refs, and blocked results cannot emit completion events.
-Importing this result records only `result_submitted`; it does not append a
-mutation event or alter the workflow.
+In ledger v2, importing any result records only `result_submitted`; it does not
+append claimed workflow events. The node remains blocked with
+`awaiting_acceptance` until policy produces a terminal outcome decision. A
+result carrying mutation references also does not append a mutation event or
+alter the workflow.
+
+This is the implemented M2.5/M3 compatibility shape. The accepted Runtime M4
+contract below replaces the status coupling with an optional typed
+`control_intents` channel while retaining a compatibility reader for existing
+records.
 
 Task result validation must also enforce the
 [Protocol Invariants](#protocol-invariants). A result that reflects scope
@@ -642,6 +712,64 @@ current_workflow + ledger_events      -> current derived state
 This milestone does not expose historical workflow snapshots or arbitrary
 time-based queries.
 
+### Accepted Runtime M4 Extension
+
+Status: accepted by
+[`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md),
+implementation pending under Runtime M4.
+
+Runtime M4 permits every worker to include at most one inert
+`workflow_mutation` intent in `control_intents`, independently of whether the
+execution result is `completed` or `blocked`. The worker supplies only reason,
+rationale, proposed changes, and evidence refs. The harness owns proposal IDs,
+assignment/session/agent provenance, base workflow version, artifact identity,
+and approval policy.
+
+Result staging and intent intake are separate transactions. Intake writes a
+`mutation_intake_disposition` evidence artifact with `registered`, `duplicate`,
+`invalid`, `stale`, or `unsupported` status. Only `registered` appends a new
+`workflow_mutation_proposed` event. Duplicate intake returns the existing
+proposal; failed intake appends no canonical event and never erases a valid
+result.
+
+Maintained mutation/version writes require `ledger_version: 3`. Workflow
+content hashes are SHA-256 over canonical JSON of the validated workflow.
+Version IDs have this form:
+
+```text
+<workflow_id>:v<accepted-mutation-sequence:04d>:<first-12-hash-characters>
+```
+
+Version zero uses sequence `0000`. Each accepted mutation records full
+before/after hashes, parent version, and `workflow_version_before` /
+`workflow_version_after`. Proposal and rejection events do not advance the
+version. V1 stays historical-read only; v2 temporal compatibility is read only;
+explicit v3 migration appends `workflow_version_initialized` without rewriting
+history.
+
+Historical `through_event_id` replay is inclusive. An accepted mutation is
+visible as its child version through its own event; an unknown cursor fails;
+replay through the final event equals current replay. Ledger append order is
+authoritative and timestamps never order replay.
+
+Assignments record their creation workflow version. They remain valid in a
+child version only if deterministic impact proves their node contract,
+dependencies, gates, scoped evidence, and forbidden actions unchanged.
+Affected in-flight assignments are superseded and cancelled when supported;
+late results remain evidence but cannot satisfy gates. Mutation acceptance uses
+compare-and-swap over expected ledger tail and expected current version. Stale
+proposals never auto-rebase.
+
+High-risk safety weakening, protected side effects, permission expansion, and
+high-risk in-flight supersession require a distinct human second approver. A
+proposer cannot approve its own proposal. `review_overdue` becomes replay state
+only after an explicit `workflow_mutation_review_overdue` event; deadline
+timestamps cannot accept or reject anything by themselves.
+
+The first Codex CLI transport uses structured final output. A future native
+tool transport must call the same validator and intake service. Neither
+transport grants workflow, ledger, dispatch, or acceptance authority.
+
 ## Agent Runtime
 
 An agent runtime is an external executor such as Codex CLI, Claude Code, or
@@ -695,6 +823,9 @@ with partial control may still be used manually or behind stricter review gates.
 ## Agent Session
 
 An agent session binds one assignment to one external runtime attempt.
+Maintained external launches must enter through a validated dispatch packet;
+the assignment embedded in that packet is the canonical assignment for the
+attempt.
 
 ```yaml
 session_id: session-001
@@ -713,10 +844,45 @@ native_log_refs:
   - artifact_id: artifact-native-001
     path: artifacts/native/codex-session.jsonl
     sha256: "8d8d0a..."
+dispatch:
+  packet_id: packet-001
+  packet_path: decisions/implement_dispatch_packet.yaml
+  packet_sha256: "c40f5b..."
+  mission_id: optimize-worker-lifecycle
+  workflow_id: workflow-001
+  assignment_id: assign-001
+  session_spec:
+    session_id: session-001
+    assignment_id: assign-001
+    agent_id: codex-cli
+    timeout_seconds: 120
+    sandbox_mode: workspace-write
+    target_model: gpt-5-mini
+    target_provider: bureauless-proxy
 ```
 
 Session records may produce result proposals, but sessions must not write the
 canonical ledger directly.
+
+Native maintained launches return a `LiveSessionHandle` that owns the process
+group and terminal transition. Cancel and supersede are idempotent; the first
+accepted terminal intent wins over a late process exit. Shutdown sends a
+bounded graceful signal to the complete process group and escalates to a forced
+kill when required. A cancelled or superseded record retains native logs,
+workspace snapshots, deltas, metrics, and dispatch evidence, but it carries no
+importable result proposal. Replay therefore treats partial work as an attempt,
+not as workflow completion.
+
+Codex currently has exercised strong process-group cancellation. Registry
+entries for adapters not yet connected to this session lifecycle must report
+weaker cancellation control even when their binary can be killed externally.
+
+The runtime validates and persists the exact dispatch packet before process
+start. Agent, model, provider, sandbox, timeout, review constraints, and
+turn-report policy belong to one dispatch operation. The Codex adapter receives
+the packet routing and policy constraints in its launch prompt. A mismatch
+between packet, assignment, binding, or reconstructed session evidence is a
+pre-launch or reconstruction error, never a warning applied after execution.
 
 Native logs preserve provider-specific evidence. They may include tool calls,
 command output, file edits, and errors, but are not normalized into ledger
@@ -754,24 +920,16 @@ rationale become a ledger decision.
 
 ## Event
 
-Events are append-only facts about execution.
+Ledger events are append-only facts about execution. In ledger v2, workflow
+completion event names are effective projections of an accepted node-outcome
+decision; they are not appended directly.
 
 ```yaml
-event_id: event-001
-mission_id: optimize-worker-lifecycle
-workflow_id: workflow-001
+effective_event: patch_ready
 assignment_id: assign-001
-event_type: patch_ready
-role: coder
-agent_id: coder-agent
-created_at: "2026-06-19T00:00:00Z"
-artifact_refs:
-  - artifact_id: artifact-002
-    path: artifacts/patch.diff
-    sha256: "9b2cf535f27731c974343645a3985328..."
-provenance:
-  source_report: result-001
-  accepted_by: harness
+node_id: implement
+effective_at_event: event-outcome-decision-017
+source_result_event: event-result-017
 ```
 
 ## Gate
@@ -866,10 +1024,25 @@ runtime_action: require_replan_before_new_assignments
 Soft limits may allow current assignments to finish. Hard limits block new
 assignments and advisor calls until human approval or budget revision.
 
+The accepted Runtime M4 `retry-v1` extension classifies failures before another
+attempt is scheduled. Transient infrastructure failures allow three total
+attempts; malformed output, verification repair, and capability rerouting allow
+two; structural, stale/superseded, and policy failures allow one. Retry turns
+default to a 20,000-token aggregate cap, additionally bounded by assignment and
+mission remainder. Non-transient retry requires changed evidence, input,
+strategy, assignment revision, or workflow version.
+
+V3 retry control appends `assignment_retry_scheduled` with a new attempt ID,
+prior attempt, failure class/fingerprint, changed-input evidence, strategy, and
+budget snapshot. The second identical deterministic fingerprint appends
+`assignment_circuit_opened` and launches no third unchanged attempt. Existing
+`assignment_retry_requested` remains a compatibility event until migration.
+
 Assignment terminality must be explicit in replay:
 
-- `patch_ready`, `review_approved`, `commit_created`, and other accepted
-  workflow-completion events terminate the producing assignment as completed.
+- `patch_ready`, `review_approved`, `commit_created`, and other workflow effects
+  accepted by `node_outcome_decided` terminate the producing assignment as
+  completed.
 - `assignment_cancelled`, `assignment_superseded`, `worker_timeout`, and
   `budget_hard_limit_reached` terminate the affected assignment as non-completed.
 - `assignment_retry_requested`, `budget_soft_limit_reached`,
@@ -948,15 +1121,28 @@ not rebroadcast an entire level. Missing evidence is returned as `unavailable`.
 ```yaml
 context_request_id: context-request-004
 assignment_id: assign-022
+session_id: session-022
+continuation_id: continuation-session-022
+request_index: 1
+requested_at: "2026-07-02T08:00:00+00:00"
+expires_at: "2026-07-02T08:05:00+00:00"
 missing_information: The failing verification details are not in the capsule.
 requested_refs:
   - artifact-test-report-017
 expected_value: Determine whether the failure is in the patch or environment.
 ```
 
-Context requests remain session telemetry unless they expose a mission blocker,
-risk, or decision. Repeated requests may produce a versioned policy
-recommendation, but a single run must not change context policy automatically.
+The worker emits only the missing-information intent. The harness owns request,
+continuation, session, policy, and expiration identity. A granted request may
+start another adapter process turn in the same logical session and isolated
+workspace; it is not an assignment retry.
+
+Strict staging records `context_requested`, `context_resolved`, and, when
+granted, `context_resumed` before the eventual result. These lifecycle events
+never satisfy workflow waits. Denied, unavailable, expired, budget-exceeded,
+and exhausted requests remain structured and replayable without producing an
+importable result. The maintained M3.5 policy permits one request and one scoped
+artifact. Broader policies require a new version.
 
 The cold-start acceptance test is explicit: a fresh worker with no previous
 conversation should be able to continue from the mission, assignment, context

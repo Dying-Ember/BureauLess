@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..errors import ProtocolError
+from .advisors import load_advisor_gate_decision
 from .harness import Mission, Workflow
 
 
@@ -129,14 +130,7 @@ def validate_routing_decision(
 
 
 def _validate_advisor_gate_decision(data: dict[str, Any]) -> None:
-    invoked = data.get("invoked")
-    if not isinstance(invoked, bool):
-        raise ProtocolError("Routing decision advisor_gate_decision.invoked must be boolean")
-    _as_string(data, "policy_version")
-    reason = data.get("reason", [])
-    if not isinstance(reason, list) or not all(isinstance(item, str) and item for item in reason):
-        raise ProtocolError("Routing decision advisor_gate_decision.reason must be a list of strings")
-    _as_string(data, "decision_basis")
+    load_advisor_gate_decision(data)
 
 
 def _as_string(data: dict[str, Any], key: str) -> str:

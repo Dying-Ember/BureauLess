@@ -214,7 +214,14 @@ export type GatekeeperResponse = {
 export type ReplayAssignmentAttempt = {
   assignment_id: string;
   node_id: string;
-  state: 'in_flight' | 'completed' | 'timed_out' | 'cancelled' | 'superseded';
+  state:
+    | 'in_flight'
+    | 'awaiting_acceptance'
+    | 'completed'
+    | 'rejected'
+    | 'timed_out'
+    | 'cancelled'
+    | 'superseded';
   created_event_id?: string;
   terminal_event_id?: string;
   terminal_event_type?: string;
@@ -259,12 +266,13 @@ export type ArtifactSessionManifestStep = {
   assignment_path: string;
   context_capsule_path: string;
   context_request_path?: string | null;
+  context_resolution_path?: string | null;
   session_path: string;
-  result_path?: string;
-  node_outcome_path?: string;
-  review_decision_path?: string;
-  turn_report_path?: string;
-  dispatch_packet_path?: string;
+  result_path?: string | null;
+  node_outcome_path?: string | null;
+  review_decision_path?: string | null;
+  turn_report_path?: string | null;
+  dispatch_packet_path?: string | null;
   record_status: string;
   failure_reason?: string | null;
   emitted_events?: string[];
@@ -284,10 +292,10 @@ export type ArtifactSessionManifestResponse = {
   agent: string;
   target_model: string;
   target_provider: string;
-  routing_decision_path: string;
-  advisor_gate_decision_path: string;
-  advisor_gate_outcome_path: string;
-  metrics_summary_path: string;
+  routing_decision_path?: string | null;
+  advisor_gate_decision_path?: string | null;
+  advisor_gate_outcome_path?: string | null;
+  metrics_summary_path?: string | null;
   workbench_url: string;
   steps: ArtifactSessionManifestStep[];
   failure: Record<string, unknown> | null;
@@ -402,9 +410,13 @@ export type AdvisorOutcomeResponse = {
   source_decision_type: string;
   source_decision_ref: string;
   advisor_decision_ref: string;
+  advisor_recommendation_ref?: string | null;
+  advisor_invocation_ref?: string | null;
+  recommendation_applied?: boolean | null;
   classification?: string | null;
   pending_reason?: string | null;
   actual_advisor_tokens?: number;
+  actual_advisor_cost_usd?: number;
   actual_total_tokens?: number;
   rework_count?: number;
   broadcast_tokens?: number;

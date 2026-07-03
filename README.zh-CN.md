@@ -90,7 +90,12 @@ uv run python -m bureauless workflow compile examples/missions/demo/workflows/co
 uv run python -m bureauless ledger replay \
   examples/missions/demo/workflows/coder_reviewer_committer.yaml \
   examples/missions/demo/ledger.yaml
+uv run python -m bureauless mission execution-spine-acceptance \
+  /tmp/bureauless-execution-spine
 ```
+
+`execution-spine-acceptance` 会运行确定性的 Runtime M3.5 验收路径，并在目标
+workspace 中写入遇错即失败的结构化证据报告。
 
 运行当前维护的验证：
 

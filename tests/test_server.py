@@ -4,7 +4,9 @@ import subprocess
 import yaml
 
 from bureauless.core import ProtocolError, create_run_record, load_dag, write_run_record
-from bureauless.cli.main import run_live_demo
+from bureauless.cli.main import run_execution_spine_acceptance, run_live_demo
+from bureauless.application.demo import prepare_demo_workspace
+from bureauless.application.run_bundles import write_run_bundle
 from bureauless.protocol import export_assignment, load_ledger, load_workflow
 from bureauless.api.server import (
     CreateNodeRequest,
@@ -13,7 +15,11 @@ from bureauless.api.server import (
     MutationDecisionRequest,
     NodeDependenciesUpdateRequest,
     NodeMetadataUpdateRequest,
+    OutcomeDecisionRequest,
+    ResultStageRequest,
+    ReviewDecisionImportRequest,
     RuntimeDemoRequest,
+    SessionDispatchRequest,
     create_app,
     dag_payload,
     protocol_error_payload,
@@ -149,7 +155,7 @@ def test_mutation_inspection_and_acceptance_api(tmp_path: Path) -> None:
         yaml.safe_dump(
             {
                 "mission_id": "demo",
-                "ledger_version": 1,
+                "ledger_version": 2,
                 "current_goal": "Test mutations",
                 "current_plan_ref": "workflow.yaml",
                 "public_findings": [],
@@ -259,13 +265,121 @@ def test_runtime_demo_api_creates_reviewable_workspace(tmp_path: Path) -> None:
 
     assert mission["mission_id"] == "demo"
     assert workflow["workflow_id"] == "coder-reviewer-committer-001"
+    assert ledger["ledger_version"] == 2
     assert ledger["event_log"][0]["event_type"] == "assignment_created"
     assert ledger["event_log"][1]["event_type"] == "result_submitted"
-    assert ledger["event_log"][2]["event_type"] == "patch_ready"
+    assert ledger["event_log"][2]["event_type"] == "node_outcome_decided"
+    assert ledger["event_log"][2]["accepted_event_types"] == ["patch_ready"]
     assert replay["nodes"]["implement"]["state"] == "completed"
     assert replay["nodes"]["review"]["state"] == "runnable"
     assert gatekeeper["ready"] == ["review"]
     assert metrics["entries"][0]["assignment_id"] == "assign-implement-demo"
+
+
+def test_acceptance_api_stages_reviews_and_decides_v2_result(tmp_path: Path) -> None:
+    endpoints = _api_endpoints()
+    paths = prepare_demo_workspace(tmp_path / "acceptance-api", ledger_version=2)
+    workflow = load_workflow(paths["workflow"])
+    assignment = export_assignment(
+        workflow,
+        load_ledger(paths["ledger"]),
+        "implement",
+        assignment_id="assign-implement",
+    )
+    assignment_path = paths["assignments_dir"] / "implement_assignment.yaml"
+    assignment_path.write_text(
+        yaml.safe_dump(assignment.to_dict(), sort_keys=False),
+        encoding="utf-8",
+    )
+    outcome_path = paths["outcomes_dir"] / "implement_outcome.yaml"
+    outcome_path.write_text(
+        yaml.safe_dump(
+            {
+                "outcome_id": "outcome-acceptance-api",
+                "assignment_id": assignment.assignment_id,
+                "session_id": "session-acceptance-api",
+                "workflow_id": workflow.workflow_id,
+                "node_id": assignment.node_id,
+                "role": assignment.role,
+                "agent_id": "manual-demo-worker",
+                "status": "completed",
+                "observed_delta": {},
+                "verification": {"status": "passed"},
+                "native_log_refs": [],
+                "diff_refs": [],
+                "outcome_metrics": {},
+                "extraction": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    review_path = paths["reviews_dir"] / "implement_review.yaml"
+    review_path.write_text(
+        yaml.safe_dump(
+            {
+                "decision_type": "review_decision",
+                "decision_id": "review-acceptance-api",
+                "mission_id": workflow.mission_id,
+                "workflow_id": workflow.workflow_id,
+                "reviewed_event": "event-result-implement",
+                "actor": "human",
+                "verdict": "approved",
+                "reason": "Verification evidence passed.",
+                "evidence_refs": [],
+                "accepted_findings": [],
+                "rejected_findings": [],
+                "next_action": "continue",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    staged = endpoints["/api/result/stage"](
+        ResultStageRequest(
+            workflow_path=str(paths["workflow"]),
+            ledger_path=str(paths["ledger"]),
+            assignment_path=str(assignment_path),
+            result_path=str(paths["results_dir"] / "implement_result.yaml"),
+        )
+    )
+    review = endpoints["/api/review-decision/import"](
+        ReviewDecisionImportRequest(
+            workflow_path=str(paths["workflow"]),
+            ledger_path=str(paths["ledger"]),
+            decision_path=str(review_path),
+            decision_ref=str(review_path),
+            event_id="event-review-acceptance-api",
+        )
+    )
+    decided = endpoints["/api/outcome/decide"](
+        OutcomeDecisionRequest(
+            workflow_path=str(paths["workflow"]),
+            ledger_path=str(paths["ledger"]),
+            assignment_path=str(assignment_path),
+            result_path=str(paths["results_dir"] / "implement_result.yaml"),
+            outcome_path=str(outcome_path),
+            verification_status="passed",
+            review_event_id="event-review-acceptance-api",
+            acceptance_policy={
+                "policy_version": "acceptance-v1",
+                "review": {
+                    "required": True,
+                    "allowed_actors": ["orchestrator", "human"],
+                },
+                "verification": {"required_statuses": ["passed"]},
+                "allow_partial_acceptance": False,
+            },
+        )
+    )
+
+    assert staged["status"] == "awaiting_acceptance"
+    assert staged["gatekeeper"]["ready"] == []
+    assert review["verdict"] == "approved"
+    assert decided["status"] == "accepted"
+    assert decided["decision"]["accepted_event_types"] == ["patch_ready"]
+    assert decided["gatekeeper"]["ready"] == ["review"]
 
 
 def test_artifact_session_manifest_api_loads_m3_demo_manifest(
@@ -362,7 +476,7 @@ def test_artifact_session_manifest_api_rejects_incomplete_manifest(tmp_path: Pat
     except ProtocolError as exc:
         assert (
             str(exc)
-            == "Artifact session manifest steps[0] field 'result_path' must be a non-empty string"
+            == "Artifact session manifest steps[0] field 'turn_report_path' must be a non-empty string"
         )
     else:
         raise AssertionError("Expected ProtocolError for incomplete artifact manifest")
@@ -556,6 +670,22 @@ def test_m3_artifact_api_endpoints(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     fetched_dispatch_packet = endpoints["/api/dispatch-packet"](path=str(dispatch_packet_path))
+    dispatched_session = endpoints["/api/session/dispatch"](
+        SessionDispatchRequest(
+            mission_path=mission_path,
+            workflow_path=workflow_path,
+            dispatch_packet_path=str(dispatch_packet_path),
+            session_record_path=str(tmp_path / "session_record.yaml"),
+            ledger_path=str(ledger_path),
+            run_bundle_path=str(tmp_path / "run_bundle.yaml"),
+            agent="fake",
+            workdir=str(tmp_path),
+            session_id="session-api-dispatch",
+        )
+    )
+    ordinary_run_bundle = endpoints["/api/artifact-session-manifest"](
+        path=dispatched_session["run_bundle_path"]
+    )
     advisor_outcome = endpoints["/api/advisor-outcome"](path=str(advisor_outcome_path))
     node_outcome = endpoints["/api/node-outcome"](path=str(node_outcome_path))
     turn_report = endpoints["/api/turn-report"](path=str(turn_report_path))
@@ -570,9 +700,83 @@ def test_m3_artifact_api_endpoints(tmp_path: Path) -> None:
     assert dispatch_packet["packet_id"] == "packet-001"
     assert dispatch_packet["assignment"]["assignment_id"] == "assign-api-m3"
     assert fetched_dispatch_packet["packet_id"] == "packet-001"
+    assert dispatched_session["dispatch"]["packet_id"] == "packet-001"
+    assert dispatched_session["dispatch"]["assignment_id"] == "assign-api-m3"
+    assert (tmp_path / "session_record.yaml").is_file()
+    assert ordinary_run_bundle["flow_id"] == "maintained-session-dispatch"
+    assert ordinary_run_bundle["steps"][0]["result_path"] is None
+    assert ordinary_run_bundle["steps"][0]["node_outcome_path"] is None
+    assert ordinary_run_bundle["advisor_gate_outcome_path"] is None
+    assert ordinary_run_bundle["steps"][0]["assignment_path"].endswith(
+        "run_bundle_artifacts/assignment.yaml"
+    )
+    assert ordinary_run_bundle["artifact_index"]
+    original_bundle_id = ordinary_run_bundle["bundle_id"]
+    updated_run_bundle = write_run_bundle(
+        Path(dispatched_session["run_bundle_path"]),
+        {
+            key: value
+            for key, value in ordinary_run_bundle.items()
+            if key
+            not in {
+                "artifact_index",
+                "bundle_revision",
+                "generated_at",
+                "manifest_path",
+            }
+        }
+        | {"bundle_id": "replacement-must-not-win"},
+    )
+    assert updated_run_bundle["bundle_id"] == original_bundle_id
+    assert updated_run_bundle["bundle_revision"] == 2
+    Path(ordinary_run_bundle["steps"][0]["assignment_path"]).write_text(
+        "tampered: true\n", encoding="utf-8"
+    )
+    try:
+        endpoints["/api/artifact-session-manifest"](
+            path=dispatched_session["run_bundle_path"]
+        )
+    except ProtocolError as exc:
+        assert "artifact hash mismatch" in str(exc)
+    else:
+        raise AssertionError("Expected tampered run-bundle artifact to be rejected")
     assert advisor_outcome["classification"] == "good_skip"
     assert node_outcome["status"] == "completed"
     assert turn_report["report_id"] == "report-001"
+
+
+def test_session_dispatch_rejects_bundle_without_ledger_before_launch() -> None:
+    endpoint = _api_endpoints()["/api/session/dispatch"]
+
+    try:
+        endpoint(
+            SessionDispatchRequest(
+                mission_path="missing-mission.yaml",
+                workflow_path="missing-workflow.yaml",
+                dispatch_packet_path="missing-packet.yaml",
+                session_record_path="must-not-exist.session.yaml",
+                run_bundle_path="must-not-exist.bundle.yaml",
+                agent="fake",
+            )
+        )
+    except ProtocolError as exc:
+        assert str(exc) == "Session run bundle generation requires ledger_path"
+    else:
+        raise AssertionError("Expected run-bundle preflight rejection")
+
+
+def test_execution_spine_bundle_is_available_through_workbench_manifest_api(
+    tmp_path: Path,
+) -> None:
+    report = run_execution_spine_acceptance(tmp_path / "execution-spine-api")
+    manifest = _api_endpoints()["/api/artifact-session-manifest"](
+        path=report["artifacts"]["run_bundle_path"]
+    )
+
+    assert report["status"] == "passed"
+    assert manifest["flow_id"] == "maintained-session-dispatch"
+    assert manifest["steps"][0]["context_request_path"] is not None
+    assert manifest["steps"][0]["context_resolution_path"] is not None
 
 
 def test_validate_api_returns_ok_for_valid_dag() -> None:

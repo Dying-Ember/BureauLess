@@ -1,7 +1,11 @@
 from pathlib import Path
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import json
+import os
 import shutil
 import subprocess
+import time
 
 import pytest
 import yaml
@@ -16,18 +20,34 @@ from bureauless.agents import (
     resolve_agent_binding,
 )
 from bureauless.cli import main
-from bureauless.cli.main import prepare_demo_workspace, prepare_mutation_demo_workspace, run_live_demo
+from bureauless.cli.main import (
+    prepare_demo_workspace,
+    prepare_mutation_demo_workspace,
+    run_advisor_policy_demo,
+    run_live_demo,
+)
 from bureauless.core import ProtocolError
+from bureauless.application.acceptance import (
+    decide_staged_result,
+    stage_result,
+    stage_session_record,
+)
+from bureauless.application.run_bundles import load_run_bundle
 from bureauless.protocol import (
     append_ledger_event,
     apply_advisor_outcome,
     apply_review_decision,
+    build_context_request,
     compile_context_capsule,
     compile_dispatch_packet,
     export_assignment,
     import_result_proposal,
     load_advisor_outcome,
+    load_advisor_gate_decision,
+    load_advisor_invocation,
+    load_advisor_recommendation,
     load_context_request,
+    load_context_request_intent,
     load_dispatch_packet,
     load_assignment,
     load_node_outcome,
@@ -36,6 +56,7 @@ from bureauless.protocol import (
     load_routing_decision,
     load_turn_report,
     materialize_current_workflow,
+    migrate_ledger_to_v2,
     node_outcome_from_session,
     render_assignment_prompt,
     resolve_context_request,
@@ -45,6 +66,7 @@ from bureauless.protocol import (
     verify_ledger_artifacts,
     write_ledger,
 )
+from bureauless.protocol.acceptance import DEFAULT_ACCEPTANCE_POLICY, AcceptancePolicy
 from bureauless.protocol.artifacts import validate_artifact_record
 from bureauless.protocol.budget import estimate_cost_from_snapshot, evaluate_pre_dispatch_policy, load_price_snapshot
 from bureauless.protocol.harness import (
@@ -59,9 +81,11 @@ from bureauless.protocol.mutations import validate_workflow_mutation_proposal
 from bureauless.protocol.outcomes import build_node_outcome_decision_event
 from bureauless.runtime import (
     build_mutation_supersession_events,
+    evaluate_advisor_policy,
     evaluate_assignment_impacts,
     evaluate_gatekeeper,
     replay_workflow,
+    run_advisor_invocation,
     summarize_advisor_scores,
     summarize_metrics,
 )
@@ -71,10 +95,13 @@ from bureauless.runtime.sessions import (
     build_session_terminal_event,
     cancel_session_record,
     create_session_spec,
+    dispatch_session,
     import_session_record,
     load_session_record,
     package_session_result,
+    reconstruct_dispatched_session,
     run_session,
+    start_dispatch_session,
     supersede_session_record,
 )
 
@@ -123,6 +150,42 @@ def _workflow(overrides: dict | None = None) -> Workflow:
     if overrides:
         data.update(overrides)
     return Workflow.from_dict(data)
+
+
+def _dispatch_fixture(workflow, assignment, packet_id="packet-001"):
+    mission = load_mission(Path("examples/missions/demo/mission.yaml"))
+    routing_decision = load_routing_decision(
+        {
+            "decision_type": "routing_decision",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "selected_mode": workflow.mode,
+            "selection_policy_version": "test-v1",
+            "triggered_rules": ["test_dispatch"],
+            "rejected_modes": [
+                {
+                    "mode": "single_agent",
+                    "rejected_because": "The test workflow preserves explicit staged nodes.",
+                }
+            ],
+            "estimated_coordination_ratio": 0.1,
+            "budget_confidence": "high",
+            "reason": "Exercise the canonical dispatch bridge.",
+            "advisor_gate_decision": {
+                "invoked": False,
+                "policy_version": "test-v1",
+                "reason": ["fixture"],
+                "decision_basis": "deterministic_fixture",
+            },
+        }
+    )
+    return mission, compile_dispatch_packet(
+        mission,
+        workflow,
+        routing_decision,
+        assignment,
+        packet_id=packet_id,
+    )
 
 
 def _context_workflow() -> Workflow:
@@ -1364,6 +1427,175 @@ def test_load_advisor_outcome_rejects_missing_pending_reason() -> None:
         )
 
 
+def test_advisor_policy_proves_skip_and_invocation_paths() -> None:
+    skipped = evaluate_advisor_policy(
+        {
+            "node_count": 1,
+            "parallel_width": 1,
+            "risk_level": "low",
+            "estimated_total_tokens": 12000,
+            "commit_or_merge_action": False,
+        }
+    )
+    invoked = evaluate_advisor_policy(
+        {
+            "node_count": 5,
+            "parallel_width": 3,
+            "risk_level": "high",
+            "high_risk_node_count": 1,
+            "broadcast_policy": "full_ledger",
+            "estimated_context_fanout_tokens": 9200,
+        }
+    )
+
+    assert skipped.invoked is False
+    assert "node_count <= 2" in skipped.reason
+    assert invoked.invoked is True
+    assert invoked.advisor == "cost_risk_analyst"
+    assert invoked.estimated_advisor_tokens == 3300
+    assert invoked.estimated_savings_tokens == 9200
+    assert "parallel_width >= 3" in invoked.reason
+
+
+def test_advisor_invocation_rejects_skip_and_execution_authority() -> None:
+    skipped = evaluate_advisor_policy({"node_count": 1, "risk_level": "low"})
+    with pytest.raises(ProtocolError, match="invoked gate decision"):
+        run_advisor_invocation(
+            skipped,
+            {},
+            runner=lambda _decision, _facts: {},
+            invocation_id="advisor-invocation-skipped",
+            gate_decision_ref="gate.yaml",
+            recommendation_ref="recommendation.yaml",
+        )
+
+    invoked = evaluate_advisor_policy({"parallel_width": 3})
+    with pytest.raises(ProtocolError, match="recommendation-only scope"):
+        run_advisor_invocation(
+            invoked,
+            {},
+            runner=lambda decision, _facts: {
+                "recommendation": {
+                    "advisor": decision.advisor,
+                    "verdict": "revise",
+                    "confidence": "medium",
+                    "p50_tokens": 100,
+                    "p90_tokens": 200,
+                    "p50_cost_usd": 0.01,
+                    "p90_cost_usd": 0.02,
+                    "main_cost_drivers": [],
+                    "main_risk_drivers": [],
+                    "recommended_changes": ["Keep review explicit."],
+                    "dispatch": {"agent": "codex-cli"},
+                },
+                "telemetry_mode": "deterministic_fixture",
+                "token_usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                },
+                "cost_usd": 0.001,
+                "capability_scope": "recommendation_only",
+            },
+            invocation_id="advisor-invocation-overreach",
+            gate_decision_ref="gate.yaml",
+            recommendation_ref="recommendation.yaml",
+        )
+
+
+def test_advisor_policy_demo_links_invocation_cost_and_outcome_without_gate_bypass(
+    tmp_path,
+) -> None:
+    invoked = run_advisor_policy_demo(tmp_path / "invoked", scenario="invoke")
+    skipped = run_advisor_policy_demo(tmp_path / "skipped", scenario="skip")
+
+    gate = load_advisor_gate_decision(
+        yaml.safe_load(
+            Path(invoked["advisor_gate_decision_path"]).read_text(encoding="utf-8")
+        )
+    )
+    recommendation = load_advisor_recommendation(
+        yaml.safe_load(
+            Path(invoked["advisor_recommendation_path"]).read_text(encoding="utf-8")
+        )
+    )
+    invocation = load_advisor_invocation(
+        yaml.safe_load(
+            Path(invoked["advisor_invocation_path"]).read_text(encoding="utf-8")
+        )
+    )
+    outcome = load_advisor_outcome(
+        yaml.safe_load(Path(invoked["advisor_outcome_path"]).read_text(encoding="utf-8"))
+    )
+    workflow = load_workflow(Path(invoked["workflow_path"]))
+    ledger = load_ledger(Path(invoked["ledger_path"]))
+    replay = replay_workflow(workflow, ledger)
+
+    assert gate.invoked is True
+    assert recommendation.verdict == "revise"
+    assert invocation.capability_scope == "recommendation_only"
+    assert invocation.total_tokens == 1480
+    assert invocation.cost_usd == 0.0064
+    assert outcome.classification == "good_call"
+    assert outcome.recommendation_applied is True
+    assert outcome.actual_advisor_tokens == invocation.total_tokens
+    assert outcome.actual_advisor_cost_usd == invocation.cost_usd
+    assert outcome.advisor_recommendation_ref == invocation.recommendation_ref
+    assert workflow.broadcast_policy == {"default": "filtered_delta"}
+    assert replay.nodes["implement"].state == "runnable"
+    assert all(node.state != "completed" for node in replay.nodes.values())
+    assert ledger.event_log[-1]["event_type"] == "advisor_outcome_recorded"
+
+    scored_ledger = append_ledger_event(
+        replace(ledger, ledger_version=1),
+        {
+            "event_id": "event-advisor-demo-terminal",
+            "event_type": "commit_created",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "assignment_id": "assign-advisor-demo",
+            "node_id": "commit",
+            "role": "committer",
+            "agent_id": "fixture",
+        },
+        workflow,
+    )
+    score_summary = summarize_advisor_scores(
+        scored_ledger,
+        workflow=workflow,
+        artifact_root=tmp_path / "invoked",
+    )
+    assert score_summary["classification_counts"]["good_call"] == 1
+    assert score_summary["scores"][0]["recommendation_applied"] is True
+
+    skipped_outcome = load_advisor_outcome(
+        yaml.safe_load(Path(skipped["advisor_outcome_path"]).read_text(encoding="utf-8"))
+    )
+    assert skipped["invoked"] is False
+    assert skipped["advisor_invocation_path"] is None
+    assert skipped_outcome.classification == "good_skip"
+    assert skipped_outcome.actual_advisor_tokens == 0
+    assert skipped_outcome.actual_advisor_cost_usd == 0.0
+
+
+def test_cli_advisor_demo_exposes_maintained_invocation_path(tmp_path, capsys) -> None:
+    exit_code = main(
+        [
+            "mission",
+            "advisor-demo",
+            str(tmp_path / "cli-advisor-demo"),
+            "--scenario",
+            "invoke",
+        ]
+    )
+    payload = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["invoked"] is True
+    assert payload["classification"] == "good_call"
+    assert Path(payload["advisor_invocation_path"]).is_file()
+
+
 def test_apply_advisor_outcome_appends_replayable_event() -> None:
     workflow = _workflow()
     ledger = _empty_ledger()
@@ -1377,8 +1609,12 @@ def test_apply_advisor_outcome_appends_replayable_event() -> None:
             "source_decision_type": "routing_decision",
             "source_decision_ref": "artifacts/decisions/routing-001.yaml",
             "advisor_decision_ref": "artifacts/decisions/advisor-gate-002.yaml",
+            "advisor_recommendation_ref": None,
+            "advisor_invocation_ref": None,
+            "recommendation_applied": None,
             "classification": "good_skip",
             "actual_advisor_tokens": 0,
+            "actual_advisor_cost_usd": None,
             "actual_total_tokens": 18400,
             "rework_count": 0,
             "broadcast_tokens": 1200,
@@ -1484,7 +1720,7 @@ def test_cli_import_advisor_outcome_updates_ledger(tmp_path, capsys) -> None:
         Ledger.from_dict(
             {
                 "mission_id": "demo",
-                "ledger_version": 1,
+                "ledger_version": 2,
                 "current_goal": "Goal",
                 "current_plan_ref": "workflow.yaml",
                 "public_findings": [],
@@ -1884,8 +2120,12 @@ def test_validate_routing_decision_rejects_complex_mode_without_simpler_rejectio
             "reason": "Use many workers.",
             "advisor_gate_decision": {
                 "invoked": True,
+                "advisor": "cost_risk_analyst",
                 "policy_version": "0.1",
                 "reason": ["parallel_width >= 3"],
+                "estimated_advisor_tokens": 3300,
+                "estimated_savings_tokens": 9200,
+                "confidence": "low",
                 "decision_basis": "first_run_heuristic",
             },
         }
@@ -2328,7 +2568,7 @@ def test_cli_import_review_decision_updates_ledger_projection(tmp_path, capsys) 
         ),
         encoding="utf-8",
     )
-    ledger = _empty_ledger()
+    ledger = replace(_empty_ledger(), ledger_version=2)
     ledger = append_ledger_event(
         ledger,
         {
@@ -2497,7 +2737,7 @@ def test_cli_appends_ledger_event(tmp_path) -> None:
         yaml.safe_dump(
             {
                 "mission_id": "demo",
-                "ledger_version": 1,
+                "ledger_version": 2,
                 "current_goal": "Goal",
                 "current_plan_ref": "workflow.yaml",
                 "public_findings": [],
@@ -2516,9 +2756,10 @@ def test_cli_appends_ledger_event(tmp_path) -> None:
         yaml.safe_dump(
             {
                 "event_id": "event-001",
-                "event_type": "patch_ready",
+                "event_type": "assignment_created",
                 "mission_id": "demo",
                 "workflow_id": "coder-reviewer-committer-001",
+                "assignment_id": "assign-001",
                 "node_id": "implement",
                 "role": "coder",
             },
@@ -2541,6 +2782,7 @@ def test_cli_appends_ledger_event(tmp_path) -> None:
 
     assert exit_code == 0
     assert ledger.event_log[0]["event_id"] == "event-001"
+    assert ledger.event_log[0]["event_type"] == "assignment_created"
 
 
 def test_rejects_duplicate_or_unknown_ledger_events() -> None:
@@ -3547,6 +3789,265 @@ def test_resolve_context_request_reports_denied_and_unavailable_refs() -> None:
     ]
 
 
+def test_codex_context_request_resolves_and_resumes_same_logical_session(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workflow = _workflow()
+    ledger = replace(
+        _empty_ledger(),
+        ledger_version=2,
+        artifacts=[
+            {
+                "artifact_id": "artifact-api-contract",
+                "path": "artifacts/api-contract.md",
+                "sha256": "abc123",
+                "source_event": "event-contract",
+            },
+            {
+                "artifact_id": "artifact-secret-branch",
+                "path": "artifacts/secret.md",
+                "sha256": "secret",
+                "source_event": "event-secret",
+            },
+        ],
+    )
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "implement",
+        assignment_id="assign-context-continuation",
+    )
+    assignment = replace(
+        assignment,
+        artifact_refs=[{"artifact_id": "artifact-api-contract"}],
+    )
+    mission, packet = _dispatch_fixture(
+        workflow,
+        assignment,
+        "packet-context-continuation",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    prompts: list[str] = []
+    workdirs: list[Path] = []
+
+    def runner(command, **kwargs):
+        prompts.append(kwargs["input"])
+        workdirs.append(Path(kwargs["cwd"]))
+        if len(prompts) == 1:
+            Path(kwargs["cwd"]).joinpath("requested-context.txt").write_text(
+                "requesting\n", encoding="utf-8"
+            )
+            text = (
+                "status: context_requested\n"
+                "emitted_events: []\n"
+                "verification:\n  status: not_run\n"
+                "context_request:\n"
+                "  missing_information: Need the API contract.\n"
+                "  requested_refs: [artifact-api-contract]\n"
+                "  expected_value: Avoid guessing the existing API.\n"
+            )
+        else:
+            assert "artifact-api-contract" in kwargs["input"]
+            assert "artifact-secret-branch" not in kwargs["input"]
+            Path(kwargs["cwd"]).joinpath("continued.txt").write_text(
+                "continued\n", encoding="utf-8"
+            )
+            text = (
+                "status: completed\n"
+                "emitted_events: [patch_ready]\n"
+                "verification:\n  status: passed\n"
+            )
+        stdout = (
+            '{"type":"item.completed","item":{"id":"item_0",'
+            '"type":"agent_message","text":'
+            + json.dumps(text)
+            + "}}\n"
+            '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}\n'
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    record = dispatch_session(
+        mission,
+        workflow,
+        packet,
+        agent_id="codex-cli",
+        workdir=tmp_path,
+        dispatch_packet_path=tmp_path / "dispatch.yaml",
+        target_model="gpt-5",
+        target_provider="openai",
+        session_id="session-context-continuation",
+        command_runner=runner,
+        context_ledger=ledger,
+    )
+
+    assert len(prompts) == 2
+    assert workdirs[0] == workdirs[1]
+    assert record.status == "completed"
+    assert record.session_id == "session-context-continuation"
+    assert record.outcome_metrics["continuation_turn_count"] == 1
+    assert record.outcome_metrics["context_request_count"] == 1
+    assert record.outcome_metrics["added_context_tokens_estimate"] > 0
+    assert record.outcome_metrics["changed_files_count"] == 2
+    assert Path(record.workspace["path"]).joinpath("requested-context.txt").is_file()
+    assert Path(record.workspace["path"]).joinpath("continued.txt").is_file()
+    assert record.extraction["context_requests"][0]["resumed"] is True
+    assert [event["event_type"] for event in record.extraction["context_events"]] == [
+        "context_requested",
+        "context_resolved",
+        "context_resumed",
+    ]
+
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            record.session_id,
+            record.agent_id,
+        ),
+        workflow,
+    )
+    staged = stage_session_record(workflow, ledger, assignment, record)
+    assert [event["event_type"] for event in staged.ledger.event_log[-4:]] == [
+        "context_requested",
+        "context_resolved",
+        "context_resumed",
+        "result_submitted",
+    ]
+    replay = replay_workflow(workflow, staged.ledger)
+    assert replay.nodes["implement"].state == "blocked"
+    assert replay.nodes["implement"].blocked_reasons[0].code == "awaiting_acceptance"
+
+
+def test_context_continuation_denied_request_never_resumes(tmp_path, monkeypatch) -> None:
+    workflow = _workflow()
+    ledger = replace(
+        _empty_ledger(),
+        ledger_version=2,
+        artifacts=[{"artifact_id": "artifact-secret", "path": "secret.md"}],
+    )
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "implement",
+        assignment_id="assign-context-denied",
+    )
+    assignment = replace(assignment, artifact_refs=[])
+    mission, packet = _dispatch_fixture(workflow, assignment, "packet-context-denied")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    calls = 0
+
+    def runner(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        text = (
+            "status: context_requested\n"
+            "emitted_events: []\n"
+            "verification:\n  status: not_run\n"
+            "context_request:\n"
+            "  missing_information: Need secret branch history.\n"
+            "  requested_refs: [artifact-secret]\n"
+            "  expected_value: Inspect unrelated history.\n"
+        )
+        stdout = (
+            '{"type":"item.completed","item":{"id":"item_0",'
+            '"type":"agent_message","text":'
+            + json.dumps(text)
+            + "}}\n"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    record = dispatch_session(
+        mission,
+        workflow,
+        packet,
+        agent_id="codex-cli",
+        workdir=tmp_path,
+        dispatch_packet_path=tmp_path / "dispatch.yaml",
+        target_model="gpt-5",
+        target_provider="openai",
+        command_runner=runner,
+        context_ledger=ledger,
+    )
+
+    assert calls == 1
+    assert record.status == "blocked"
+    assert record.exit["reason"] == "context_denied"
+    assert record.result_proposal is None
+    assert record.extraction["context_requests"][0]["resumed"] is False
+    assert record.extraction["context_events"][-1]["event_type"] == "context_resolved"
+
+    replay_ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            record.session_id,
+            record.agent_id,
+        ),
+        workflow,
+    )
+    for event in record.extraction["context_events"]:
+        replay_ledger = append_ledger_event(replay_ledger, event, workflow)
+    replay = replay_workflow(workflow, replay_ledger)
+    assert replay.nodes["implement"].assignment_attempts[0].state == "context_blocked"
+    assert replay.nodes["implement"].blocked_reasons[0].code == "context_unresolved"
+
+
+def test_context_resolution_enforces_expiry_and_added_token_budget() -> None:
+    workflow = _workflow()
+    ledger = replace(
+        _empty_ledger(),
+        artifacts=[
+            {
+                "artifact_id": "artifact-large",
+                "path": "artifacts/large.md",
+                "sha256": "a" * 256,
+            }
+        ],
+    )
+    assignment = export_assignment(workflow, ledger, "implement", assignment_id="assign-context")
+    assignment = replace(assignment, artifact_refs=[{"artifact_id": "artifact-large"}])
+    intent = load_context_request_intent(
+        {
+            "missing_information": "Need bounded evidence.",
+            "requested_refs": ["artifact-large"],
+            "expected_value": "Use the exact contract.",
+        }
+    )
+    started = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    request = build_context_request(
+        intent,
+        assignment_id=assignment.assignment_id,
+        session_id="session-context",
+        continuation_id="continuation-session-context",
+        request_index=1,
+        now=started,
+        ttl_seconds=10,
+    )
+
+    expired = resolve_context_request(
+        assignment,
+        ledger,
+        request,
+        now=started + timedelta(seconds=11),
+    )
+    over_budget = resolve_context_request(
+        assignment,
+        ledger,
+        request,
+        max_added_tokens=1,
+        now=started + timedelta(seconds=1),
+    )
+
+    assert expired.status == "expired"
+    assert expired.granted_artifacts == []
+    assert over_budget.status == "budget_exceeded"
+    assert over_budget.granted_artifacts == []
+    assert over_budget.denied_refs[0]["reason"] == "context_token_budget_exceeded"
+
+
 def test_cli_assignment_prompt_export(capsys) -> None:
     exit_code = main(
         [
@@ -3697,7 +4198,7 @@ def test_cli_result_import(tmp_path) -> None:
         yaml.safe_dump(
             {
                 "mission_id": "demo",
-                "ledger_version": 1,
+                "ledger_version": 2,
                 "current_goal": "Goal",
                 "current_plan_ref": "workflow.yaml",
                 "public_findings": [],
@@ -3759,8 +4260,12 @@ def test_cli_result_import(tmp_path) -> None:
 
     assert exit_code == 0
     assert updated.public_findings == []
-    assert updated.event_log[0]["event_type"] == "result_submitted"
-    assert updated.event_log[1]["event_type"] == "patch_ready"
+    assert [event["event_type"] for event in updated.event_log] == [
+        "result_submitted"
+    ]
+    assert replay_workflow(load_workflow(workflow_path), updated).nodes[
+        "implement"
+    ].blocked_reasons[0].code == "awaiting_acceptance"
 
 
 def test_cli_session_import(tmp_path, capsys) -> None:
@@ -3772,7 +4277,7 @@ def test_cli_session_import(tmp_path, capsys) -> None:
         yaml.safe_dump(
             {
                 "mission_id": "demo",
-                "ledger_version": 1,
+                "ledger_version": 2,
                 "current_goal": "Goal",
                 "current_plan_ref": "workflow.yaml",
                 "public_findings": [],
@@ -3854,12 +4359,10 @@ def test_cli_session_import(tmp_path, capsys) -> None:
     payload = yaml.safe_load(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert [event["event_type"] for event in updated.event_log] == [
-        "result_submitted",
-        "patch_ready",
-        "node_outcome_decided",
-    ]
-    assert payload[-1]["event_type"] == "node_outcome_decided"
+    assert [event["event_type"] for event in updated.event_log] == ["result_submitted"]
+    assert payload["status"] == "awaiting_acceptance"
+    assert Path(payload["result_path"]).exists()
+    assert Path(payload["outcome_path"]).exists()
 
 
 def test_result_import_advances_gatekeeper_and_replay_state() -> None:
@@ -4272,6 +4775,509 @@ def test_replay_rejects_raw_workflow_event_when_outcome_decision_rejects_it() ->
     assert replay.nodes["review"].blocked_reasons[0].missing_ref == "patch_ready"
 
 
+def test_v2_replay_stages_result_until_outcome_decision() -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=2)
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "implement",
+        assignment_id="assign-001",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            session_id="session-001",
+            agent_id="codex-cli",
+        ),
+        workflow,
+    )
+    result = load_result_proposal(
+        {
+            "result_id": "result-001",
+            "assignment_id": "assign-001",
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "emitted_events": ["patch_ready"],
+            "artifacts": [],
+            "outcome_metrics": {
+                "wall_time_ms": 1000,
+                "changed_files_count": 1,
+            },
+            "verification": {"status": "passed"},
+            "native_log_refs": [],
+        }
+    )
+    ledger = import_result_proposal(workflow, ledger, assignment, result)
+
+    replay = replay_workflow(workflow, ledger)
+    gatekeeper = evaluate_gatekeeper(workflow, ledger)
+
+    assert [event["event_type"] for event in ledger.event_log] == [
+        "assignment_created",
+        "result_submitted",
+    ]
+    assert replay.nodes["implement"].state == "blocked"
+    assert replay.nodes["implement"].assignment_attempts[0].state == (
+        "awaiting_acceptance"
+    )
+    assert replay.nodes["implement"].blocked_reasons[0].code == (
+        "awaiting_acceptance"
+    )
+    assert gatekeeper.ready == []
+
+
+def test_v2_replay_materializes_only_outcome_accepted_events() -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=2)
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "implement",
+        assignment_id="assign-001",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            session_id="session-001",
+            agent_id="codex-cli",
+        ),
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-result-001",
+            "event_type": "result_submitted",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "assignment_id": assignment.assignment_id,
+            "node_id": assignment.node_id,
+            "role": assignment.role,
+            "agent_id": "codex-cli",
+            "result": {
+                "result_id": "result-001",
+                "assignment_id": assignment.assignment_id,
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "emitted_events": ["patch_ready"],
+                "artifacts": [],
+                "outcome_metrics": {},
+                "verification": {"status": "passed"},
+                "native_log_refs": [],
+                "mutation_proposal_refs": [],
+            },
+        },
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-outcome-001",
+            "event_type": "node_outcome_decided",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "assignment_id": assignment.assignment_id,
+            "node_id": assignment.node_id,
+            "role": assignment.role,
+            "agent_id": "codex-cli",
+            "session_id": "session-001",
+            "source_result_event_id": "event-result-001",
+            "source_outcome_id": "outcome-001",
+            "outcome_status": "completed",
+            "actor": "harness",
+            "disposition": "accepted",
+            "accepted_event_types": ["patch_ready"],
+            "acceptance_policy_version": "acceptance-v1",
+            "verification_status": "passed",
+            "validation_rule": "verified_result_v1",
+        },
+        workflow,
+    )
+
+    replay = replay_workflow(workflow, ledger)
+
+    assert replay.nodes["implement"].state == "completed"
+    assert replay.nodes["implement"].assignment_attempts[0].state == "completed"
+    assert replay.nodes["review"].state == "runnable"
+
+
+def test_v1_to_v2_migration_quarantines_undecided_result_events() -> None:
+    workflow = _workflow()
+    source = _empty_ledger()
+    assignment = export_assignment(
+        workflow,
+        source,
+        "implement",
+        assignment_id="assign-migrate-001",
+    )
+    result = load_result_proposal(
+        {
+            "result_id": "result-migrate-001",
+            "assignment_id": assignment.assignment_id,
+            "agent_id": "legacy-worker",
+            "status": "completed",
+            "emitted_events": ["patch_ready"],
+            "artifacts": [],
+            "outcome_metrics": {
+                "wall_time_ms": 1,
+                "changed_files_count": 1,
+            },
+            "verification": {"status": "passed"},
+            "native_log_refs": [],
+        }
+    )
+    source = import_result_proposal(workflow, source, assignment, result)
+
+    migration = migrate_ledger_to_v2(workflow, source)
+    replay = replay_workflow(workflow, migration.ledger)
+
+    assert source.ledger_version == 1
+    assert replay_workflow(workflow, source).nodes["implement"].state == "completed"
+    assert migration.ledger.ledger_version == 2
+    assert migration.report["quarantined_results"] == [
+        {
+            "assignment_id": "assign-migrate-001",
+            "result_event_id": "event-result-migrate-001",
+            "claimed_event_types": ["patch_ready"],
+            "reason": "requires_acceptance_review",
+        }
+    ]
+    assert replay.nodes["implement"].state == "blocked"
+    assert replay.nodes["implement"].blocked_reasons[0].code == "awaiting_acceptance"
+
+
+def test_cli_migrate_v2_preserves_source_and_writes_report(tmp_path, capsys) -> None:
+    workflow_path = Path(
+        "examples/missions/demo/workflows/coder_reviewer_committer.yaml"
+    )
+    source_path = tmp_path / "ledger-v1.yaml"
+    output_path = tmp_path / "ledger-v2.yaml"
+    source_path.write_text(
+        yaml.safe_dump(
+            {
+                "mission_id": "demo",
+                "ledger_version": 1,
+                "current_goal": "Goal",
+                "current_plan_ref": "workflow.yaml",
+                "public_findings": [],
+                "decisions": [],
+                "risks": [],
+                "artifacts": [],
+                "broadcasts": [],
+                "open_questions": [],
+                "event_log": [],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "ledger",
+            "migrate-v2",
+            str(workflow_path),
+            str(source_path),
+            str(output_path),
+        ]
+    )
+    payload = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert load_ledger(source_path).ledger_version == 1
+    assert load_ledger(output_path).ledger_version == 2
+    assert Path(payload["report"]).exists()
+    assert payload["from_version"] == 1
+    assert payload["to_version"] == 2
+
+
+def test_cli_rejects_v1_result_write_until_migrated(tmp_path, capsys) -> None:
+    workflow_path = Path(
+        "examples/missions/demo/workflows/coder_reviewer_committer.yaml"
+    )
+    paths = prepare_demo_workspace(tmp_path / "legacy-write")
+    assignment_path = tmp_path / "assignment.yaml"
+    assignment = export_assignment(
+        load_workflow(workflow_path),
+        load_ledger(paths["ledger"]),
+        "implement",
+        assignment_id="assign-legacy-write",
+    )
+    assignment_path.write_text(
+        yaml.safe_dump(assignment.to_dict(), sort_keys=False),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "result",
+            "import",
+            str(workflow_path),
+            str(paths["ledger"]),
+            str(assignment_path),
+            str(paths["results_dir"] / "implement_result.yaml"),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "requires ledger_version 2" in capsys.readouterr().err
+
+
+def _v2_staged_acceptance_fixture():
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=2)
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "implement",
+        assignment_id="assign-acceptance-001",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            session_id="session-acceptance-001",
+            agent_id="codex-cli",
+        ),
+        workflow,
+    )
+    result = load_result_proposal(
+        {
+            "result_id": "result-acceptance-001",
+            "assignment_id": assignment.assignment_id,
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "emitted_events": ["patch_ready"],
+            "artifacts": [],
+            "outcome_metrics": {
+                "wall_time_ms": 1000,
+                "changed_files_count": 1,
+            },
+            "verification": {"status": "passed"},
+            "native_log_refs": [],
+        }
+    )
+    outcome = load_node_outcome(
+        {
+            "outcome_id": "outcome-acceptance-001",
+            "assignment_id": assignment.assignment_id,
+            "session_id": "session-acceptance-001",
+            "workflow_id": workflow.workflow_id,
+            "node_id": assignment.node_id,
+            "role": assignment.role,
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "pre_state_ref": "workspace:before",
+            "post_state_ref": "workspace:after",
+            "observed_delta": {"changed_files_count": 1},
+            "verification": {"status": "passed"},
+            "native_log_refs": [],
+            "diff_refs": [],
+            "outcome_metrics": {},
+            "extraction": {},
+        }
+    )
+    staged = stage_result(workflow, ledger, assignment, result, outcome)
+    return workflow, assignment, result, outcome, staged
+
+
+def _apply_acceptance_review(
+    workflow,
+    ledger,
+    *,
+    verdict="approved",
+    next_action="continue",
+):
+    decision = load_review_decision(
+        {
+            "decision_type": "review_decision",
+            "decision_id": "review-acceptance-001",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "reviewed_event": "event-result-acceptance-001",
+            "actor": "orchestrator",
+            "verdict": verdict,
+            "reason": "Acceptance policy review evidence.",
+            "evidence_refs": [],
+            "accepted_findings": [],
+            "rejected_findings": [],
+            "next_action": next_action,
+        }
+    )
+    return apply_review_decision(
+        ledger,
+        decision,
+        workflow=workflow,
+        event_id="event-review-acceptance-001",
+        decision_ref="reviews/review-acceptance-001.yaml",
+    )
+
+
+def test_acceptance_service_requires_review_and_verification() -> None:
+    workflow, assignment, result, outcome, staged = _v2_staged_acceptance_fixture()
+
+    with pytest.raises(ProtocolError, match="requires a review decision"):
+        decide_staged_result(
+            workflow,
+            staged.ledger,
+            assignment,
+            result,
+            outcome,
+            policy=DEFAULT_ACCEPTANCE_POLICY,
+            verification_status="passed",
+        )
+
+    reviewed = _apply_acceptance_review(workflow, staged.ledger)
+    accepted = decide_staged_result(
+        workflow,
+        reviewed,
+        assignment,
+        result,
+        outcome,
+        policy=DEFAULT_ACCEPTANCE_POLICY,
+        verification_status="passed",
+        review_event_id="event-review-acceptance-001",
+    )
+
+    assert accepted.disposition == "accepted"
+    assert accepted.accepted_event_types == ["patch_ready"]
+    assert replay_workflow(workflow, accepted.ledger).nodes["review"].state == (
+        "runnable"
+    )
+
+
+@pytest.mark.parametrize(
+    ("verdict", "verification_status"),
+    [("rejected", "passed"), ("changes_requested", "passed"), ("approved", "failed")],
+)
+def test_acceptance_service_rejects_failed_policy_evidence(
+    verdict,
+    verification_status,
+) -> None:
+    workflow, assignment, result, outcome, staged = _v2_staged_acceptance_fixture()
+    reviewed = _apply_acceptance_review(
+        workflow,
+        staged.ledger,
+        verdict=verdict,
+        next_action="retry" if verdict == "changes_requested" else "stop",
+    )
+
+    decided = decide_staged_result(
+        workflow,
+        reviewed,
+        assignment,
+        result,
+        outcome,
+        policy=DEFAULT_ACCEPTANCE_POLICY,
+        verification_status=verification_status,
+        review_event_id="event-review-acceptance-001",
+    )
+
+    assert decided.disposition == "rejected"
+    assert decided.accepted_event_types == []
+    assert replay_workflow(workflow, decided.ledger).nodes["implement"].state == (
+        "blocked"
+    )
+
+
+def test_acceptance_service_enforces_partial_and_single_terminal_decision() -> None:
+    workflow = _workflow(
+        {
+            "nodes": [
+                {
+                    "id": "implement",
+                    "role": "coder",
+                    "emits": ["patch_ready", "verification_ready"],
+                }
+            ],
+            "events": {
+                "patch_ready": {"producer_roles": ["coder"]},
+                "verification_ready": {"producer_roles": ["coder"]},
+            },
+            "terminal_events": ["patch_ready"],
+        }
+    )
+    ledger = replace(_empty_ledger(), ledger_version=2)
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "implement",
+        assignment_id="assign-partial-001",
+    )
+    result = load_result_proposal(
+        {
+            "result_id": "result-partial-001",
+            "assignment_id": assignment.assignment_id,
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "emitted_events": ["patch_ready", "verification_ready"],
+            "artifacts": [],
+            "outcome_metrics": {
+                "wall_time_ms": 1,
+                "changed_files_count": 1,
+            },
+            "verification": {"status": "passed"},
+            "native_log_refs": [],
+        }
+    )
+    outcome = load_node_outcome(
+        {
+            "outcome_id": "outcome-partial-001",
+            "assignment_id": assignment.assignment_id,
+            "session_id": "session-partial-001",
+            "workflow_id": workflow.workflow_id,
+            "node_id": assignment.node_id,
+            "role": assignment.role,
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "observed_delta": {},
+            "verification": {"status": "passed"},
+            "native_log_refs": [],
+            "diff_refs": [],
+            "outcome_metrics": {},
+            "extraction": {},
+        }
+    )
+    staged = stage_result(workflow, ledger, assignment, result, outcome)
+    policy = AcceptancePolicy(
+        policy_version="acceptance-v1",
+        review_required=False,
+        allowed_review_actors=["orchestrator", "human"],
+        required_verification_statuses=["passed"],
+        allow_partial_acceptance=True,
+    )
+    decided = decide_staged_result(
+        workflow,
+        staged.ledger,
+        assignment,
+        result,
+        outcome,
+        policy=policy,
+        verification_status="passed",
+        accepted_event_types=["patch_ready"],
+    )
+
+    assert decided.disposition == "partially_accepted"
+    with pytest.raises(ProtocolError, match="already has a terminal decision"):
+        decide_staged_result(
+            workflow,
+            decided.ledger,
+            assignment,
+            result,
+            outcome,
+            policy=policy,
+            verification_status="passed",
+            accepted_event_types=["patch_ready"],
+            event_id="event-outcome-partial-duplicate",
+        )
+
+
 def test_cli_mission_golden_path_prepares_manifest_and_executes_end_to_end(
     tmp_path, capsys
 ) -> None:
@@ -4343,12 +5349,17 @@ def test_cli_mission_golden_path_prepares_manifest_and_executes_end_to_end(
     updated = load_ledger(Path(manifest["ledger_path"]))
     assert [event["event_type"] for event in updated.event_log] == [
         "result_submitted",
-        "patch_ready",
+        "node_outcome_decided",
         "result_submitted",
-        "review_approved",
+        "node_outcome_decided",
         "result_submitted",
-        "commit_created",
+        "node_outcome_decided",
     ]
+    assert [
+        event["accepted_event_types"]
+        for event in updated.event_log
+        if event["event_type"] == "node_outcome_decided"
+    ] == [["patch_ready"], ["review_approved"], ["commit_created"]]
 
 
 def test_run_live_demo_executes_three_node_session_path(tmp_path, monkeypatch) -> None:
@@ -4438,6 +5449,55 @@ def test_run_live_demo_executes_three_node_session_path(tmp_path, monkeypatch) -
     ]
 
 
+def test_execution_spine_acceptance_cli_proves_cross_capability_path(
+    tmp_path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "execution-spine-acceptance"
+    exit_code = main(
+        ["mission", "execution-spine-acceptance", str(workspace)]
+    )
+    report = yaml.safe_load(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert report["status"] == "passed"
+    assert all(check["passed"] is True for check in report["checks"].values())
+    assert Path(report["report_path"]).is_file()
+    assert report["deferred_findings"] == {
+        "REX-001": "Owned by Runtime M4 mutation intake and temporal replay scope."
+    }
+
+    ledger = load_ledger(Path(report["artifacts"]["ledger_path"]))
+    lifecycle = [
+        event["event_type"]
+        for event in ledger.event_log
+        if event["event_type"]
+        in {
+            "context_requested",
+            "context_resolved",
+            "context_resumed",
+            "result_submitted",
+            "review_decision_recorded",
+            "node_outcome_decided",
+        }
+    ]
+    assert lifecycle == [
+        "context_requested",
+        "context_resolved",
+        "context_resumed",
+        "result_submitted",
+        "review_decision_recorded",
+        "node_outcome_decided",
+    ]
+    bundle = load_run_bundle(Path(report["artifacts"]["run_bundle_path"]))
+    assert bundle["flow_id"] == "maintained-session-dispatch"
+    assert bundle["steps"][0]["context_request_path"] is not None
+    assert bundle["steps"][0]["context_resolution_path"] is not None
+    assert bundle["steps"][0]["result_path"] is None
+    assert report["checks"]["cancellation_safety"]["forced"] is True
+    assert Path(report["checks"]["advisor_policy"]["invoked_outcome_path"]).is_file()
+
+
 def test_run_live_demo_returns_partial_manifest_when_session_times_out(
     tmp_path,
     monkeypatch,
@@ -4480,21 +5540,40 @@ def test_run_live_demo_returns_partial_manifest_when_session_times_out(
                 / "assignments"
                 / "implement_assignment.yaml"
             ),
-            "context_capsule_path": str(
+                "context_capsule_path": str(
                 tmp_path
                 / "live-demo-timeout"
                 / "generated"
                 / "capsules"
-                / "implement_context_capsule.yaml"
-            ),
-            "session_path": str(
+                    / "implement_context_capsule.yaml"
+                ),
+                "context_request_path": None,
+                "context_resolution_path": None,
+                "session_path": str(
                 tmp_path
                 / "live-demo-timeout"
                 / "generated"
                 / "sessions"
-                / "implement_session.yaml"
-            ),
-            "record_status": "timed_out",
+                    / "implement_session.yaml"
+                ),
+                "result_path": None,
+                "node_outcome_path": None,
+                "review_decision_path": None,
+                "turn_report_path": str(
+                    tmp_path
+                    / "live-demo-timeout"
+                    / "generated"
+                    / "telemetry"
+                    / "implement_turn_report.yaml"
+                ),
+                "dispatch_packet_path": str(
+                    tmp_path
+                    / "live-demo-timeout"
+                    / "generated"
+                    / "decisions"
+                    / "implement_dispatch_packet.yaml"
+                ),
+                "record_status": "timed_out",
             "failure_reason": "timed_out",
             "ready_after": [],
             "node_state_after": "blocked",
@@ -4649,6 +5728,7 @@ def test_agent_compatibility_reports_limited_for_partial_config_isolation() -> N
 
     assert compatibility.compatibility_state == "limited"
     assert compatibility.capabilities["config_isolation"] == "weak"
+    assert compatibility.capabilities["cancellation_control"] == "weak"
     assert "config_isolation" in compatibility.reasons
 
 
@@ -6186,37 +7266,31 @@ def test_replay_tracks_superseded_assignment_without_marking_completed() -> None
 
 
 def test_cli_session_run_and_cancel(tmp_path, capsys) -> None:
-    assignment_path = tmp_path / "assignment.yaml"
     session_path = tmp_path / "session.yaml"
-    workflow = _workflow()
-    ledger = Ledger.from_dict(
-        {
-            "mission_id": "demo",
-            "ledger_version": 1,
-            "current_goal": "Goal",
-            "current_plan_ref": "workflow.yaml",
-            "public_findings": [],
-            "decisions": [],
-            "risks": [],
-            "artifacts": [],
-            "broadcasts": [],
-            "open_questions": [],
-            "event_log": [],
-        }
+    mission_path = Path("examples/missions/demo/mission.yaml")
+    workflow_path = Path(
+        "examples/missions/demo/workflows/coder_reviewer_committer.yaml"
     )
-    assignment_path.write_text(
-        yaml.safe_dump(
-            export_assignment(workflow, ledger, "implement", assignment_id="assign-001").to_dict(),
-            sort_keys=False,
-        ),
-        encoding="utf-8",
+    workflow = load_workflow(workflow_path)
+    assignment = export_assignment(
+        workflow,
+        load_ledger(Path("examples/missions/demo/ledger.yaml")),
+        "implement",
+        assignment_id="assign-001",
+    )
+    _, packet = _dispatch_fixture(workflow, assignment)
+    packet_path = tmp_path / "dispatch.yaml"
+    packet_path.write_text(
+        yaml.safe_dump(packet.to_dict(), sort_keys=False), encoding="utf-8"
     )
 
     exit_code = main(
         [
             "session",
             "run",
-            str(assignment_path),
+            str(mission_path),
+            str(workflow_path),
+            str(packet_path),
             "--agent",
             "fake",
             "--session-id",
@@ -6228,8 +7302,14 @@ def test_cli_session_run_and_cancel(tmp_path, capsys) -> None:
 
     assert exit_code == 0
     assert payload["status"] == "completed"
+    assert payload["dispatch"]["packet_id"] == "packet-001"
+    assert payload["dispatch"]["assignment_id"] == "assign-001"
     assert payload["extraction"]["status"] == "synthetic"
     assert payload["result_proposal"]["assignment_id"] == "assign-001"
+    degraded_report = payload["extraction"]["turn_reports"][0]
+    assert degraded_report["telemetry_mode"] == "degraded"
+    assert degraded_report["tool_calls_since_last_report"] == 0
+    assert degraded_report["policy_compliance"]["status"] == "degraded"
 
     cancel_exit = main(["session", "cancel", str(session_path), "--reason", "user_cancelled"])
     updated = load_session_record(yaml.safe_load(session_path.read_text(encoding="utf-8")))
@@ -6238,6 +7318,266 @@ def test_cli_session_run_and_cancel(tmp_path, capsys) -> None:
     assert cancel_exit == 0
     assert updated.status == "cancelled"
     assert updated.exit["reason"] == "user_cancelled"
+
+
+def test_dispatch_session_rejects_invalid_packet_before_runner(tmp_path) -> None:
+    workflow = _workflow()
+    assignment = export_assignment(
+        workflow,
+        _empty_ledger(),
+        "implement",
+        assignment_id="assign-dispatch-invalid",
+    )
+    mission, packet = _dispatch_fixture(workflow, assignment)
+    invalid_packet = replace(packet, workflow_id="wrong-workflow")
+    runner_called = False
+
+    def runner(*_args, **_kwargs):
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("invalid dispatch reached the external runner")
+
+    with pytest.raises(ProtocolError, match="workflow_id does not match workflow"):
+        dispatch_session(
+            mission,
+            workflow,
+            invalid_packet,
+            agent_id="codex-cli",
+            workdir=tmp_path,
+            dispatch_packet_path=tmp_path / "dispatch.yaml",
+            target_model="gpt-5",
+            target_provider="openai",
+            command_runner=runner,
+        )
+
+    assert runner_called is False
+    assert not (tmp_path / "dispatch.yaml").exists()
+
+
+def test_dispatch_session_persists_prelaunch_packet_and_reconstructs_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workflow = _workflow()
+    assignment = export_assignment(
+        workflow,
+        _empty_ledger(),
+        "implement",
+        assignment_id="assign-dispatch-001",
+    )
+    mission, packet = _dispatch_fixture(workflow, assignment)
+    packet_path = tmp_path / "evidence" / "dispatch.yaml"
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def runner(command, **_kwargs):
+        assert packet_path.is_file()
+        assert load_dispatch_packet(
+            yaml.safe_load(packet_path.read_text(encoding="utf-8"))
+        ).packet_id == packet.packet_id
+        assert "Packet: packet-001" in _kwargs["input"]
+        assert "Review constraints:" in _kwargs["input"]
+        assert "Turn report policy:" in _kwargs["input"]
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                '{"type":"item.completed","timestamp":"2026-07-03T00:00:01Z",'
+                '"item":{"id":"tool-001","type":"command_execution","command":"pytest -q"}}\n'
+                '{"type":"item.completed","item":{"id":"item_0",'
+                '"type":"agent_message","text":"status: completed\\n'
+                'emitted_events:\\n  - patch_ready\\nverification:\\n  status: passed"}}\n'
+                '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20}}\n'
+            ),
+            stderr="",
+        )
+
+    record = dispatch_session(
+        mission,
+        workflow,
+        packet,
+        agent_id="codex-cli",
+        workdir=tmp_path,
+        dispatch_packet_path=packet_path,
+        timeout_seconds=17,
+        sandbox_mode="workspace-write",
+        target_model="gpt-5",
+        target_provider="openai",
+        session_id="session-dispatch-001",
+        command_runner=runner,
+    )
+    reconstructed_packet, reconstructed_spec = reconstruct_dispatched_session(record)
+
+    assert record.dispatch is not None
+    assert reconstructed_packet.to_dict() == packet.to_dict()
+    assert reconstructed_spec.to_dict() == record.dispatch["session_spec"]
+    assert reconstructed_spec.timeout_seconds == 17
+    assert reconstructed_spec.target_model == "gpt-5"
+    assert reconstructed_spec.target_provider == "openai"
+    assert reconstructed_spec.sandbox_mode == "workspace-write"
+    assert record.dispatch["review_constraints"] == packet.review_constraints
+    assert record.dispatch["turn_report_policy"] == packet.turn_report_policy
+    observed_report = record.extraction["turn_reports"][0]
+    assert observed_report["telemetry_mode"] == "observed"
+    assert observed_report["tool_calls_since_last_report"] == 1
+    assert observed_report["source_event_ids"] == ["tool-001"]
+    assert observed_report["observed_at"] == record.finished_at
+    assert observed_report["policy_compliance"]["status"] == "violated"
+    assert observed_report["policy_compliance"]["reasons"] == [
+        "native_events_aggregated_after_process_exit"
+    ]
+    assert record.extraction["native_tool_events"][0]["native_timestamp"] == (
+        "2026-07-03T00:00:01Z"
+    )
+    assert record.outcome_metrics["observed_tool_call_count"] == 1
+
+    strict_ledger = append_ledger_event(
+        replace(_empty_ledger(), ledger_version=2),
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            record.session_id,
+            record.agent_id,
+        ),
+        workflow,
+    )
+    staged = stage_session_record(workflow, strict_ledger, assignment, record)
+    assert staged.ledger.event_log[-1]["event_type"] == "result_submitted"
+    assert all(
+        event["event_type"] != "turn_report_recorded"
+        for event in staged.ledger.event_log
+    )
+
+    tampered_evidence = dict(record.dispatch)
+    tampered_spec = dict(tampered_evidence["session_spec"])
+    tampered_spec["assignment_id"] = "assign-other"
+    tampered_evidence["session_spec"] = tampered_spec
+    with pytest.raises(ProtocolError, match="assignment_id does not match packet"):
+        reconstruct_dispatched_session(replace(record, dispatch=tampered_evidence))
+
+
+def test_live_dispatch_cancellation_kills_process_group_and_preserves_evidence(
+    tmp_path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    marker_path = tmp_path / "started.marker"
+    child_pid_path = tmp_path / "child.pid"
+    workflow = _workflow()
+    assignment = export_assignment(
+        workflow,
+        _empty_ledger(),
+        "implement",
+        assignment_id="assign-live-cancel",
+    )
+    mission, packet = _dispatch_fixture(workflow, assignment, "packet-live-cancel")
+    command = (
+        "printf 'partial-output\\n'; "
+        "printf 'partial-work\\n' > partial.txt; "
+        f"printf started > {marker_path}; "
+        "trap '' TERM; "
+        "sleep 30 & "
+        f"printf '%s' $! > {child_pid_path}; "
+        "wait"
+    )
+    handle = start_dispatch_session(
+        mission,
+        workflow,
+        packet,
+        agent_id="shell-dummy",
+        workdir=source_root,
+        dispatch_packet_path=tmp_path / "dispatch.yaml",
+        shell_command=command,
+        session_id="session-live-cancel",
+    )
+    deadline = time.monotonic() + 2
+    while not marker_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert marker_path.exists()
+
+    assert handle.cancel("user_cancelled", grace_seconds=0.05) is True
+    assert handle.cancel("duplicate_cancel", grace_seconds=0.05) is False
+    assert handle.supersede("late_supersede", grace_seconds=0.05) is False
+    record = handle.wait(timeout=2)
+
+    assert record.status == "cancelled"
+    assert record.exit["reason"] == "user_cancelled"
+    assert record.exit["termination"] == {
+        "status": "cancelled",
+        "process_group": True,
+        "forced": True,
+    }
+    assert record.result_proposal is None
+    assert "partial-output" in record.native_logs["stdout"]
+    assert Path(record.native_logs["stdout_path"]).is_file()
+    assert Path(record.workspace["path"]).joinpath("partial.txt").is_file()
+    assert record.outcome_metrics["changed_files_count"] == 1
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+    ledger = append_ledger_event(
+        _empty_ledger(),
+        build_assignment_created_event(
+            workflow,
+            assignment,
+            record.session_id,
+            record.agent_id,
+        ),
+        workflow,
+    )
+    terminal_event = build_session_terminal_event(workflow, assignment, record)
+    assert terminal_event is not None
+    ledger = append_ledger_event(ledger, terminal_event, workflow)
+    replay = replay_workflow(workflow, ledger)
+    assert replay.nodes["implement"].state == "runnable"
+    assert replay.nodes["implement"].assignment_attempts[0].state == "cancelled"
+
+
+def test_live_dispatch_graceful_exit_cannot_overwrite_superseded_terminal_state(
+    tmp_path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    marker_path = tmp_path / "started.marker"
+    workflow = _workflow()
+    assignment = export_assignment(
+        workflow,
+        _empty_ledger(),
+        "implement",
+        assignment_id="assign-live-graceful-cancel",
+    )
+    mission, packet = _dispatch_fixture(
+        workflow,
+        assignment,
+        "packet-live-graceful-cancel",
+    )
+    handle = start_dispatch_session(
+        mission,
+        workflow,
+        packet,
+        agent_id="shell-dummy",
+        workdir=source_root,
+        dispatch_packet_path=tmp_path / "dispatch.yaml",
+        shell_command=(
+            f"printf started > {marker_path}; "
+            "trap 'exit 0' TERM; "
+            "while true; do sleep 0.1; done"
+        ),
+        session_id="session-live-graceful-cancel",
+    )
+    deadline = time.monotonic() + 2
+    while not marker_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert marker_path.exists()
+
+    assert handle.supersede("replacement_dispatch", grace_seconds=1.0) is True
+    record = handle.wait(timeout=2)
+
+    assert record.status == "superseded"
+    assert record.exit["reason"] == "replacement_dispatch"
+    assert record.exit["termination"]["status"] == "superseded"
+    assert record.exit["termination"]["forced"] is False
+    assert record.result_proposal is None
 
 
 def test_cli_result_package(tmp_path, capsys) -> None:
@@ -6704,10 +8044,14 @@ def test_metrics_summarize_exports_advisor_outcome_price_snapshot_attribution(tm
             "source_decision_type": "routing_decision",
             "source_decision_ref": "artifacts/decisions/routing-001.yaml",
             "advisor_decision_ref": "artifacts/decisions/advisor-gate-002.yaml",
+            "advisor_recommendation_ref": None,
+            "advisor_invocation_ref": None,
+            "recommendation_applied": None,
             "outcome_ref": "artifacts/outcomes/advisor-outcome-002.yaml",
             "classification": "good_skip",
             "pending_reason": None,
             "actual_advisor_tokens": 0,
+            "actual_advisor_cost_usd": None,
             "actual_total_tokens": 18400,
             "rework_count": 0,
             "broadcast_tokens": 1200,

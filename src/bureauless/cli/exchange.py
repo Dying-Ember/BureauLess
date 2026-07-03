@@ -5,11 +5,14 @@ from pathlib import Path
 
 import yaml
 
+from ..application.acceptance import decide_staged_result
+from ..protocol.acceptance import DEFAULT_ACCEPTANCE_POLICY, load_acceptance_policy
 from ..protocol.advisors import apply_advisor_outcome, load_advisor_outcome
 from ..protocol.assignments import export_assignment, load_assignment, render_assignment_prompt
 from ..protocol.dispatch import compile_dispatch_packet, load_dispatch_packet, validate_dispatch_packet
 from ..protocol.harness import load_ledger, load_mission, load_workflow
-from ..protocol.ledger import write_ledger
+from ..protocol.ledger import require_strict_writable_ledger, write_ledger
+from ..protocol.outcomes import load_node_outcome
 from ..protocol.results import import_result_proposal, load_result_proposal
 from ..protocol.reviews import apply_review_decision, load_review_decision
 from ..protocol.routing import load_routing_decision, validate_routing_decision
@@ -54,6 +57,25 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     decision_review_import_parser.add_argument("ledger")
     decision_review_import_parser.add_argument("decision")
     decision_review_import_parser.add_argument("--decision-ref", required=True)
+    decision_accept_parser = decision_subparsers.add_parser(
+        "accept-outcome",
+        help="Apply strict review and verification policy to a staged result",
+    )
+    decision_accept_parser.add_argument("workflow")
+    decision_accept_parser.add_argument("ledger")
+    decision_accept_parser.add_argument("assignment")
+    decision_accept_parser.add_argument("result")
+    decision_accept_parser.add_argument("outcome")
+    decision_accept_parser.add_argument("--verification-status", required=True)
+    decision_accept_parser.add_argument("--review-event-id")
+    decision_accept_parser.add_argument("--policy")
+    decision_accept_parser.add_argument("--accepted-event", action="append")
+    decision_accept_parser.add_argument("--actor", default="harness")
+    decision_accept_parser.add_argument("--event-id")
+    decision_accept_parser.add_argument(
+        "--validation-rule",
+        default="acceptance_policy_v1",
+    )
     decision_advisor_import_parser = decision_subparsers.add_parser(
         "import-advisor-outcome",
         help="Import an advisor outcome artifact into the ledger",
@@ -102,11 +124,12 @@ def handle(args: argparse.Namespace) -> int | None:
         ledger_path = Path(args.ledger)
         workflow = load_workflow(Path(args.workflow))
         ledger = load_ledger(ledger_path)
+        require_strict_writable_ledger(ledger, "result import")
         assignment = load_assignment(load_yaml_mapping(Path(args.assignment), "Assignment"))
         result = load_result_proposal(load_yaml_mapping(Path(args.result), "Result"))
         updated = import_result_proposal(workflow, ledger, assignment, result)
         write_ledger(ledger_path, updated)
-        print(f"imported: {result.result_id}")
+        print(f"staged: {result.result_id}")
         return 0
 
     if args.command == "result" and args.result_command == "package":
@@ -126,6 +149,7 @@ def handle(args: argparse.Namespace) -> int | None:
         workflow = load_workflow(Path(args.workflow))
         ledger_path = Path(args.ledger)
         ledger = load_ledger(ledger_path)
+        require_strict_writable_ledger(ledger, "review decision import")
         decision = load_review_decision(load_yaml_mapping(Path(args.decision), "Review decision"))
         updated = apply_review_decision(
             ledger,
@@ -137,10 +161,44 @@ def handle(args: argparse.Namespace) -> int | None:
         print(yaml.safe_dump(updated.event_log[-1], sort_keys=False))
         return 0
 
+    if args.command == "decision" and args.decision_command == "accept-outcome":
+        workflow = load_workflow(Path(args.workflow))
+        ledger_path = Path(args.ledger)
+        ledger = load_ledger(ledger_path)
+        require_strict_writable_ledger(ledger, "outcome acceptance")
+        assignment = load_assignment(load_yaml_mapping(Path(args.assignment), "Assignment"))
+        result = load_result_proposal(load_yaml_mapping(Path(args.result), "Result"))
+        outcome = load_node_outcome(load_yaml_mapping(Path(args.outcome), "Node outcome"))
+        policy = (
+            load_acceptance_policy(
+                load_yaml_mapping(Path(args.policy), "Acceptance policy")
+            )
+            if args.policy
+            else DEFAULT_ACCEPTANCE_POLICY
+        )
+        accepted = decide_staged_result(
+            workflow,
+            ledger,
+            assignment,
+            result,
+            outcome,
+            policy=policy,
+            verification_status=args.verification_status,
+            review_event_id=args.review_event_id,
+            accepted_event_types=args.accepted_event,
+            actor=args.actor,
+            event_id=args.event_id,
+            validation_rule=args.validation_rule,
+        )
+        write_ledger(ledger_path, accepted.ledger)
+        print(yaml.safe_dump(accepted.decision_event, sort_keys=False))
+        return 0
+
     if args.command == "decision" and args.decision_command == "import-advisor-outcome":
         workflow = load_workflow(Path(args.workflow))
         ledger_path = Path(args.ledger)
         ledger = load_ledger(ledger_path)
+        require_strict_writable_ledger(ledger, "advisor outcome import")
         outcome = load_advisor_outcome(load_yaml_mapping(Path(args.outcome), "Advisor outcome"))
         updated = apply_advisor_outcome(
             ledger,

@@ -2217,6 +2217,59 @@ test('loads runtime sources from artifact_manifest_path without frontend YAML pa
   await expect(runtimeSources.getByRole('status')).toContainText('Runtime sources loaded.');
 });
 
+test('inspects an ordinary session bundle with explicit unavailable artifacts', async ({ page }) => {
+  let advisorOutcomeRequestUrl = '';
+  let nodeOutcomeRequestUrl = '';
+  let resultRequestUrl = '';
+  const ordinarySessionManifest = {
+    ...artifactManifestFixture,
+    flow_id: 'maintained-session-dispatch',
+    advisor_gate_decision_path: null,
+    advisor_gate_outcome_path: null,
+    metrics_summary_path: '.bureauless/sessions/session-001.yaml',
+    steps: [
+      {
+        ...artifactManifestFixture.steps[0],
+        context_request_path: null,
+        context_resolution_path: null,
+        result_path: null,
+        node_outcome_path: null,
+        review_decision_path: null,
+        outcome_event_id: undefined,
+        review_event_id: undefined,
+        node_state_after: 'session_completed_unstaged',
+      },
+    ],
+    terminal_complete: false,
+    node_states: { prepare: 'session_completed_unstaged' },
+  };
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: ordinarySessionManifest },
+    onAdvisorOutcomeRequest: (url) => {
+      advisorOutcomeRequestUrl = url;
+    },
+    onNodeOutcomeRequest: (url) => {
+      nodeOutcomeRequestUrl = url;
+    },
+    onResultRequest: (url) => {
+      resultRequestUrl = url;
+    },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/sessions/session-001.bundle.yaml');
+  await page.getByLabel('Runtime workflow nodes').getByRole('button', { name: /prepare/i }).click();
+
+  const routingInspector = page.getByRole('region', { name: 'Routing and advisor inspector' });
+  const nodeInspector = page.getByRole('region', { name: 'Runtime node inspector' });
+  await expect(routingInspector.getByText('Classification').locator('..').getByText('unavailable')).toBeVisible();
+  await expect(nodeInspector.getByText('Outcome status').locator('..').getByText('unavailable')).toBeVisible();
+  await expect(nodeInspector.getByText('Result status').locator('..').getByText('unavailable')).toBeVisible();
+  expect(advisorOutcomeRequestUrl).toBe('');
+  expect(nodeOutcomeRequestUrl).toBe('');
+  expect(resultRequestUrl).toBe('');
+});
+
 test('renders routing and advisor inspector from manifest-backed runtime artifacts', async ({ page }) => {
   let routingDecisionRequestUrl = '';
   let advisorOutcomeRequestUrl = '';

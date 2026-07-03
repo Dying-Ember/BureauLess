@@ -9,12 +9,14 @@ import yaml
 
 from ..errors import ProtocolError
 from ..protocol.artifacts import sha256_file
+from .run_bundles import load_run_bundle
 
 
 def prepare_demo_workspace(
     workspace: Path,
     *,
     include_fixture_results: bool = True,
+    ledger_version: int | None = None,
 ) -> dict[str, Path]:
     source_root = _repo_root() / "examples" / "missions" / "demo"
     if not source_root.exists():
@@ -52,6 +54,13 @@ def prepare_demo_workspace(
     shutil.copy2(source_root / "mission.yaml", mission_path)
     shutil.copy2(source_root / "workflows" / "coder_reviewer_committer.yaml", workflow_path)
     shutil.copy2(source_root / "ledger.yaml", ledger_path)
+    if ledger_version is not None:
+        ledger_payload = yaml.safe_load(ledger_path.read_text(encoding="utf-8"))
+        if not isinstance(ledger_payload, dict):
+            raise ProtocolError("Demo ledger YAML must be an object")
+        ledger_payload["ledger_version"] = ledger_version
+        with ledger_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(ledger_payload, handle, sort_keys=False)
     _write_demo_artifact(workspace / ".gitignore", ".bureauless/\ngenerated/\n")
     _write_demo_artifact(src_dir / "demo.py", "print('old')\n")
     _write_demo_artifact(
@@ -138,42 +147,7 @@ def prepare_demo_workspace(
 
 
 def load_artifact_session_manifest(path: Path) -> dict[str, Any]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ProtocolError("Artifact session manifest YAML must be an object")
-
-    manifest = dict(payload)
-    for field in (
-        "milestone",
-        "flow_id",
-        "workspace",
-        "mission_path",
-        "workflow_path",
-        "ledger_path",
-        "agent",
-        "target_model",
-        "target_provider",
-        "routing_decision_path",
-        "advisor_gate_decision_path",
-        "advisor_gate_outcome_path",
-        "metrics_summary_path",
-        "workbench_url",
-    ):
-        _require_string(manifest, field, "Artifact session manifest")
-
-    _require_string_list(manifest, "ready", "Artifact session manifest")
-    _require_bool(manifest, "terminal_complete", "Artifact session manifest")
-    _require_optional_mapping(manifest, "failure", "Artifact session manifest")
-    _require_string_mapping(manifest, "node_states", "Artifact session manifest")
-    steps = manifest.get("steps")
-    if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
-        raise ProtocolError("Artifact session manifest field 'steps' must be a list of objects")
-
-    for index, step in enumerate(steps):
-        _validate_artifact_manifest_step(step, index=index)
-
-    manifest["manifest_path"] = str(path)
-    return manifest
+    return load_run_bundle(path)
 
 
 def _initialize_demo_git_repo(workspace: Path) -> None:
@@ -269,83 +243,3 @@ def _demo_artifact_payload(
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
-
-
-def _validate_artifact_manifest_step(step: dict[str, Any], *, index: int) -> None:
-    prefix = f"Artifact session manifest steps[{index}]"
-    for field in (
-        "node_id",
-        "assignment_path",
-        "context_capsule_path",
-        "session_path",
-        "record_status",
-        "node_state_after",
-    ):
-        _require_string(step, field, prefix)
-    _require_string_list(step, "ready_after", prefix)
-    _require_optional_string(step, "context_request_path", prefix)
-
-    if step["record_status"] == "completed":
-        for field in (
-            "result_path",
-            "node_outcome_path",
-            "review_decision_path",
-            "turn_report_path",
-            "dispatch_packet_path",
-        ):
-            _require_string(step, field, prefix)
-    else:
-        _require_optional_string(step, "failure_reason", prefix)
-
-
-def _require_string(data: dict[str, Any], field: str, prefix: str) -> str:
-    value = data.get(field)
-    if not isinstance(value, str) or not value:
-        raise ProtocolError(f"{prefix} field {field!r} must be a non-empty string")
-    return value
-
-
-def _require_optional_string(data: dict[str, Any], field: str, prefix: str) -> str | None:
-    value = data.get(field)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise ProtocolError(f"{prefix} field {field!r} must be a non-empty string when present")
-    return value
-
-
-def _require_bool(data: dict[str, Any], field: str, prefix: str) -> bool:
-    value = data.get(field)
-    if not isinstance(value, bool):
-        raise ProtocolError(f"{prefix} field {field!r} must be boolean")
-    return value
-
-
-def _require_string_list(data: dict[str, Any], field: str, prefix: str) -> list[str]:
-    value = data.get(field)
-    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
-        raise ProtocolError(f"{prefix} field {field!r} must be a list of non-empty strings")
-    return value
-
-
-def _require_optional_mapping(
-    data: dict[str, Any],
-    field: str,
-    prefix: str,
-) -> dict[str, Any] | None:
-    value = data.get(field)
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise ProtocolError(f"{prefix} field {field!r} must be an object when present")
-    return value
-
-
-def _require_string_mapping(data: dict[str, Any], field: str, prefix: str) -> dict[str, str]:
-    value = data.get(field)
-    if not isinstance(value, dict) or not all(
-        isinstance(key, str) and key and isinstance(item, str) and item
-        for key, item in value.items()
-    ):
-        raise ProtocolError(f"{prefix} field {field!r} must be an object of non-empty strings")
-    return value

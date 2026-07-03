@@ -12,7 +12,9 @@ from pydantic import BaseModel
 import yaml
 
 from ..agents import doctor_agent, list_agent_specs
+from ..application.acceptance import decide_staged_result, stage_result
 from ..application.demo import load_artifact_session_manifest, prepare_demo_workspace
+from ..application.run_bundles import write_session_run_bundle
 from ..core import (
     Dag,
     create_node,
@@ -26,15 +28,21 @@ from ..core import (
 )
 from ..errors import ProtocolError
 from ..protocol.advisors import load_advisor_outcome
+from ..protocol.acceptance import AcceptancePolicy, load_acceptance_policy
 from ..protocol.assignments import compile_context_capsule, export_assignment, load_assignment
 from ..protocol.context import load_context_request, resolve_context_request
 from ..protocol.dispatch import compile_dispatch_packet, load_dispatch_packet, load_turn_report
 from ..protocol.harness import load_ledger, load_mission, load_workflow
-from ..protocol.ledger import append_ledger_event, write_ledger
+from ..protocol.ledger import (
+    append_ledger_event,
+    require_strict_writable_ledger,
+    write_ledger,
+)
 from ..protocol.mutations import materialize_current_workflow
-from ..protocol.outcomes import load_node_outcome
+from ..protocol.outcomes import load_node_outcome, node_outcome_from_session
 from ..protocol.results import import_result_proposal, load_result_proposal
 from ..protocol.routing import load_routing_decision
+from ..protocol.reviews import apply_review_decision, load_review_decision
 from ..runtime import (
     build_mutation_supersession_events,
     evaluate_assignment_impacts,
@@ -44,9 +52,8 @@ from ..runtime import (
 )
 from ..runtime.sessions import (
     build_assignment_created_event,
-    create_session_spec,
+    dispatch_session,
     package_session_result,
-    run_session,
 )
 
 
@@ -107,11 +114,66 @@ class DispatchCompileRequest(BaseModel):
     turn_report_policy: dict[str, Any] | None = None
 
 
+class SessionDispatchRequest(BaseModel):
+    mission_path: str
+    workflow_path: str
+    dispatch_packet_path: str
+    session_record_path: str
+    ledger_path: str | None = None
+    run_bundle_path: str | None = None
+    agent: str
+    workdir: str = "."
+    timeout_seconds: float = 30.0
+    dry_run: bool = False
+    isolation_mode: Literal["copy", "worktree"] = "copy"
+    cleanup_policy: str = "retain_session_root"
+    sandbox_mode: Literal["read-only", "workspace-write", "danger-full-access"] = (
+        "workspace-write"
+    )
+    shell_command: str | None = None
+    target_model: str | None = None
+    target_provider: str | None = None
+    provider_base_url: str | None = None
+    provider_api_key_env: str | None = None
+    provider_wire_api: str | None = None
+    session_id: str | None = None
+
+
 class ContextResolveRequest(BaseModel):
     assignment_path: str
     ledger_path: str
     context_request_path: str
     max_artifacts: int = 1
+
+
+class ResultStageRequest(BaseModel):
+    workflow_path: str
+    ledger_path: str
+    assignment_path: str
+    result_path: str
+
+
+class ReviewDecisionImportRequest(BaseModel):
+    workflow_path: str
+    ledger_path: str
+    decision_path: str
+    decision_ref: str
+    event_id: str | None = None
+
+
+class OutcomeDecisionRequest(BaseModel):
+    workflow_path: str
+    ledger_path: str
+    assignment_path: str
+    result_path: str
+    outcome_path: str
+    verification_status: str
+    review_event_id: str | None = None
+    acceptance_policy: dict[str, Any]
+    accepted_event_types: list[str] | None = None
+    actor: str = "harness"
+    event_id: str | None = None
+    validation_rule: str = "acceptance_policy_v1"
 
 
 def create_app() -> FastAPI:
@@ -335,6 +397,7 @@ def create_app() -> FastAPI:
         workflow = load_workflow(Path(request.workflow_path))
         ledger_path = Path(request.ledger_path)
         ledger = load_ledger(ledger_path)
+        require_strict_writable_ledger(ledger, "mutation decision")
         proposal_event = next(
             (
                 event
@@ -403,6 +466,70 @@ def create_app() -> FastAPI:
     def api_result(path: str) -> dict[str, Any]:
         return load_result_proposal(_load_yaml(path)).to_dict()
 
+    @app.post("/api/result/stage")
+    def api_result_stage(request: ResultStageRequest) -> dict[str, Any]:
+        workflow = load_workflow(Path(request.workflow_path))
+        ledger_path = Path(request.ledger_path)
+        ledger = load_ledger(ledger_path)
+        require_strict_writable_ledger(ledger, "result stage")
+        assignment = load_assignment(_load_yaml(request.assignment_path))
+        result = load_result_proposal(_load_yaml(request.result_path))
+        updated = import_result_proposal(workflow, ledger, assignment, result)
+        write_ledger(ledger_path, updated)
+        return {
+            "status": "awaiting_acceptance",
+            "result_event_id": f"event-{result.result_id}",
+            "replay": replay_workflow(workflow, updated).to_dict(),
+            "gatekeeper": evaluate_gatekeeper(workflow, updated).to_dict(),
+        }
+
+    @app.post("/api/review-decision/import")
+    def api_review_decision_import(
+        request: ReviewDecisionImportRequest,
+    ) -> dict[str, Any]:
+        workflow = load_workflow(Path(request.workflow_path))
+        ledger_path = Path(request.ledger_path)
+        ledger = load_ledger(ledger_path)
+        require_strict_writable_ledger(ledger, "review decision import")
+        decision = load_review_decision(_load_yaml(request.decision_path))
+        updated = apply_review_decision(
+            ledger,
+            decision,
+            workflow=workflow,
+            event_id=request.event_id,
+            decision_ref=request.decision_ref,
+        )
+        write_ledger(ledger_path, updated)
+        return updated.event_log[-1]
+
+    @app.post("/api/outcome/decide")
+    def api_outcome_decide(request: OutcomeDecisionRequest) -> dict[str, Any]:
+        workflow = load_workflow(Path(request.workflow_path))
+        ledger_path = Path(request.ledger_path)
+        ledger = load_ledger(ledger_path)
+        require_strict_writable_ledger(ledger, "outcome acceptance")
+        accepted = decide_staged_result(
+            workflow,
+            ledger,
+            load_assignment(_load_yaml(request.assignment_path)),
+            load_result_proposal(_load_yaml(request.result_path)),
+            load_node_outcome(_load_yaml(request.outcome_path)),
+            policy=load_acceptance_policy(request.acceptance_policy),
+            verification_status=request.verification_status,
+            review_event_id=request.review_event_id,
+            accepted_event_types=request.accepted_event_types,
+            actor=request.actor,
+            event_id=request.event_id,
+            validation_rule=request.validation_rule,
+        )
+        write_ledger(ledger_path, accepted.ledger)
+        return {
+            "status": accepted.disposition,
+            "decision": accepted.decision_event,
+            "replay": replay_workflow(workflow, accepted.ledger).to_dict(),
+            "gatekeeper": evaluate_gatekeeper(workflow, accepted.ledger).to_dict(),
+        }
+
     @app.get("/api/node-outcome")
     def api_node_outcome(path: str) -> dict[str, Any]:
         return load_node_outcome(_load_yaml(path)).to_dict()
@@ -435,6 +562,57 @@ def create_app() -> FastAPI:
             turn_report_policy=request.turn_report_policy,
         ).to_dict()
 
+    @app.post("/api/session/dispatch")
+    def api_session_dispatch(request: SessionDispatchRequest) -> dict[str, Any]:
+        if request.run_bundle_path is not None and request.ledger_path is None:
+            raise ProtocolError("Session run bundle generation requires ledger_path")
+        packet_path = Path(request.dispatch_packet_path)
+        record = dispatch_session(
+            load_mission(Path(request.mission_path)),
+            load_workflow(Path(request.workflow_path)),
+            load_dispatch_packet(_load_yaml(str(packet_path))),
+            agent_id=request.agent,
+            workdir=Path(request.workdir),
+            dispatch_packet_path=packet_path,
+            timeout_seconds=request.timeout_seconds,
+            dry_run=request.dry_run,
+            isolation_mode=request.isolation_mode,
+            cleanup_policy=request.cleanup_policy,
+            sandbox_mode=request.sandbox_mode,
+            shell_command=request.shell_command,
+            target_model=request.target_model,
+            target_provider=request.target_provider,
+            provider_base_url=request.provider_base_url,
+            provider_api_key_env=request.provider_api_key_env,
+            provider_wire_api=request.provider_wire_api,
+            session_id=request.session_id,
+            context_ledger=(
+                load_ledger(Path(request.ledger_path)) if request.ledger_path else None
+            ),
+        )
+        session_path = Path(request.session_record_path)
+        _write_yaml(session_path, record.to_dict())
+        response = record.to_dict()
+        if request.ledger_path is not None:
+            bundle_path = (
+                Path(request.run_bundle_path)
+                if request.run_bundle_path
+                else session_path.with_suffix(".bundle.yaml")
+            )
+            bundle = write_session_run_bundle(
+                bundle_path,
+                mission_path=Path(request.mission_path),
+                workflow_path=Path(request.workflow_path),
+                ledger_path=Path(request.ledger_path),
+                dispatch_packet_path=packet_path,
+                session_record_path=session_path,
+                packet=load_dispatch_packet(_load_yaml(str(packet_path))),
+                record=record.to_dict(),
+                workspace=Path(request.workdir),
+            )
+            response["run_bundle_path"] = bundle["manifest_path"]
+        return response
+
     @app.get("/api/metrics")
     def api_metrics(path: str, price_snapshot: str | None = None) -> dict[str, Any]:
         snapshot_path = Path(price_snapshot) if price_snapshot else None
@@ -442,8 +620,12 @@ def create_app() -> FastAPI:
 
     @app.post("/api/runtime-demo")
     def api_runtime_demo(request: RuntimeDemoRequest) -> dict[str, Any]:
-        paths = prepare_demo_workspace(Path(request.workspace))
+        paths = prepare_demo_workspace(
+            Path(request.workspace),
+            ledger_version=2,
+        )
         workflow = load_workflow(paths["workflow"])
+        mission = load_mission(paths["mission"])
         ledger = load_ledger(paths["ledger"])
         assignment = export_assignment(
             workflow,
@@ -453,6 +635,17 @@ def create_app() -> FastAPI:
         )
         assignment_path = paths["assignments_dir"] / "implement_assignment.yaml"
         _write_yaml(assignment_path, assignment.to_dict())
+        routing_decision = load_routing_decision(
+            _runtime_demo_routing_decision(workflow)
+        )
+        packet = compile_dispatch_packet(
+            mission,
+            workflow,
+            routing_decision,
+            assignment,
+            packet_id=f"packet-{request.session_id}",
+        )
+        packet_path = paths["decisions_dir"] / "implement_dispatch_packet.yaml"
 
         created_event = build_assignment_created_event(
             workflow,
@@ -463,14 +656,17 @@ def create_app() -> FastAPI:
         ledger = append_ledger_event(ledger, created_event, workflow)
         write_ledger(paths["ledger"], ledger)
 
-        spec = create_session_spec(
-            assignment=assignment,
+        record = dispatch_session(
+            mission,
+            workflow,
+            packet,
             agent_id=request.agent,
             workdir=Path(request.workspace),
+            dispatch_packet_path=packet_path,
             shell_command=request.shell_command or _runtime_demo_shell_command(request.result_id),
             session_id=request.session_id,
+            context_ledger=ledger,
         )
-        record = run_session(spec, assignment)
         session_path = paths["sessions_dir"] / "implement_session.yaml"
         _write_yaml(session_path, record.to_dict())
 
@@ -478,7 +674,38 @@ def create_app() -> FastAPI:
         result_path = paths["packaged_results_dir"] / "implement_result.yaml"
         _write_yaml(result_path, result.to_dict())
 
-        ledger = import_result_proposal(workflow, ledger, assignment, result)
+        outcome = node_outcome_from_session(
+            assignment,
+            record.to_dict(),
+            outcome_id=f"outcome-{record.session_id}",
+        )
+        outcome_path = paths["outcomes_dir"] / "implement_outcome.yaml"
+        _write_yaml(outcome_path, outcome.to_dict())
+        staged = stage_result(workflow, ledger, assignment, result, outcome)
+        low_risk_policy = AcceptancePolicy(
+            policy_version="acceptance-v1-low-risk-demo",
+            review_required=False,
+            allowed_review_actors=["orchestrator", "human"],
+            required_verification_statuses=["passed"],
+            allow_partial_acceptance=False,
+        )
+        verification_status = result.verification.get("status")
+        accepted = decide_staged_result(
+            workflow,
+            staged.ledger,
+            assignment,
+            result,
+            outcome,
+            policy=low_risk_policy,
+            verification_status=(
+                verification_status
+                if isinstance(verification_status, str)
+                else "unknown"
+            ),
+            validation_rule="verified_low_risk_demo_v1",
+            created_at=record.finished_at,
+        )
+        ledger = accepted.ledger
         write_ledger(paths["ledger"], ledger)
 
         return {
@@ -487,8 +714,10 @@ def create_app() -> FastAPI:
             "workflow_path": str(paths["workflow"]),
             "ledger_path": str(paths["ledger"]),
             "assignment_path": str(assignment_path),
+            "dispatch_packet_path": str(packet_path),
             "session_path": str(session_path),
             "result_path": str(result_path),
+            "outcome_path": str(outcome_path),
             "agent": request.agent,
             "assignment_id": assignment.assignment_id,
             "session_id": record.session_id,
@@ -496,6 +725,7 @@ def create_app() -> FastAPI:
             "replay": replay_workflow(workflow, ledger).to_dict(),
             "gatekeeper": evaluate_gatekeeper(workflow, ledger).to_dict(),
             "result": result.to_dict(),
+            "acceptance": accepted.decision_event,
         }
 
     return app
@@ -531,6 +761,34 @@ def _load_yaml(path: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ProtocolError("YAML payload must be an object")
     return payload
+
+
+def _runtime_demo_routing_decision(workflow: Any) -> dict[str, Any]:
+    return {
+        "decision_type": "routing_decision",
+        "mission_id": workflow.mission_id,
+        "workflow_id": workflow.workflow_id,
+        "selected_mode": workflow.mode,
+        "selection_policy_version": "runtime-demo-v1",
+        "triggered_rules": ["maintained_demo_path"],
+        "rejected_modes": [
+            {
+                "mode": "single_agent",
+                "rejected_because": "The maintained demo preserves explicit review and commit nodes.",
+            }
+        ],
+        "estimated_coordination_ratio": 0.18,
+        "budget_confidence": "high",
+        "reason": "The maintained demo executes the accepted staged workflow.",
+        "budget_reason": "The fixture stays within the mission budget.",
+        "risk_reason": "Review and commit remain explicit downstream gates.",
+        "advisor_gate_decision": {
+            "invoked": False,
+            "policy_version": "runtime-demo-v1",
+            "reason": ["maintained_low_risk_fixture"],
+            "decision_basis": "deterministic_fixture",
+        },
+    }
 
 
 def workflow_payload(workflow) -> dict[str, Any]:
@@ -660,6 +918,7 @@ def _runtime_demo_shell_command(result_id: str) -> str:
 
 
 def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         yaml.safe_dump(payload, handle, sort_keys=False)
 
@@ -773,8 +1032,12 @@ app = create_app()
 __all__ = [
     "CreateNodeRequest",
     "NodeMetadataUpdateRequest",
+    "OutcomeDecisionRequest",
     "ProtocolError",
+    "ResultStageRequest",
+    "ReviewDecisionImportRequest",
     "RuntimeDemoRequest",
+    "SessionDispatchRequest",
     "app",
     "classify_node_state",
     "create_app",

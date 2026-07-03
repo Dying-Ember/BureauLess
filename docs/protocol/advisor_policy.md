@@ -208,6 +208,19 @@ Advisors cannot:
 - Summon other advisors.
 - Change advisor policy.
 
+Maintained invocation records use `capability_scope: recommendation_only`.
+Recommendation documents have a closed schema: they may contain verdict,
+confidence, estimates, cost/risk drivers, and recommended changes only. They
+cannot contain workflow mutations, dispatch packets, commands, ledger events,
+or accepted event claims. Any workflow revision requires a separate persisted
+orchestrator disposition before dispatch.
+
+An invoked outcome links the gate decision, recommendation, invocation record,
+and source routing/review decision. It records observed advisor tokens and
+cost. `good_call` additionally requires an applied recommendation and clean
+post-run signals; invoking an advisor without applying a useful recommendation
+is `bad_call`, not success by default.
+
 ## Outcome Tracking
 
 After a mission, record whether the advisor decision was useful.

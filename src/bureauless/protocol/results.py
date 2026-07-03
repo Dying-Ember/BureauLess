@@ -6,7 +6,7 @@ from typing import Any
 
 from .assignments import AssignmentPacket
 from ..errors import ProtocolError
-from .harness import Ledger, Workflow
+from .harness import STRICT_ACCEPTANCE_LEDGER_VERSION, Ledger, Workflow
 from .ledger import append_ledger_event
 from .mutations import materialize_current_workflow
 
@@ -93,6 +93,8 @@ def import_result_proposal(
         "result": result.to_dict(),
     }
     updated = append_ledger_event(ledger, result_event, current_workflow)
+    if ledger.ledger_version >= STRICT_ACCEPTANCE_LEDGER_VERSION:
+        return updated
     for index, event_type in enumerate(result.emitted_events, start=1):
         updated = append_ledger_event(
             updated,

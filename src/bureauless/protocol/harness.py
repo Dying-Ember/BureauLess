@@ -16,6 +16,8 @@ VALID_MISSION_MODES = {
     "parallel_swarm",
     "stop_and_ask_human",
 }
+SUPPORTED_LEDGER_VERSIONS = {1, 2}
+STRICT_ACCEPTANCE_LEDGER_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,11 @@ class Ledger:
         return ledger
 
     def validate(self) -> None:
+        if self.ledger_version not in SUPPORTED_LEDGER_VERSIONS:
+            raise ProtocolError(
+                "Ledger ledger_version must be one of: "
+                f"{', '.join(str(version) for version in sorted(SUPPORTED_LEDGER_VERSIONS))}"
+            )
         for finding in self.public_findings:
             missing = [
                 field

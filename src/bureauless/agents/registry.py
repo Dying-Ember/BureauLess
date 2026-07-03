@@ -207,6 +207,7 @@ AGENT_SPECS: dict[str, AgentSpec] = {
             "changed_files": "required",
             "token_usage": "optional",
             "cost_usage": "optional",
+            "progress_events": "native_jsonl",
         },
     ),
     "claude-code": AgentSpec(
@@ -229,6 +230,7 @@ AGENT_SPECS: dict[str, AgentSpec] = {
             "changed_files": "required",
             "token_usage": "optional",
             "cost_usage": "optional",
+            "progress_events": "unintegrated",
         },
     ),
     "opencode": AgentSpec(
@@ -251,6 +253,7 @@ AGENT_SPECS: dict[str, AgentSpec] = {
             "changed_files": "required",
             "token_usage": "optional",
             "cost_usage": "optional",
+            "progress_events": "unintegrated",
         },
     ),
 }
@@ -605,7 +608,7 @@ def _check_level(check: DoctorCheck, fallback: str | None = None) -> str:
 def _cancellation_level(spec: AgentSpec, doctor: DoctorResult) -> str:
     if doctor.binary_path is None:
         return "none"
-    if spec.cancellation == "process_kill":
+    if spec.cancellation == "process_kill" and spec.agent_id == "codex-cli":
         return "strong"
     if spec.cancellation:
         return "weak"

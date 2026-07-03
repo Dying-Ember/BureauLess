@@ -10,6 +10,8 @@ from .routing import RoutingDecision, load_routing_decision, validate_routing_de
 
 
 VALID_TURN_REPORT_STATUSES = {"in_progress", "blocked", "completed"}
+VALID_TURN_REPORT_TELEMETRY_MODES = {"observed", "degraded"}
+VALID_TURN_REPORT_POLICY_STATUSES = {"compliant", "violated", "degraded"}
 
 
 @dataclass(frozen=True)
@@ -25,9 +27,13 @@ class TurnReport:
     blockers: list[dict[str, Any]]
     suggested_ledger_updates: list[dict[str, Any]]
     token_usage: dict[str, int]
+    observed_at: str | None = None
+    telemetry_mode: str | None = None
+    source_event_ids: list[str] | None = None
+    policy_compliance: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "report_id": self.report_id,
             "assignment_id": self.assignment_id,
             "agent_id": self.agent_id,
@@ -40,6 +46,15 @@ class TurnReport:
             "suggested_ledger_updates": self.suggested_ledger_updates,
             "token_usage": self.token_usage,
         }
+        if self.observed_at is not None:
+            payload["observed_at"] = self.observed_at
+        if self.telemetry_mode is not None:
+            payload["telemetry_mode"] = self.telemetry_mode
+        if self.source_event_ids is not None:
+            payload["source_event_ids"] = self.source_event_ids
+        if self.policy_compliance is not None:
+            payload["policy_compliance"] = self.policy_compliance
+        return payload
 
 
 @dataclass(frozen=True)
@@ -73,6 +88,19 @@ def load_turn_report(data: dict[str, Any]) -> TurnReport:
     tool_calls_since_last_report = _as_int(data, "tool_calls_since_last_report")
     if tool_calls_since_last_report < 0:
         raise ProtocolError("Turn report tool_calls_since_last_report must be >= 0")
+    telemetry_mode = _as_optional_string(data.get("telemetry_mode"))
+    if telemetry_mode is not None and telemetry_mode not in VALID_TURN_REPORT_TELEMETRY_MODES:
+        raise ProtocolError("Turn report telemetry_mode must be observed or degraded")
+    policy_compliance = (
+        _as_mapping(data, "policy_compliance")
+        if data.get("policy_compliance") is not None
+        else None
+    )
+    if policy_compliance is not None:
+        policy_status = _as_string(policy_compliance, "status")
+        if policy_status not in VALID_TURN_REPORT_POLICY_STATUSES:
+            raise ProtocolError("Turn report policy_compliance.status is invalid")
+        _as_string_list(policy_compliance, "reasons", default=[])
     return TurnReport(
         report_id=_as_string(data, "report_id"),
         assignment_id=_as_string(data, "assignment_id"),
@@ -89,6 +117,10 @@ def load_turn_report(data: dict[str, Any]) -> TurnReport:
             default=[],
         ),
         token_usage=_as_token_usage(data.get("token_usage", {})),
+        observed_at=_as_optional_string(data.get("observed_at")),
+        telemetry_mode=telemetry_mode,
+        source_event_ids=_as_optional_string_list(data.get("source_event_ids")),
+        policy_compliance=policy_compliance,
     )
 
 
@@ -265,6 +297,17 @@ def _as_mapping_list(
     return value
 
 
+def _as_string_list(
+    data: dict[str, Any],
+    key: str,
+    default: list[str] | None = None,
+) -> list[str]:
+    value = data.get(key, default)
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ProtocolError(f"Dispatch field {key!r} must be a list of strings")
+    return value
+
+
 def _as_token_usage(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         raise ProtocolError("Turn report token_usage must be an object")
@@ -275,3 +318,19 @@ def _as_token_usage(value: Any) -> dict[str, int]:
             raise ProtocolError(f"Turn report token_usage.{field} must be a non-negative integer")
         normalized[field] = field_value
     return normalized
+
+
+def _as_optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ProtocolError("Optional turn report fields must be non-empty strings")
+    return value
+
+
+def _as_optional_string_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ProtocolError("Turn report source_event_ids must be a list of strings")
+    return value

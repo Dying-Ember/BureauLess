@@ -1,6 +1,8 @@
 # Runtime Harness Milestone 4 Task List
 
-Status: planned. Implementation has not started.
+Status: in progress. RM4-00 is complete under accepted ADR-004; RM4-01 is next.
+Runtime implementation has not started. The required Runtime M3.5 acceptance
+and dispatch foundations are complete.
 
 This is the implementation task list for Runtime Harness Milestone 4:
 validated agent mutation intake and linear temporal workflow replay. It builds
@@ -9,15 +11,27 @@ maintained `codex-cli` execution path from Milestone 3.
 
 The project-level sequence lives in
 [`../roadmap/development_roadmap.md`](../roadmap/development_roadmap.md). RFC-001
-remains the design history for controlled current-state mutation. RM4-00 must
-advance the draft
+remains the design history for controlled current-state mutation. RM4-00
+advanced
 [`RFC-004`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
-to an accepted ADR before temporal replay implementation begins.
+to accepted
+[`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md)
+before temporal replay implementation begins.
+
+Runtime M4 also depends on the completed execution-spine remediation in
+[`Runtime M3.5`](runtime_harness_milestone_3_5_tasklist.md). In particular,
+RM35-01 made accepted history authoritative and RM35-02 made dispatch packets
+executable; RM35-08 verifies those foundations before M4 begins implementation.
 
 RFC review and ADR acceptance are tracked by
 [#3 RFC-004: Temporal Replay, Mutation Intake, And Retry Control](https://github.com/Dying-Ember/BureauLess/issues/3).
 
 ## Current Capability Gap
+
+The complete cross-milestone evidence is recorded in the
+[`runtime execution gap analysis`](../audits/2026-07-02-runtime-execution-gap-analysis.md).
+This milestone owns REX-001. Runtime M3.5 owns REX-002 through REX-008 so M4 does
+not silently absorb unrelated M2/M3 integration debt.
 
 Milestone 2.5 implemented the mutation proposal schema, mutation ledger events,
 accept/reject decisions, current-workflow materialization, supersession, and
@@ -100,9 +114,9 @@ closes that gap before relying on mutation history for temporal replay.
 
 Goal: settle replay and mutation-intake semantics before changing runtime code.
 
-### [ ] RM4-00: Temporal Replay, Mutation Intake, And Retry RFC
+### [x] RM4-00: Temporal Replay, Mutation Intake, And Retry RFC
 
-- Status: in progress; RFC-004 is drafted and no ADR is accepted
+- Status: completed; RFC-004 is accepted by ADR-004
 - Priority: critical
 - Recommended model: gpt-5.5
 - Risk: high
@@ -141,6 +155,17 @@ Goal: settle replay and mutation-intake semantics before changing runtime code.
   - The RFC distinguishes recoverable agent execution errors from unchanged
     deterministic retry loops.
   - An ADR records the accepted semantics before RM4-01 begins.
+- Completion evidence:
+  - RFC-004 resolves intake dispositions, deterministic proposal identity,
+    retry defaults and budgets, second-approver policy, explicit review-overdue
+    events, and the Codex structured-output MVP transport.
+  - Accepted version semantics define ledger v3, canonical workflow hashing,
+    exact version IDs, inclusive event cursors, assignment validity, stale/CAS
+    behavior, external drift, and v1/v2/v3 compatibility fixtures.
+  - ADR-004 records the accepted decisions and explicitly keeps implementation
+    pending under RM4-01 through RM4-11.
+  - Canonical protocol documentation distinguishes the implemented M2.5/M3
+    compatibility shape from the accepted Runtime M4 extension.
 
 ### [ ] RM4-01: Worker Intent And Trusted Proposal Envelope
 
@@ -149,7 +174,7 @@ Goal: settle replay and mutation-intake semantics before changing runtime code.
 - Recommended model: gpt-5.5
 - Risk: high
 - Labels: runtime, protocol, mutation, provenance
-- Dependencies: RM4-00
+- Dependencies: RM4-00, RM35-01, RM35-02
 - Target code:
   - `src/bureauless/protocol/mutations.py`
   - `src/bureauless/protocol/results.py`

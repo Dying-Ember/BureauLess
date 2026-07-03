@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
+from ..errors import ProtocolError
+from ..protocol.advisors import (
+    AdvisorGateDecision,
+    AdvisorInvocationRecord,
+    AdvisorOutcome,
+    AdvisorRecommendation,
+    load_advisor_invocation,
+    load_advisor_outcome,
+    load_advisor_recommendation,
+)
 from ..protocol.harness import Ledger, Workflow, load_workflow
 from .replay import replay_workflow
 
@@ -18,6 +29,7 @@ class AdvisorOutcomeScore:
     reasons: list[str]
     source_decision_type: str
     invoked: bool | None
+    recommendation_applied: bool | None
     mission_complete: bool | None
     review_rejections: int
     rework_count: int | None
@@ -32,12 +44,177 @@ class AdvisorOutcomeScore:
             "reasons": self.reasons,
             "source_decision_type": self.source_decision_type,
             "invoked": self.invoked,
+            "recommendation_applied": self.recommendation_applied,
             "mission_complete": self.mission_complete,
             "review_rejections": self.review_rejections,
             "rework_count": self.rework_count,
             "duplicate_context_observed": self.duplicate_context_observed,
             "budget_variance_usd": self.budget_variance_usd,
         }
+
+
+AdvisorRunner = Callable[[AdvisorGateDecision, dict[str, Any]], dict[str, Any]]
+
+
+def evaluate_advisor_policy(facts: dict[str, Any]) -> AdvisorGateDecision:
+    triggers: list[str] = []
+    if _fact_int(facts, "node_count") >= 5:
+        triggers.append("node_count >= 5")
+    if _fact_int(facts, "parallel_width") >= 3:
+        triggers.append("parallel_width >= 3")
+    if _fact_int(facts, "high_risk_node_count") >= 1:
+        triggers.append("high_risk_node_count >= 1")
+    if _fact_int(facts, "large_model_node_count") >= 2:
+        triggers.append("large_model_node_count >= 2")
+    if _fact_int(facts, "review_or_human_gate_count") >= 2:
+        triggers.append("review_or_human_gate_count >= 2")
+    if _fact_int(facts, "estimated_total_tokens") >= 80000:
+        triggers.append("estimated_total_tokens >= 80000")
+    if facts.get("broadcast_policy") == "full_ledger":
+        triggers.append("broadcast_policy == full_ledger")
+    if facts.get("touched_file_overlap") == "high":
+        triggers.append("touched_file_overlap == high")
+    if facts.get("unknown_model_prices") is True and _fact_int(facts, "model_count") >= 2:
+        triggers.append("unknown_model_prices == true and model_count >= 2")
+    if (
+        facts.get("commit_or_merge_action") is True
+        and facts.get("review_or_approval_gate_present") is not True
+    ):
+        triggers.append("commit_or_merge_action without review_or_approval_gate")
+
+    if triggers:
+        advisor_tokens = _fact_int(facts, "advisor_expected_tokens") or 3300
+        estimated_savings = max(
+            _fact_int(facts, "estimated_savings_tokens"),
+            _fact_int(facts, "estimated_context_fanout_tokens"),
+            advisor_tokens * 2 + 1,
+        )
+        return AdvisorGateDecision(
+            invoked=True,
+            advisor="cost_risk_analyst",
+            policy_version="0.1",
+            reason=triggers,
+            estimated_advisor_tokens=advisor_tokens,
+            estimated_savings_tokens=estimated_savings,
+            confidence="low",
+            decision_basis="first_run_heuristic",
+        )
+
+    skip_reasons = []
+    if _fact_int(facts, "node_count") <= 2:
+        skip_reasons.append("node_count <= 2")
+    if facts.get("risk_level", "low") == "low":
+        skip_reasons.append("risk_level == low")
+    if _fact_int(facts, "parallel_width") <= 1:
+        skip_reasons.append("parallel_width <= 1")
+    if facts.get("commit_or_merge_action") is not True:
+        skip_reasons.append("no_commit_or_merge_action == true")
+    return AdvisorGateDecision(
+        invoked=False,
+        policy_version="0.1",
+        reason=skip_reasons or ["no_advisor_trigger_matched"],
+        decision_basis="first_run_heuristic",
+    )
+
+
+def run_advisor_invocation(
+    decision: AdvisorGateDecision,
+    facts: dict[str, Any],
+    *,
+    runner: AdvisorRunner,
+    invocation_id: str,
+    gate_decision_ref: str,
+    recommendation_ref: str,
+    started_at: str | None = None,
+) -> tuple[AdvisorRecommendation, AdvisorInvocationRecord]:
+    if not decision.invoked or decision.advisor is None:
+        raise ProtocolError("Advisor invocation requires an invoked gate decision")
+    started = started_at or datetime.now(timezone.utc).isoformat()
+    result = runner(decision, dict(facts))
+    if not isinstance(result, dict):
+        raise ProtocolError("Advisor runner result must be an object")
+    recommendation_data = result.get("recommendation")
+    if not isinstance(recommendation_data, dict):
+        raise ProtocolError("Advisor runner result requires recommendation")
+    recommendation = load_advisor_recommendation(recommendation_data)
+    if recommendation.advisor != decision.advisor:
+        raise ProtocolError("Advisor recommendation advisor does not match gate decision")
+    invocation = load_advisor_invocation(
+        {
+            "invocation_id": invocation_id,
+            "advisor": decision.advisor,
+            "status": "completed",
+            "gate_decision_ref": gate_decision_ref,
+            "recommendation_ref": recommendation_ref,
+            "telemetry_mode": result.get("telemetry_mode"),
+            "token_usage": result.get("token_usage"),
+            "cost_usd": result.get("cost_usd"),
+            "started_at": started,
+            "finished_at": result.get("finished_at")
+            or datetime.now(timezone.utc).isoformat(),
+            "capability_scope": result.get("capability_scope"),
+        }
+    )
+    return recommendation, invocation
+
+
+def build_scored_advisor_outcome(
+    decision: AdvisorGateDecision,
+    *,
+    outcome_id: str,
+    mission_id: str,
+    workflow_id: str,
+    source_decision_ref: str,
+    advisor_decision_ref: str,
+    actual_total_tokens: int,
+    rework_count: int,
+    broadcast_tokens: int,
+    duplicate_context_observed: bool,
+    recommendation_applied: bool | None = None,
+    advisor_recommendation_ref: str | None = None,
+    advisor_invocation_ref: str | None = None,
+    invocation: AdvisorInvocationRecord | None = None,
+) -> AdvisorOutcome:
+    negative_signals = rework_count > 0 or duplicate_context_observed
+    if decision.invoked:
+        if invocation is None:
+            raise ProtocolError("Invoked advisor outcome requires invocation evidence")
+        if advisor_recommendation_ref is None or advisor_invocation_ref is None:
+            raise ProtocolError("Invoked advisor outcome requires recommendation and invocation refs")
+        if recommendation_applied is None:
+            raise ProtocolError("Invoked advisor outcome requires recommendation disposition")
+        classification = (
+            "good_call" if recommendation_applied and not negative_signals else "bad_call"
+        )
+        actual_advisor_tokens = invocation.total_tokens
+        actual_advisor_cost_usd = invocation.cost_usd
+    else:
+        classification = "missed_call" if negative_signals else "good_skip"
+        actual_advisor_tokens = 0
+        actual_advisor_cost_usd = 0.0
+    return load_advisor_outcome(
+        {
+            "decision_type": "advisor_outcome",
+            "outcome_id": outcome_id,
+            "mission_id": mission_id,
+            "workflow_id": workflow_id,
+            "status": "scored",
+            "source_decision_type": "routing_decision",
+            "source_decision_ref": source_decision_ref,
+            "advisor_decision_ref": advisor_decision_ref,
+            "advisor_recommendation_ref": advisor_recommendation_ref,
+            "advisor_invocation_ref": advisor_invocation_ref,
+            "recommendation_applied": recommendation_applied,
+            "classification": classification,
+            "actual_advisor_tokens": actual_advisor_tokens,
+            "actual_advisor_cost_usd": actual_advisor_cost_usd,
+            "actual_total_tokens": actual_total_tokens,
+            "rework_count": rework_count,
+            "broadcast_tokens": broadcast_tokens,
+            "duplicate_context_observed": duplicate_context_observed,
+            "notes": "Scored from deterministic advisor policy and observed run signals.",
+        }
+    )
 
 
 def summarize_advisor_scores(
@@ -93,6 +270,13 @@ def _score_advisor_outcome_event(
     if invoked is None:
         reasons.append("advisor_decision_unavailable")
     rework_count = _int_or_none(event.get("rework_count"))
+    recommendation_applied = _bool_or_none(event.get("recommendation_applied"))
+    actual_advisor_tokens = _int_or_none(event.get("actual_advisor_tokens"))
+    actual_advisor_cost_usd = _float_or_none(event.get("actual_advisor_cost_usd"))
+    if invoked is True and recommendation_applied is None:
+        reasons.append("recommendation_disposition_missing")
+    if invoked is True and (actual_advisor_tokens is None or actual_advisor_cost_usd is None):
+        reasons.append("advisor_cost_evidence_missing")
     duplicate_context_observed = _bool_or_none(event.get("duplicate_context_observed"))
     price_snapshot = event.get("price_snapshot_attribution")
     budget_variance_usd = None
@@ -109,6 +293,7 @@ def _score_advisor_outcome_event(
             reasons=reasons,
             source_decision_type=source_decision_type,
             invoked=invoked,
+            recommendation_applied=recommendation_applied,
             mission_complete=mission_complete,
             review_rejections=review_rejections,
             rework_count=rework_count,
@@ -124,12 +309,14 @@ def _score_advisor_outcome_event(
     )
 
     if invoked:
-        classification = "bad_call" if negative_signals else "good_call"
-        score_reasons = (
-            ["advisor_invoked_and_post_run_overhead_observed"]
-            if negative_signals
-            else ["advisor_invoked_and_post_run_signals_are_clean"]
-        )
+        useful = recommendation_applied is True and not negative_signals
+        classification = "good_call" if useful else "bad_call"
+        if useful:
+            score_reasons = ["advisor_recommendation_applied_and_post_run_signals_are_clean"]
+        elif recommendation_applied is not True:
+            score_reasons = ["advisor_invoked_but_recommendation_not_applied"]
+        else:
+            score_reasons = ["advisor_invoked_and_post_run_overhead_observed"]
     else:
         classification = "missed_call" if negative_signals else "good_skip"
         score_reasons = (
@@ -144,6 +331,7 @@ def _score_advisor_outcome_event(
         reasons=score_reasons,
         source_decision_type=source_decision_type,
         invoked=invoked,
+        recommendation_applied=recommendation_applied,
         mission_complete=mission_complete,
         review_rejections=review_rejections,
         rework_count=rework_count,
@@ -236,3 +424,8 @@ def _float_or_none(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _fact_int(facts: dict[str, Any], field: str) -> int:
+    value = facts.get(field)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0

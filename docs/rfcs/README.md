@@ -23,7 +23,15 @@ Use this directory for candidate changes that need review before they move into
   RFC-003, implemented engineering-boundary refactor for shared errors, CLI
   split, application services, and narrower protocol exports.
 - [`004-temporal-replay-mutation-intake-and-retry-control.md`](004-temporal-replay-mutation-intake-and-retry-control.md):
-  RFC-004, draft design for universal inert worker mutation intents, trusted
+  RFC-004, accepted design for universal inert worker mutation intents, trusted
   proposal intake, bounded retry control, workflow versions, and linear temporal
-  replay in Runtime Milestone 4. Tracked by
+  replay in Runtime Milestone 4. Resolved by ADR-004 and tracked by
   [GitHub issue #3](https://github.com/Dying-Ember/BureauLess/issues/3).
+- [`005-authoritative-result-acceptance-spine.md`](005-authoritative-result-acceptance-spine.md):
+  RFC-005, accepted and implemented Runtime Milestone 3.5 design for staged result intake,
+  authoritative node-outcome acceptance, review/verification policy, and
+  conservative ledger v2 migration. Resolved by ADR-005.
+- [`006-bounded-context-continuation.md`](006-bounded-context-continuation.md):
+  RFC-006, accepted Runtime Milestone 3.5 design for harness-owned context
+  request identity, bounded resolution, resumed agent turns, lifecycle events,
+  and continuation telemetry. Resolved by ADR-006.
