@@ -256,6 +256,205 @@ const assignmentFixture = {
   },
 } as const;
 
+const agentsFixture = {
+  agents: [
+    {
+      agent_id: 'codex-cli',
+      binary: 'codex',
+      kind: 'local_agent_cli',
+      help_args: ['exec', '--help'],
+      version_args: ['--version'],
+      cancellation: 'process_kill',
+      metrics_capability: {
+        wall_time: 'required',
+        final_status: 'required',
+        changed_files: 'required',
+        token_usage: 'optional',
+        cost_usage: 'optional',
+        progress_events: 'native_jsonl',
+      },
+    },
+  ],
+} as const;
+
+const agentDoctorFixture = {
+  agent_id: 'codex-cli',
+  status: 'usable',
+  control_level: 'high',
+  binary: 'codex',
+  binary_path: '/usr/bin/codex',
+  version: 'codex 1.0.0',
+  checks: [
+    {
+      name: 'non_interactive',
+      status: 'passed',
+      markers: ['exec'],
+      missing_markers: [],
+    },
+    {
+      name: 'output_stream',
+      status: 'passed',
+      markers: ['--json'],
+      missing_markers: [],
+    },
+  ],
+  warnings: [],
+  metrics_capability: {
+    wall_time: 'required',
+    final_status: 'required',
+    changed_files: 'required',
+    token_usage: 'optional',
+    cost_usage: 'optional',
+    progress_events: 'native_jsonl',
+  },
+} as const;
+
+const contextResolutionFixture = {
+  context_request_id: 'ctxreq-001',
+  assignment_id: 'assign-prepare-live',
+  status: 'resolved',
+  policy_version: 'context-resolution-v1',
+  granted_artifacts: [{ artifact_id: 'artifact-test-report-017', path: 'artifacts/test-report.txt' }],
+  denied_refs: [{ ref: 'artifact-secret-001', reason: 'Outside assignment scope' }],
+  unavailable_refs: [{ ref: 'artifact-missing-001', reason: 'Artifact not found' }],
+  added_tokens_estimate: 620,
+  continuation_id: 'cont-001',
+  session_id: 'session-prepare-live',
+  request_index: 1,
+  resolved_at: '2026-07-05T00:00:00Z',
+} as const;
+
+const dispatchCompileFixture = {
+  packet_id: 'packet-assign-prepare-live',
+  mission_id: 'demo',
+  workflow_id: 'workflow-001',
+  routing_decision: routingDecisionFixture,
+  assignment: assignmentFixture,
+  review_constraints: {
+    required_gate_ids: [],
+    requires_review_decision: false,
+  },
+  turn_report_policy: {
+    after_each_tool_call: true,
+    max_report_tokens: 600,
+  },
+} as const;
+
+const sessionDispatchFixture = {
+  session_id: 'session-prepare-live',
+  assignment_id: 'assign-prepare-live',
+  agent_id: 'codex-cli',
+  status: 'completed',
+  started_at: '2026-07-05T00:00:00Z',
+  finished_at: '2026-07-05T00:01:00Z',
+  exit: { code: 0, reason: 'completed' },
+  native_logs: {},
+  diff_refs: [],
+  artifacts: [],
+  workspace: { root: '/tmp/live-demo' },
+  outcome_metrics: { wall_time_ms: 60000 },
+  extraction: {},
+  result_proposal: null,
+  dispatch: { packet_id: 'packet-assign-prepare-live' },
+  run_bundle_path: '.bureauless/sessions/assign-prepare-live.bundle.yaml',
+} as const;
+
+const resultStageFixture = {
+  status: 'awaiting_acceptance',
+  result_event_id: 'event-result-prepare-live',
+  replay: {
+    workflow_id: 'workflow-001',
+    workflow_version_id: 'workflow-version-002',
+    through_event_id: null,
+    through_event_ordinal: null,
+    terminal_complete: false,
+    nodes: {},
+    mutation_proposals: {},
+    assignment_validity: {},
+  },
+  gatekeeper: {
+    workflow_id: 'workflow-001',
+    ready: [],
+    decisions: {},
+  },
+} as const;
+
+const reviewImportFixture = {
+  event_id: 'event-review-imported-001',
+  event_type: 'review_decision_recorded',
+} as const;
+
+const outcomeDecideFixture = {
+  status: 'accepted',
+  decision: {
+    event_id: 'event-outcome-decided-001',
+    event_type: 'node_outcome_decided',
+    accepted_event_types: ['patch_ready'],
+  },
+  replay: {
+    workflow_id: 'workflow-001',
+    workflow_version_id: 'workflow-version-002',
+    through_event_id: null,
+    through_event_ordinal: null,
+    terminal_complete: false,
+    nodes: {},
+    mutation_proposals: {},
+    assignment_validity: {},
+  },
+  gatekeeper: {
+    workflow_id: 'workflow-001',
+    ready: [],
+    decisions: {},
+  },
+} as const;
+
+const runtimeDemoFixture = {
+  workspace: '/tmp/bureauless-runtime-demo',
+  mission_path: '.bureauless/runtime-demo/mission.yaml',
+  workflow_path: '.bureauless/runtime-demo/workflow.yaml',
+  ledger_path: '.bureauless/runtime-demo/ledger.yaml',
+  assignment_path: '.bureauless/runtime-demo/generated/assignments/implement_assignment.yaml',
+  dispatch_packet_path: '.bureauless/runtime-demo/generated/decisions/implement_dispatch_packet.yaml',
+  session_path: '.bureauless/runtime-demo/generated/sessions/implement_session.yaml',
+  result_path: '.bureauless/runtime-demo/generated/results/implement_result.yaml',
+  outcome_path: '.bureauless/runtime-demo/generated/outcomes/implement_outcome.yaml',
+  agent: 'shell-dummy',
+  assignment_id: 'assign-implement-demo',
+  session_id: 'session-implement-demo',
+  result_id: 'result-implement-demo',
+  replay: {
+    workflow_id: 'workflow-001',
+    workflow_version_id: 'workflow-version-002',
+    through_event_id: null,
+    through_event_ordinal: null,
+    terminal_complete: false,
+    nodes: {},
+    mutation_proposals: {},
+    assignment_validity: {},
+  },
+  gatekeeper: {
+    workflow_id: 'workflow-001',
+    ready: [],
+    decisions: {},
+  },
+  result: {
+    result_id: 'result-implement-demo',
+    assignment_id: 'assign-implement-demo',
+    agent_id: 'shell-dummy',
+    status: 'completed',
+    emitted_events: ['patch_ready'],
+    artifacts: [],
+    outcome_metrics: {},
+    verification: { status: 'passed' },
+    native_log_refs: [],
+    mutation_proposal_refs: [],
+  },
+  acceptance: {
+    event_id: 'event-runtime-demo-accepted-001',
+    event_type: 'node_outcome_decided',
+  },
+} as const;
+
 const contextCapsuleFixture = {
   context_capsule_id: 'context-assign-prepare-live',
   policy_version: 'context-v1',
@@ -510,6 +709,9 @@ const gatekeeperFixture = {
 
 const replayFixture = {
   workflow_id: 'workflow-001',
+  workflow_version_id: 'workflow-version-002',
+  through_event_id: null,
+  through_event_ordinal: null,
   terminal_complete: false,
   nodes: {
     prepare: {
@@ -592,6 +794,237 @@ const replayFixture = {
   },
 } as const;
 
+const replayTimelineFixture = {
+  workflow_id: 'workflow-001',
+  ledger_version: '1',
+  initial_workflow_version_id: 'workflow-version-001',
+  current_workflow_version_id: 'workflow-version-002',
+  versions: [
+    {
+      version_id: 'workflow-version-001',
+      sequence: 1,
+      content_hash: 'hash-001',
+    },
+    {
+      version_id: 'workflow-version-002',
+      sequence: 2,
+      content_hash: 'hash-002',
+      parent_version_id: 'workflow-version-001',
+      accepted_event_id: 'event-mutation-accepted-001',
+    },
+  ],
+  events: [
+    {
+      event_ordinal: 1,
+      event_id: 'event-mutation-001',
+      event_type: 'workflow_mutation_proposed',
+      active_workflow_version_id: 'workflow-version-001',
+      assignment_id: 'assign-review-1',
+      node_id: 'review',
+      version_transition: {
+        changed: false,
+        workflow_version_before: 'workflow-version-001',
+        workflow_version_after: 'workflow-version-001',
+        parent_workflow_version_id: null,
+        accepted_event_id: null,
+      },
+    },
+    {
+      event_ordinal: 2,
+      event_id: 'event-mutation-accepted-001',
+      event_type: 'workflow_mutation_accepted',
+      active_workflow_version_id: 'workflow-version-002',
+      assignment_id: 'assign-review-2',
+      node_id: 'review',
+      version_transition: {
+        changed: true,
+        workflow_version_before: 'workflow-version-001',
+        workflow_version_after: 'workflow-version-002',
+        parent_workflow_version_id: 'workflow-version-001',
+        accepted_event_id: 'event-mutation-accepted-001',
+      },
+    },
+  ],
+} as const;
+
+const replaySnapshotFixture = {
+  workflow_id: 'workflow-001',
+  cursor: {
+    through_event_id: 'event-mutation-accepted-001',
+    through_event_ordinal: 2,
+    workflow_version_id: 'workflow-version-002',
+  },
+  selected_event: replayTimelineFixture.events[1],
+  workflow: {
+    ...mutationFixture.current_workflow,
+    nodes: [
+      ...mutationFixture.current_workflow.nodes,
+      {
+        id: 'verify',
+        role: 'producer',
+        waits_for: [],
+        emits: ['verification_ready'],
+      },
+    ],
+    gates: [
+      ...mutationFixture.current_workflow.gates,
+      {
+        id: 'gate-verify',
+        node_id: 'review',
+        requires: ['verify.verification_ready'],
+      },
+    ],
+  },
+  replay: {
+    ...replayFixture,
+    workflow_version_id: 'workflow-version-002',
+    through_event_id: 'event-mutation-accepted-001',
+    through_event_ordinal: 2,
+    nodes: {
+      ...replayFixture.nodes,
+      prepare: {
+        ...replayFixture.nodes.prepare,
+        state: 'runnable',
+        assignment_attempts: [
+          {
+            assignment_id: 'assign-prepare-2',
+            node_id: 'prepare',
+            state: 'awaiting_context',
+            created_event_id: 'event-prepare-assigned-002',
+            retry_of: 'assign-prepare-1',
+          },
+        ],
+      },
+      review: {
+        ...replayFixture.nodes.review,
+        state: 'runnable',
+        blocked_reasons: [],
+        assignment_attempts: [
+          {
+            assignment_id: 'assign-review-3',
+            node_id: 'review',
+            state: 'awaiting_context',
+            created_event_id: 'event-review-assigned-003',
+            retry_of: 'assign-review-2',
+          },
+        ],
+      },
+      verify: {
+        node_id: 'verify',
+        state: 'runnable',
+        emitted_events: [],
+        blocked_reasons: [],
+        assignment_attempts: [],
+      },
+    },
+    assignment_validity: {
+      'assign-prepare-1': {
+        assignment_id: 'assign-prepare-1',
+        node_id: 'prepare',
+        creation_version_id: 'workflow-version-001',
+        active_version_id: 'workflow-version-002',
+        status: 'affected',
+        reasons: ['workflow_version_changed'],
+        transition_event_id: 'event-mutation-accepted-001',
+      },
+      'assign-prepare-2': {
+        assignment_id: 'assign-prepare-2',
+        node_id: 'prepare',
+        creation_version_id: 'workflow-version-001',
+        active_version_id: 'workflow-version-002',
+        status: 'needs_review',
+        reasons: ['awaiting_revalidation'],
+        transition_event_id: 'event-mutation-accepted-001',
+      },
+    },
+  },
+  gatekeeper: {
+    ...gatekeeperFixture,
+    decisions: {
+      ...gatekeeperFixture.decisions,
+      review: {
+        node_id: 'review',
+        state: 'runnable',
+        blocked_reasons: [],
+      },
+      verify: {
+        node_id: 'verify',
+        state: 'runnable',
+        blocked_reasons: [],
+      },
+    },
+    ready: ['prepare', 'review', 'verify'],
+  },
+} as const;
+
+const replayDiffFixture = {
+  workflow_id: 'workflow-001',
+  from_cursor: {
+    through_event_id: 'event-mutation-001',
+    through_event_ordinal: 1,
+    workflow_version_id: 'workflow-version-001',
+  },
+  to_cursor: {
+    through_event_id: 'event-mutation-accepted-001',
+    through_event_ordinal: 2,
+    workflow_version_id: 'workflow-version-002',
+  },
+  events_between: [
+    {
+      event_ordinal: 2,
+      event_id: 'event-mutation-accepted-001',
+      event_type: 'workflow_mutation_accepted',
+    },
+  ],
+  timeline_between: [replayTimelineFixture.events[1]],
+  workflow_diff: {
+    changed: true,
+    nodes_added: [replaySnapshotFixture.workflow.nodes[3]],
+    nodes_removed: [],
+    nodes_changed: [],
+    gates_added: [replaySnapshotFixture.workflow.gates[1]],
+    gates_removed: [],
+    gates_changed: [],
+    terminal_events_before: ['review_complete', 'audit_complete'],
+    terminal_events_after: ['review_complete', 'audit_complete'],
+  },
+  state_diff: {
+    terminal_complete_before: false,
+    terminal_complete_after: false,
+    node_changes: [
+      {
+        node_id: 'verify',
+        before: null,
+        after: replaySnapshotFixture.replay.nodes.verify,
+      },
+      {
+        node_id: 'review',
+        before: replayFixture.nodes.review,
+        after: replaySnapshotFixture.replay.nodes.review,
+      },
+    ],
+    assignment_validity_changes: [
+      {
+        assignment_id: 'assign-prepare-1',
+        before: null,
+        after: replaySnapshotFixture.replay.assignment_validity['assign-prepare-1'],
+      },
+      {
+        assignment_id: 'assign-prepare-2',
+        before: null,
+        after: replaySnapshotFixture.replay.assignment_validity['assign-prepare-2'],
+      },
+    ],
+    mutation_changes: [
+      {
+        proposal_event_id: 'event-mutation-accepted-001',
+        before: null,
+        after: replayFixture.mutation_proposals['event-mutation-accepted-001'],
+      },
+    ],
+  },
+} as const;
+
 type MockRunRecord = {
   run_id: string;
   task_id: string;
@@ -625,6 +1058,12 @@ async function mockWorkbenchApi(
     createNodeResponse?: (payload: unknown) => { status?: number; body?: unknown };
     mutationResponse?: { status?: number; body?: unknown };
     replayResponse?: { status?: number; body?: unknown };
+    replayTimelineResponse?: { status?: number; body?: unknown };
+    replaySnapshotResponse?: { status?: number; body?: unknown };
+    replayDiffResponse?: { status?: number; body?: unknown };
+    onReplayTimelineRequest?: (url: string) => void;
+    onReplaySnapshotRequest?: (url: string) => void;
+    onReplayDiffRequest?: (url: string) => void;
     onMutationRequest?: (url: string) => void;
     onMutationDecision?: (payload: unknown) => void;
     mutationDecisionDelayMs?: number;
@@ -638,16 +1077,34 @@ async function mockWorkbenchApi(
     onNodeOutcomeRequest?: (url: string) => void;
     assignmentResponse?: { status?: number; body?: unknown };
     onAssignmentRequest?: (url: string) => void;
+    agentsResponse?: { status?: number; body?: unknown };
+    onAgentsRequest?: (url: string) => void;
+    agentDoctorResponse?: { status?: number; body?: unknown } | ((agentId: string) => { status?: number; body?: unknown });
+    onAgentDoctorRequest?: (url: string) => void;
     contextCapsuleResponse?: { status?: number; body?: unknown };
     onContextCapsuleRequest?: (url: string) => void;
     contextRequestResponse?: { status?: number; body?: unknown };
     onContextRequest?: (url: string) => void;
+    contextResolveResponse?: { status?: number; body?: unknown } | ((payload: unknown) => { status?: number; body?: unknown });
+    onContextResolve?: (payload: unknown) => void;
     resultResponse?: { status?: number; body?: unknown };
     onResultRequest?: (url: string) => void;
+    resultStageResponse?: { status?: number; body?: unknown } | ((payload: unknown) => { status?: number; body?: unknown });
+    onResultStage?: (payload: unknown) => void;
     turnReportResponse?: { status?: number; body?: unknown };
     onTurnReportRequest?: (url: string) => void;
     dispatchPacketResponse?: { status?: number; body?: unknown };
     onDispatchPacketRequest?: (url: string) => void;
+    dispatchPacketCompileResponse?: { status?: number; body?: unknown } | ((payload: unknown) => { status?: number; body?: unknown });
+    onDispatchPacketCompile?: (payload: unknown) => void;
+    sessionDispatchResponse?: { status?: number; body?: unknown } | ((payload: unknown) => { status?: number; body?: unknown });
+    onSessionDispatch?: (payload: unknown) => void;
+    runtimeDemoResponse?: { status?: number; body?: unknown } | ((payload: unknown) => { status?: number; body?: unknown });
+    onRuntimeDemo?: (payload: unknown) => void;
+    reviewDecisionImportResponse?: { status?: number; body?: unknown } | ((payload: unknown) => { status?: number; body?: unknown });
+    onReviewDecisionImport?: (payload: unknown) => void;
+    outcomeDecideResponse?: { status?: number; body?: unknown } | ((payload: unknown) => { status?: number; body?: unknown });
+    onOutcomeDecide?: (payload: unknown) => void;
     metricsResponse?: { status?: number; body?: unknown } | ((url: string) => { status?: number; body?: unknown });
     onMetricsRequest?: (url: string) => void;
     artifactManifestResponse?: { status?: number; body?: unknown };
@@ -753,6 +1210,33 @@ async function mockWorkbenchApi(
     });
   });
 
+  await page.route('**/api/replay/timeline?**', async (route) => {
+    options.onReplayTimelineRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.replayTimelineResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.replayTimelineResponse?.body ?? replayTimelineFixture),
+    });
+  });
+
+  await page.route('**/api/replay/snapshot?**', async (route) => {
+    options.onReplaySnapshotRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.replaySnapshotResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.replaySnapshotResponse?.body ?? replaySnapshotFixture),
+    });
+  });
+
+  await page.route('**/api/replay/diff?**', async (route) => {
+    options.onReplayDiffRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.replayDiffResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.replayDiffResponse?.body ?? replayDiffFixture),
+    });
+  });
+
   await page.route('**/api/mission?**', async (route) => {
     options.onMissionRequest?.(route.request().url());
     await route.fulfill({
@@ -807,6 +1291,29 @@ async function mockWorkbenchApi(
     });
   });
 
+  await page.route('**/api/agents', async (route) => {
+    options.onAgentsRequest?.(route.request().url());
+    await route.fulfill({
+      status: options.agentsResponse?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(options.agentsResponse?.body ?? agentsFixture),
+    });
+  });
+
+  await page.route('**/api/agents/*/doctor', async (route) => {
+    options.onAgentDoctorRequest?.(route.request().url());
+    const agentId = route.request().url().split('/api/agents/')[1]?.split('/doctor')[0] ?? 'unknown';
+    const response =
+      typeof options.agentDoctorResponse === 'function'
+        ? options.agentDoctorResponse(decodeURIComponent(agentId))
+        : options.agentDoctorResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? agentDoctorFixture),
+    });
+  });
+
   await page.route('**/api/context-capsule?**', async (route) => {
     options.onContextCapsuleRequest?.(route.request().url());
     await route.fulfill({
@@ -831,12 +1338,40 @@ async function mockWorkbenchApi(
     });
   });
 
+  await page.route('**/api/context-request/resolve', async (route) => {
+    const payload = route.request().postDataJSON();
+    options.onContextResolve?.(payload);
+    const response =
+      typeof options.contextResolveResponse === 'function'
+        ? options.contextResolveResponse(payload)
+        : options.contextResolveResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? contextResolutionFixture),
+    });
+  });
+
   await page.route('**/api/result?**', async (route) => {
     options.onResultRequest?.(route.request().url());
     await route.fulfill({
       status: options.resultResponse?.status ?? 200,
       contentType: 'application/json',
       body: JSON.stringify(options.resultResponse?.body ?? resultFixture),
+    });
+  });
+
+  await page.route('**/api/result/stage', async (route) => {
+    const payload = route.request().postDataJSON();
+    options.onResultStage?.(payload);
+    const response =
+      typeof options.resultStageResponse === 'function'
+        ? options.resultStageResponse(payload)
+        : options.resultStageResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? resultStageFixture),
     });
   });
 
@@ -855,6 +1390,76 @@ async function mockWorkbenchApi(
       status: options.dispatchPacketResponse?.status ?? 200,
       contentType: 'application/json',
       body: JSON.stringify(options.dispatchPacketResponse?.body ?? dispatchPacketFixture),
+    });
+  });
+
+  await page.route('**/api/dispatch-packet/compile', async (route) => {
+    const payload = route.request().postDataJSON();
+    options.onDispatchPacketCompile?.(payload);
+    const response =
+      typeof options.dispatchPacketCompileResponse === 'function'
+        ? options.dispatchPacketCompileResponse(payload)
+        : options.dispatchPacketCompileResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? dispatchCompileFixture),
+    });
+  });
+
+  await page.route('**/api/session/dispatch', async (route) => {
+    const payload = route.request().postDataJSON();
+    options.onSessionDispatch?.(payload);
+    const response =
+      typeof options.sessionDispatchResponse === 'function'
+        ? options.sessionDispatchResponse(payload)
+        : options.sessionDispatchResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? sessionDispatchFixture),
+    });
+  });
+
+  await page.route('**/api/runtime-demo', async (route) => {
+    const payload = route.request().postDataJSON();
+    options.onRuntimeDemo?.(payload);
+    const response =
+      typeof options.runtimeDemoResponse === 'function'
+        ? options.runtimeDemoResponse(payload)
+        : options.runtimeDemoResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? runtimeDemoFixture),
+    });
+  });
+
+  await page.route('**/api/review-decision/import', async (route) => {
+    const payload = route.request().postDataJSON();
+    options.onReviewDecisionImport?.(payload);
+    const response =
+      typeof options.reviewDecisionImportResponse === 'function'
+        ? options.reviewDecisionImportResponse(payload)
+        : options.reviewDecisionImportResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? reviewImportFixture),
+    });
+  });
+
+  await page.route('**/api/outcome/decide', async (route) => {
+    const payload = route.request().postDataJSON();
+    options.onOutcomeDecide?.(payload);
+    const response =
+      typeof options.outcomeDecideResponse === 'function'
+        ? options.outcomeDecideResponse(payload)
+        : options.outcomeDecideResponse;
+    await route.fulfill({
+      status: response?.status ?? 200,
+      contentType: 'application/json',
+      body: JSON.stringify(response?.body ?? outcomeDecideFixture),
     });
   });
 
@@ -2142,7 +2747,7 @@ test('renders runtime summary panels and persists runtime source paths', async (
   await expect(ledgerPanel.getByText('Artifacts')).toBeVisible();
   await expect(ledgerPanel.getByText('Risks')).toBeVisible();
   await expect(ledgerPanel.getByText('Decisions')).toBeVisible();
-  await expect(runtimeSources.getByRole('status')).toContainText('Runtime sources loaded.');
+  await expect(runtimeSources.getByText('Runtime sources loaded.')).toBeVisible();
 
   await runtimeSources.getByLabel('Mission path').fill('examples/missions/custom/mission.yaml');
   await runtimeSources.getByLabel('Workflow path').fill('examples/missions/custom/workflow.yaml');
@@ -2150,7 +2755,7 @@ test('renders runtime summary panels and persists runtime source paths', async (
   await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('examples/missions/custom/mission.yaml');
   await expect(runtimeSources.getByLabel('Workflow path')).toHaveValue('examples/missions/custom/workflow.yaml');
   await expect(runtimeSources.getByLabel('Ledger path')).toHaveValue('examples/missions/custom/ledger.yaml');
-  await expect(runtimeSources.getByRole('status')).toContainText('Runtime source changes are not applied.');
+  await expect(runtimeSources.getByText('Runtime source changes are not applied.')).toBeVisible();
   await applyRuntimeSources.dispatchEvent('click');
 
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem('bureauless.missionPath'))).toBe(
@@ -2214,10 +2819,313 @@ test('loads runtime sources from artifact_manifest_path without frontend YAML pa
   await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('.bureauless/m3-demo/mission.yaml');
   await expect(runtimeSources.getByLabel('Workflow path')).toHaveValue('.bureauless/m3-demo/workflow.yaml');
   await expect(runtimeSources.getByLabel('Ledger path')).toHaveValue('.bureauless/m3-demo/ledger.yaml');
-  await expect(runtimeSources.getByRole('status')).toContainText('Runtime sources loaded.');
+  await expect(runtimeSources.getByText('Runtime sources loaded.')).toBeVisible();
 });
 
-test('inspects an ordinary session bundle with explicit unavailable artifacts', async ({ page }) => {
+test('renders Runtime M4 timeline, historical snapshot, and diff inspectors from API history surfaces', async ({ page }) => {
+  let timelineRequestUrl = '';
+  let snapshotRequestUrl = '';
+  let diffRequestUrl = '';
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    replayResponse: { body: replayFixture },
+    replayTimelineResponse: { body: replayTimelineFixture },
+    replaySnapshotResponse: { body: replaySnapshotFixture },
+    replayDiffResponse: { body: replayDiffFixture },
+    onReplayTimelineRequest: (url) => {
+      timelineRequestUrl = url;
+    },
+    onReplaySnapshotRequest: (url) => {
+      snapshotRequestUrl = url;
+    },
+    onReplayDiffRequest: (url) => {
+      diffRequestUrl = url;
+    },
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml&through_event_id=event-mutation-accepted-001&from_event_id=event-mutation-001&to_event_id=event-mutation-accepted-001',
+  );
+
+  await expect.poll(() => (timelineRequestUrl ? new URL(timelineRequestUrl).searchParams.get('workflow_path') : null)).toBe(
+    '.bureauless/mutation-demo/workflow.yaml',
+  );
+  await expect.poll(() => (snapshotRequestUrl ? new URL(snapshotRequestUrl).searchParams.get('through_event_id') : null)).toBe(
+    'event-mutation-accepted-001',
+  );
+  await expect.poll(() => (diffRequestUrl ? new URL(diffRequestUrl).searchParams.get('from_event_id') : null)).toBe(
+    'event-mutation-001',
+  );
+  await expect.poll(() => (diffRequestUrl ? new URL(diffRequestUrl).searchParams.get('to_event_id') : null)).toBe(
+    'event-mutation-accepted-001',
+  );
+
+  const historyPanel = page.getByRole('region', { name: 'Timeline and versions' });
+  await expect(historyPanel.getByRole('button', { name: /v0002/i })).toBeVisible();
+  await expect(historyPanel.getByRole('button', { name: /workflow_mutation_accepted/i })).toBeVisible();
+
+  const snapshotPanel = page.getByRole('region', { name: 'Historical snapshot inspector' });
+  await expect(snapshotPanel.getByText('workflow-version-002', { exact: true }).first()).toBeVisible();
+  await expect(snapshotPanel.getByText('awaiting_context')).toBeVisible();
+  await expect(snapshotPanel.getByText('workflow_version_changed')).toBeVisible();
+  await expect(snapshotPanel.getByText('awaiting_revalidation')).toBeVisible();
+
+  const diffPanel = page.getByRole('region', { name: 'Temporal diff inspector' });
+  await expect(diffPanel.getByText('node added')).toBeVisible();
+  await expect(diffPanel.getByText('verify', { exact: true }).first()).toBeVisible();
+  await expect(diffPanel.getByText('assignment validity').first()).toBeVisible();
+  await expect(diffPanel.getByText('mutation state').first()).toBeVisible();
+});
+
+test('surfaces Runtime M4 unsupported temporal requests as explicit UI errors', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    replayTimelineResponse: { body: replayTimelineFixture },
+    replaySnapshotResponse: {
+      status: 400,
+      body: {
+        code: 'unknown_cursor',
+        error: 'Unknown replay cursor: event-missing',
+      },
+    },
+    replayDiffResponse: {
+      status: 400,
+      body: {
+        code: 'unsupported_temporal_request',
+        error: 'Rollback comparisons are not supported',
+      },
+    },
+  });
+
+  await page.goto(
+    '/?workflow_path=.bureauless/mutation-demo/workflow.yaml&ledger_path=.bureauless/mutation-demo/ledger.yaml&through_event_id=event-missing&from_event_id=event-mutation-accepted-001&to_event_id=event-mutation-001',
+  );
+
+  const historyPanel = page.getByRole('region', { name: 'Timeline and versions' });
+  await expect(historyPanel).toBeVisible();
+  await expect(historyPanel.getByRole('alert')).toContainText('Unknown replay cursor: event-missing');
+  await expect(page.getByRole('region', { name: 'Historical snapshot inspector' }).getByRole('alert')).toContainText(
+    'Unknown replay cursor: event-missing',
+  );
+  await expect(page.getByRole('region', { name: 'Temporal diff inspector' }).getByRole('alert')).toContainText(
+    'Rollback comparisons are not supported',
+  );
+});
+
+test('runs Runtime M6 operator actions through validated backend endpoints', async ({ page }) => {
+  const observed: Record<string, unknown> = {};
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: artifactManifestFixture },
+    onContextResolve: (payload) => {
+      observed.contextResolve = payload;
+    },
+    onDispatchPacketCompile: (payload) => {
+      observed.dispatchCompile = payload;
+    },
+    onSessionDispatch: (payload) => {
+      observed.sessionDispatch = payload;
+    },
+    onResultStage: (payload) => {
+      observed.resultStage = payload;
+    },
+    onReviewDecisionImport: (payload) => {
+      observed.reviewImport = payload;
+    },
+    onOutcomeDecide: (payload) => {
+      observed.outcomeDecide = payload;
+    },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml');
+
+  const contextPanel = page.getByRole('region', { name: 'Context request resolution' });
+  await contextPanel.getByRole('button', { name: 'Resolve request' }).click();
+  await expect(contextPanel.getByText('context-resolution-v1')).toBeVisible();
+  await expect(contextPanel.getByText('artifact-test-report-017').first()).toBeVisible();
+  await expect(contextPanel.getByText('Outside assignment scope')).toBeVisible();
+
+  const dispatchPanel = page.getByRole('region', { name: 'Dispatch and launch controls' });
+  await dispatchPanel.getByRole('button', { name: 'Compile preview' }).click();
+  await expect(dispatchPanel.getByText('packet-assign-prepare-live').first()).toBeVisible();
+  await dispatchPanel.getByRole('button', { name: 'Launch session' }).click();
+  await expect(dispatchPanel.getByText('session-prepare-live').first()).toBeVisible();
+  await expect(dispatchPanel.getByText('.bureauless/sessions/assign-prepare-live.bundle.yaml').first()).toBeVisible();
+
+  const acceptancePanel = page.getByRole('region', { name: 'Acceptance and ledger advancement' });
+  await acceptancePanel.getByRole('button', { name: 'Stage result' }).click();
+  await expect(acceptancePanel.getByText('event-result-prepare-live').first()).toBeVisible();
+  await acceptancePanel.getByRole('button', { name: 'Import review' }).click();
+  await expect(acceptancePanel.getByText('event-review-imported-001').first()).toBeVisible();
+  await acceptancePanel.getByRole('button', { name: 'Decide outcome' }).click();
+  await expect(acceptancePanel.getByText('event-outcome-decided-001').first()).toBeVisible();
+  await expect(acceptancePanel.getByText('patch_ready').first()).toBeVisible();
+
+  expect(observed.contextResolve).toMatchObject({
+    assignment_path: '.bureauless/m3-demo/generated/assignments/prepare_assignment.yaml',
+    context_request_path: '.bureauless/m3-demo/generated/context/prepare_context_request.yaml',
+    ledger_path: '.bureauless/m3-demo/ledger.yaml',
+    max_artifacts: 1,
+  });
+  expect(observed.dispatchCompile).toMatchObject({
+    mission_path: '.bureauless/m3-demo/mission.yaml',
+    workflow_path: '.bureauless/m3-demo/workflow.yaml',
+    routing_decision_path: '.bureauless/m3-demo/generated/decisions/routing.yaml',
+    assignment_path: '.bureauless/m3-demo/generated/assignments/prepare_assignment.yaml',
+  });
+  expect(observed.sessionDispatch).toMatchObject({
+    dispatch_packet_path: '.bureauless/m3-demo/generated/decisions/prepare_dispatch_packet.yaml',
+    ledger_path: '.bureauless/m3-demo/ledger.yaml',
+    agent: 'codex-cli',
+    dry_run: true,
+  });
+  expect(observed.resultStage).toMatchObject({
+    result_path: '.bureauless/m3-demo/generated/results/prepare_result.yaml',
+  });
+  expect(observed.reviewImport).toMatchObject({
+    decision_path: '.bureauless/m3-demo/generated/reviews/prepare_review_decision.yaml',
+  });
+  expect(observed.outcomeDecide).toMatchObject({
+    outcome_path: '.bureauless/m3-demo/generated/outcomes/prepare_node_outcome.yaml',
+    verification_status: 'passed',
+    accepted_event_types: ['patch_ready'],
+  });
+});
+
+test('shows Runtime M6 doctor warnings and structured backend rejections without collapsing runtime view', async ({ page }) => {
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: artifactManifestFixture },
+    agentDoctorResponse: () => ({
+      body: {
+        ...agentDoctorFixture,
+        status: 'degraded',
+        control_level: 'low',
+        checks: [
+          ...agentDoctorFixture.checks,
+          {
+            name: 'working_directory',
+            status: 'missing',
+            markers: [],
+            missing_markers: ['--cd'],
+          },
+        ],
+        warnings: ['Help command exited with 1'],
+      },
+    }),
+    sessionDispatchResponse: () => ({
+      status: 400,
+      body: {
+        code: 'strict_writable_ledger_required',
+        error: 'Ledger is not strict-writable for session dispatch',
+      },
+    }),
+    outcomeDecideResponse: () => ({
+      status: 400,
+      body: {
+        code: 'acceptance_review_required',
+        error: 'Acceptance review_event_id must reference a review decision',
+      },
+    }),
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/m3-demo/generated/telemetry/manifest.yaml');
+
+  const safetyPanel = page.getByRole('region', { name: 'Action safety and doctoring' });
+  await expect(safetyPanel.getByText('degraded').first()).toBeVisible();
+  await expect(safetyPanel.getByText('Missing markers: --cd')).toBeVisible();
+  await expect(safetyPanel.getByText('Help command exited with 1')).toBeVisible();
+
+  const dispatchPanel = page.getByRole('region', { name: 'Dispatch and launch controls' });
+  await dispatchPanel.getByRole('button', { name: 'Launch session' }).click();
+  await expect(safetyPanel.getByText('Ledger is not strict-writable for session dispatch')).toBeVisible();
+
+  const acceptancePanel = page.getByRole('region', { name: 'Acceptance and ledger advancement' });
+  await acceptancePanel.getByRole('button', { name: 'Decide outcome' }).click();
+  await expect(safetyPanel.getByText('Acceptance review_event_id must reference a review decision')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Runtime workflow summary' })).toBeVisible();
+});
+
+test('bootstraps a Runtime M7 demo workspace into runtime sources without manual query editing', async ({ page }) => {
+  let observedRuntimeDemo: unknown = null;
+
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    runtimeDemoResponse: {
+      body: runtimeDemoFixture,
+    },
+    onRuntimeDemo: (payload) => {
+      observedRuntimeDemo = payload;
+    },
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Runtime workflow' }).click();
+
+  const bootstrapPanel = page.getByLabel('Runtime demo bootstrap');
+  await bootstrapPanel.getByLabel('Workspace').fill('/tmp/runtime-m7-demo');
+  await bootstrapPanel.getByLabel('Agent').fill('codex-cli');
+  await bootstrapPanel.getByLabel('Assignment ID').fill('assign-runtime-m7');
+  await bootstrapPanel.getByLabel('Session ID').fill('session-runtime-m7');
+  await bootstrapPanel.getByLabel('Result ID').fill('result-runtime-m7');
+  await bootstrapPanel.getByLabel('Shell command').fill('printf runtime-m7');
+  await bootstrapPanel.getByRole('button', { name: 'Bootstrap runtime demo' }).click();
+
+  await expect(bootstrapPanel.getByText('Bootstrapped session-implement-demo in /tmp/bureauless-runtime-demo.')).toBeVisible();
+  await expect(page.getByLabel('Mission path')).toHaveValue('.bureauless/runtime-demo/mission.yaml');
+  await expect(page.getByLabel('Workflow path')).toHaveValue('.bureauless/runtime-demo/workflow.yaml');
+  await expect(page.getByLabel('Ledger path')).toHaveValue('.bureauless/runtime-demo/ledger.yaml');
+  const sourceNavigator = page.getByLabel('Runtime source navigator');
+  await expect(sourceNavigator.getByText('Artifact family').locator('..').getByText('direct runtime paths')).toBeVisible();
+  await expect(sourceNavigator.getByText('Provenance').locator('..').getByText('bootstrap')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Runtime workflow summary' })).toBeVisible();
+
+  expect(observedRuntimeDemo).toMatchObject({
+    workspace: '/tmp/runtime-m7-demo',
+    agent: 'codex-cli',
+    assignment_id: 'assign-runtime-m7',
+    session_id: 'session-runtime-m7',
+    result_id: 'result-runtime-m7',
+    shell_command: 'printf runtime-m7',
+  });
+});
+
+test('switches Runtime M7 sources from a run bundle root to the returned manifest root without frontend path synthesis', async ({ page }) => {
+  const observedArtifactManifestRequests: string[] = [];
+  const ordinarySessionManifest = {
+    ...artifactManifestFixture,
+    flow_id: 'maintained-session-dispatch',
+    metrics_summary_path: '.bureauless/sessions/session-001.yaml',
+  };
+
+  await mockWorkbenchApi(page, {
+    mutationResponse: { body: mutationFixture },
+    artifactManifestResponse: { body: ordinarySessionManifest },
+    onArtifactManifestRequest: (url) => {
+      observedArtifactManifestRequests.push(url);
+    },
+  });
+
+  await page.goto('/?artifact_manifest_path=.bureauless/sessions/session-001.bundle.yaml');
+
+  const sourceNavigator = page.getByLabel('Runtime source navigator');
+  await expect(sourceNavigator.getByText('.bureauless/sessions/session-001.bundle.yaml')).toBeVisible();
+  await expect(sourceNavigator.getByText('Artifact family').locator('..').getByText('run bundle')).toBeVisible();
+
+  await sourceNavigator.getByRole('button', { name: 'Use manifest root' }).click();
+
+  await expect(page.getByLabel('Artifact manifest path')).toHaveValue(
+    '.bureauless/m3-demo/generated/telemetry/manifest.yaml',
+  );
+  await expect(
+    sourceNavigator.getByText('Current root').locator('..').getByText('.bureauless/m3-demo/generated/telemetry/manifest.yaml'),
+  ).toBeVisible();
+  expect(observedArtifactManifestRequests.at(-1)).toContain(
+    encodeURIComponent('.bureauless/m3-demo/generated/telemetry/manifest.yaml'),
+  );
+});
+
+test('shows Runtime M7 readiness summary for an ordinary session bundle with explicit unavailable artifacts', async ({ page }) => {
   let advisorOutcomeRequestUrl = '';
   let nodeOutcomeRequestUrl = '';
   let resultRequestUrl = '';
@@ -2262,9 +3170,14 @@ test('inspects an ordinary session bundle with explicit unavailable artifacts', 
 
   const routingInspector = page.getByRole('region', { name: 'Routing and advisor inspector' });
   const nodeInspector = page.getByRole('region', { name: 'Runtime node inspector' });
+  const readinessPanel = page.getByLabel('Artifact readiness summary');
   await expect(routingInspector.getByText('Classification').locator('..').getByText('unavailable')).toBeVisible();
   await expect(nodeInspector.getByText('Outcome status').locator('..').getByText('unavailable')).toBeVisible();
   await expect(nodeInspector.getByText('Result status').locator('..').getByText('unavailable')).toBeVisible();
+  await expect(readinessPanel.getByText('Actionability:').locator('..').getByText('inspect-only')).toBeVisible();
+  await expect(readinessPanel.getByText('Result artifact').locator('..').getByText('needs_review')).toBeVisible();
+  await expect(readinessPanel.getByText('Outcome artifact').locator('..').getByText('needs_review')).toBeVisible();
+  await expect(readinessPanel.getByText('Review link').locator('..').getByText('needs_review')).toBeVisible();
   expect(advisorOutcomeRequestUrl).toBe('');
   expect(nodeOutcomeRequestUrl).toBe('');
   expect(resultRequestUrl).toBe('');

@@ -1,7 +1,7 @@
 import '@xyflow/react/dist/style.css';
 import './styles.css';
 
-import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useMutation, useQueries, useQuery, useQueryClient, type UseMutationResult } from '@tanstack/react-query';
 import {
   Background,
   ConnectionLineType,
@@ -47,13 +47,18 @@ import { createRoot } from 'react-dom/client';
 import ELK from './elk-layout.js';
 
 import {
+  compileDispatchPacket,
   createNode,
   decideMutation,
+  decideOutcome,
   DEFAULT_DAG_PATH,
   DEFAULT_MISSION_PATH,
   DEFAULT_LEDGER_PATH,
   DEFAULT_RUNS_DIR,
   DEFAULT_WORKFLOW_PATH,
+  dispatchSession,
+  fetchAgentDoctor,
+  fetchAgents,
   fetchAssignment,
   fetchAdvisorOutcome,
   fetchArtifactSessionManifest,
@@ -67,6 +72,9 @@ import {
   fetchMutations,
   fetchNodeOutcome,
   fetchReplay,
+  fetchReplayDiff,
+  fetchReplaySnapshot,
+  fetchReplayTimeline,
   fetchPrompt,
   fetchDispatchPacket,
   fetchResult,
@@ -75,18 +83,29 @@ import {
   fetchState,
   fetchTurnReport,
   fetchValidation,
+  importReviewDecision,
+  resolveContextRequest,
+  runRuntimeDemo,
+  stageResult,
   type AdvisorOutcomeResponse,
   type AssignmentResponse,
   type ArtifactSessionManifestResponse,
   type ContextCapsuleResponse,
+  type ContextRequestResponse,
+  type ContextResolutionResponse,
+  type ContextResolveRequest,
   type GatekeeperBlockedReason,
   type GatekeeperDecision,
   type MetricsSummaryResponse,
+  type OutcomeDecisionRequest,
+  type OutcomeDecisionResponse,
   type RoutingDecisionResponse,
+  type SessionDispatchRequest,
   type WorkbenchPaths,
   updateNodeDependencies,
   updateNodeMetadata,
   updateReviewStatus,
+  type DispatchPacketCompileRequest,
   type NodeState,
   type MutationProposalInspection,
   type MutationWorkbenchPaths,
@@ -97,13 +116,25 @@ import {
   type RuntimeWorkflowNode,
   type RuntimeWorkflowWaitsFor,
   type ReplayAssignmentAttempt,
+  type ReplayAssignmentValidity,
+  type ReplayHistoryDiffResponse,
+  type ReplayHistorySnapshotResponse,
+  type ReplayHistoryTimelineResponse,
   type ReplayNodeState,
   type ReplayResponse,
+  type RuntimeDemoRequest,
+  type RuntimeDemoResponse,
+  type ResultStageRequest,
+  type ResultStageResponse,
+  type ReviewDecisionImportRequest,
+  type ReviewDecisionImportResponse,
   type ReviewAction,
   type RunRecord,
+  type SessionDispatchResponse,
   type TaskNode,
   type TurnReportResponse,
   type ValidationError,
+  type DispatchPacketResponse,
 } from './api/client';
 import { type ThemeMode, useThemeMode } from './theme/theme';
 
@@ -140,6 +171,33 @@ type GraphDependencyDraft = {
 };
 
 type FlowNodePositions = Record<string, XYPosition>;
+
+type RuntimeDemoBootstrapDraft = {
+  workspace: string;
+  agent: string;
+  shellCommand: string;
+  assignmentId: string;
+  sessionId: string;
+  resultId: string;
+};
+
+type RuntimeSourceRootKind = 'direct_runtime_paths' | 'artifact_manifest' | 'run_bundle';
+
+type RuntimeSourceProvenance = 'bootstrap' | 'direct_manifest' | 'run_bundle' | 'manual_runtime_paths';
+
+type RuntimeSourceChoice = {
+  id: string;
+  label: string;
+  description: string;
+  rootKind: RuntimeSourceRootKind;
+  provenance: RuntimeSourceProvenance;
+  artifactManifestPath: string;
+  missionPath: string;
+  workflowPath: string;
+  ledgerPath: string;
+};
+
+type RuntimeReadinessTone = 'completed' | 'needs_review' | 'blocked';
 
 type FlowNodePort = {
   id: string;
@@ -189,6 +247,21 @@ type RuntimeFlowLayout = {
   nodes: Array<Node<RuntimeFlowNodeData>>;
   edges: Array<Edge<RuntimeFlowEdgeData>>;
   orderedNodes: Array<Node<RuntimeFlowNodeData>>;
+};
+
+type RuntimeActionState = 'idle' | 'pending' | 'success' | 'error';
+
+type RuntimeActionStatusEntry = {
+  key:
+    | 'contextResolve'
+    | 'dispatchCompile'
+    | 'sessionDispatch'
+    | 'resultStage'
+    | 'reviewImport'
+    | 'outcomeDecide';
+  label: string;
+  state: RuntimeActionState;
+  detail: string;
 };
 
 type PlanningFlowLayout = {
@@ -503,6 +576,7 @@ function Workbench() {
   const [paths, setPaths] = useState<WorkbenchPaths>(loadWorkbenchPaths);
   const [mutationPaths, setMutationPaths] = useState<MutationWorkbenchPaths>(loadMutationWorkbenchPaths);
   const [mutationPathDraft, setMutationPathDraft] = useState<MutationWorkbenchPaths>(loadMutationWorkbenchPaths);
+  const [runtimeDemoDraft, setRuntimeDemoDraft] = useState<RuntimeDemoBootstrapDraft>(loadRuntimeDemoBootstrapDraft);
   const [viewMode, setViewMode] = useState<WorkbenchViewMode>(() => loadWorkbenchViewMode());
   const [pathDraft, setPathDraft] = useState<WorkbenchPaths>(paths);
   const [manualNodePositions, setManualNodePositions] = useState<FlowNodePositions>(() => loadGraphNodePositions(paths.dagPath));
@@ -549,6 +623,31 @@ function Workbench() {
   const resolvedMutationPaths = useMemo(
     () => resolveMutationWorkbenchPaths(mutationPaths, artifactSessionManifest.data),
     [artifactSessionManifest.data, mutationPaths],
+  );
+  const replaySnapshotSelector = useMemo(
+    () => ({
+      eventId: resolvedMutationPaths.throughEventId.trim() || undefined,
+      eventOrdinal: parseHistoryOrdinalInput(resolvedMutationPaths.throughEventOrdinal),
+    }),
+    [resolvedMutationPaths.throughEventId, resolvedMutationPaths.throughEventOrdinal],
+  );
+  const replayDiffCompare = useMemo(
+    () => ({
+      from: {
+        eventId: resolvedMutationPaths.compareFromEventId.trim() || undefined,
+        eventOrdinal: parseHistoryOrdinalInput(resolvedMutationPaths.compareFromEventOrdinal),
+      },
+      to: {
+        eventId: resolvedMutationPaths.compareToEventId.trim() || undefined,
+        eventOrdinal: parseHistoryOrdinalInput(resolvedMutationPaths.compareToEventOrdinal),
+      },
+    }),
+    [
+      resolvedMutationPaths.compareFromEventId,
+      resolvedMutationPaths.compareFromEventOrdinal,
+      resolvedMutationPaths.compareToEventId,
+      resolvedMutationPaths.compareToEventOrdinal,
+    ],
   );
   const selectedArtifactStep = useMemo(
     () => {
@@ -641,6 +740,45 @@ function Workbench() {
     queryFn: () => fetchReplay(resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath),
     enabled: viewMode !== 'runtime' || hasResolvedRuntimePaths(resolvedMutationPaths),
   });
+  const replayTimeline = useQuery({
+    queryKey: ['replay-timeline', resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath],
+    queryFn: () => fetchReplayTimeline(resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath),
+    enabled: viewMode === 'runtime' && hasResolvedRuntimePaths(resolvedMutationPaths),
+  });
+  const replaySnapshot = useQuery({
+    queryKey: [
+      'replay-snapshot',
+      resolvedMutationPaths.workflowPath,
+      resolvedMutationPaths.ledgerPath,
+      replaySnapshotSelector.eventId ?? '',
+      replaySnapshotSelector.eventOrdinal ?? '',
+    ],
+    queryFn: () =>
+      fetchReplaySnapshot(
+        resolvedMutationPaths.workflowPath,
+        resolvedMutationPaths.ledgerPath,
+        replaySnapshotSelector,
+      ),
+    enabled: viewMode === 'runtime' && hasResolvedRuntimePaths(resolvedMutationPaths),
+  });
+  const replayDiff = useQuery({
+    queryKey: [
+      'replay-diff',
+      resolvedMutationPaths.workflowPath,
+      resolvedMutationPaths.ledgerPath,
+      replayDiffCompare.from.eventId ?? '',
+      replayDiffCompare.from.eventOrdinal ?? '',
+      replayDiffCompare.to.eventId ?? '',
+      replayDiffCompare.to.eventOrdinal ?? '',
+    ],
+    queryFn: () =>
+      fetchReplayDiff(
+        resolvedMutationPaths.workflowPath,
+        resolvedMutationPaths.ledgerPath,
+        replayDiffCompare,
+      ),
+    enabled: viewMode === 'runtime' && hasResolvedRuntimePaths(resolvedMutationPaths),
+  });
   const gatekeeper = useQuery({
     queryKey: ['gatekeeper', resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath],
     queryFn: () => fetchGatekeeper(resolvedMutationPaths.workflowPath, resolvedMutationPaths.ledgerPath),
@@ -658,6 +796,32 @@ function Workbench() {
       });
     },
   });
+  const runtimeDemoBootstrap = useMutation({
+    mutationFn: (request: RuntimeDemoRequest) => runRuntimeDemo(request),
+    onSuccess: (response: RuntimeDemoResponse) => {
+      setViewMode('runtime');
+      setSelectedRuntimeNodeId(undefined);
+      setSelectedRuntimeEdge(null);
+      const nextPaths = sanitizeMutationWorkbenchPaths({
+        missionPath: response.mission_path,
+        workflowPath: response.workflow_path,
+        ledgerPath: response.ledger_path,
+        artifactManifestPath: '',
+        throughEventId: '',
+        throughEventOrdinal: '',
+        compareFromEventId: '',
+        compareFromEventOrdinal: '',
+        compareToEventId: '',
+        compareToEventOrdinal: '',
+      });
+      setMutationPaths(nextPaths);
+      persistMutationWorkbenchPaths(nextPaths);
+    },
+  });
+  const runtimeOperatorActions = useRuntimeOperatorActions(
+    queryClient,
+    resolvedMutationPaths,
+  );
   const runtimeDecisionSyncing =
     mutationDecision.isPending ||
     (mutationDecision.isSuccess &&
@@ -682,6 +846,10 @@ function Workbench() {
   useEffect(() => {
     setMutationPathDraft(mutationPaths);
   }, [mutationPaths]);
+
+  useEffect(() => {
+    persistRuntimeDemoBootstrapDraft(runtimeDemoDraft);
+  }, [runtimeDemoDraft]);
 
   useEffect(() => {
     if (!artifactSessionManifest.data) {
@@ -1000,6 +1168,23 @@ function Workbench() {
     persistMutationWorkbenchPaths(nextPaths);
   };
 
+  const activateRuntimeSourceChoice = (choice: RuntimeSourceChoice) => {
+    const nextPaths = sanitizeMutationWorkbenchPaths({
+      missionPath: choice.rootKind === 'direct_runtime_paths' ? choice.missionPath : '',
+      workflowPath: choice.rootKind === 'direct_runtime_paths' ? choice.workflowPath : '',
+      ledgerPath: choice.rootKind === 'direct_runtime_paths' ? choice.ledgerPath : '',
+      artifactManifestPath: choice.artifactManifestPath,
+      throughEventId: mutationPaths.throughEventId,
+      throughEventOrdinal: mutationPaths.throughEventOrdinal,
+      compareFromEventId: mutationPaths.compareFromEventId,
+      compareFromEventOrdinal: mutationPaths.compareFromEventOrdinal,
+      compareToEventId: mutationPaths.compareToEventId,
+      compareToEventOrdinal: mutationPaths.compareToEventOrdinal,
+    });
+    setMutationPaths(nextPaths);
+    persistMutationWorkbenchPaths(nextPaths);
+  };
+
   const mutationPathDraftChanged = useMemo(
     () => {
       const committed = sanitizeMutationWorkbenchPaths(mutationPaths);
@@ -1008,7 +1193,13 @@ function Workbench() {
         draft.missionPath !== committed.missionPath ||
         draft.workflowPath !== committed.workflowPath ||
         draft.ledgerPath !== committed.ledgerPath ||
-        draft.artifactManifestPath !== committed.artifactManifestPath
+        draft.artifactManifestPath !== committed.artifactManifestPath ||
+        draft.throughEventId !== committed.throughEventId ||
+        draft.throughEventOrdinal !== committed.throughEventOrdinal ||
+        draft.compareFromEventId !== committed.compareFromEventId ||
+        draft.compareFromEventOrdinal !== committed.compareFromEventOrdinal ||
+        draft.compareToEventId !== committed.compareToEventId ||
+        draft.compareToEventOrdinal !== committed.compareToEventOrdinal
       );
     },
     [mutationPathDraft, mutationPaths],
@@ -1030,6 +1221,9 @@ function Workbench() {
     ledger.isError ||
     mutations.isError ||
     replay.isError ||
+    replayTimeline.isError ||
+    replaySnapshot.isError ||
+    replayDiff.isError ||
     gatekeeper.isError;
   const runtimeSourceLoading =
     artifactSessionManifest.isFetching ||
@@ -1048,6 +1242,9 @@ function Workbench() {
     ledger.isFetching ||
     mutations.isFetching ||
     replay.isFetching ||
+    replayTimeline.isFetching ||
+    replaySnapshot.isFetching ||
+    replayDiff.isFetching ||
     gatekeeper.isFetching;
   const runtimeSourceStatus = mutationPathDraftChanged
     ? { kind: 'pending', text: 'Runtime source changes are not applied.' }
@@ -1056,6 +1253,199 @@ function Workbench() {
       : runtimeSourceLoading
         ? { kind: 'loading', text: 'Loading runtime sources.' }
         : { kind: 'loaded', text: 'Runtime sources loaded.' };
+  const runtimeDemoStatus = runtimeDemoBootstrap.isPending
+    ? { kind: 'pending', text: 'Bootstrapping maintained runtime demo.' }
+    : runtimeDemoBootstrap.isError
+      ? {
+          kind: 'error',
+          text:
+            runtimeDemoBootstrap.error instanceof Error
+              ? runtimeDemoBootstrap.error.message
+              : 'Runtime demo bootstrap failed.',
+        }
+      : runtimeDemoBootstrap.isSuccess
+        ? {
+            kind: 'loaded',
+            text: `Bootstrapped ${runtimeDemoBootstrap.data.session_id} in ${runtimeDemoBootstrap.data.workspace}.`,
+          }
+        : { kind: 'idle', text: 'Bootstrap a maintained runtime demo to populate runtime sources.' };
+  const currentRuntimeSourceRootKind = inferRuntimeSourceRootKind(artifactManifestPath);
+  const bootstrapRuntimePathMatch =
+    runtimeDemoBootstrap.data &&
+    mutationPaths.artifactManifestPath.trim().length === 0 &&
+    mutationPaths.missionPath.trim() === runtimeDemoBootstrap.data.mission_path &&
+    mutationPaths.workflowPath.trim() === runtimeDemoBootstrap.data.workflow_path &&
+    mutationPaths.ledgerPath.trim() === runtimeDemoBootstrap.data.ledger_path;
+  const currentRuntimeSourceProvenance: RuntimeSourceProvenance = bootstrapRuntimePathMatch
+    ? 'bootstrap'
+    : artifactManifestPath
+      ? currentRuntimeSourceRootKind === 'run_bundle'
+        ? 'run_bundle'
+        : 'direct_manifest'
+      : 'manual_runtime_paths';
+  const currentRuntimeSourceRoot =
+    artifactManifestPath || resolvedMutationPaths.workflowPath || resolvedMutationPaths.ledgerPath || 'unavailable';
+  const runtimeSourceChoices = useMemo(() => {
+    const choices: RuntimeSourceChoice[] = [];
+    const seen = new Set<string>();
+    const pushChoice = (choice: RuntimeSourceChoice) => {
+      const key = [
+        choice.rootKind,
+        choice.artifactManifestPath,
+        choice.missionPath,
+        choice.workflowPath,
+        choice.ledgerPath,
+      ].join('|');
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      choices.push(choice);
+    };
+    if (runtimeDemoBootstrap.data) {
+      pushChoice({
+        id: 'bootstrap-runtime-paths',
+        label: 'Use bootstrap runtime paths',
+        description: runtimeDemoBootstrap.data.workspace,
+        rootKind: 'direct_runtime_paths',
+        provenance: 'bootstrap',
+        artifactManifestPath: '',
+        missionPath: runtimeDemoBootstrap.data.mission_path,
+        workflowPath: runtimeDemoBootstrap.data.workflow_path,
+        ledgerPath: runtimeDemoBootstrap.data.ledger_path,
+      });
+    }
+    if (artifactSessionManifest.data) {
+      pushChoice({
+        id: 'manifest-runtime-paths',
+        label: 'Use manifest runtime paths',
+        description: artifactSessionManifest.data.workflow_path,
+        rootKind: 'direct_runtime_paths',
+        provenance: 'direct_manifest',
+        artifactManifestPath: '',
+        missionPath: artifactSessionManifest.data.mission_path,
+        workflowPath: artifactSessionManifest.data.workflow_path,
+        ledgerPath: artifactSessionManifest.data.ledger_path,
+      });
+      if (artifactSessionManifest.data.manifest_path.trim().length > 0) {
+        pushChoice({
+          id: 'manifest-root',
+          label: 'Use manifest root',
+          description: artifactSessionManifest.data.manifest_path,
+          rootKind: 'artifact_manifest',
+          provenance: 'direct_manifest',
+          artifactManifestPath: artifactSessionManifest.data.manifest_path,
+          missionPath: '',
+          workflowPath: '',
+          ledgerPath: '',
+        });
+      }
+    }
+    if (runtimeOperatorActions.sessionDispatch.data?.run_bundle_path?.trim()) {
+      pushChoice({
+        id: 'dispatch-run-bundle',
+        label: 'Use dispatch run bundle',
+        description: runtimeOperatorActions.sessionDispatch.data.run_bundle_path,
+        rootKind: 'run_bundle',
+        provenance: 'run_bundle',
+        artifactManifestPath: runtimeOperatorActions.sessionDispatch.data.run_bundle_path,
+        missionPath: '',
+        workflowPath: '',
+        ledgerPath: '',
+      });
+    }
+    return choices;
+  }, [artifactSessionManifest.data, runtimeDemoBootstrap.data, runtimeOperatorActions.sessionDispatch.data?.run_bundle_path]);
+  const runtimeReadinessSummary = useMemo(() => {
+    const items: Array<{ label: string; tone: RuntimeReadinessTone; detail: string }> = [
+      {
+        label: 'Manifest root',
+        tone: artifactSessionManifest.data
+          ? 'completed'
+          : artifactManifestPath
+            ? 'blocked'
+            : 'needs_review',
+        detail: artifactSessionManifest.data?.manifest_path ?? (artifactManifestPath || 'Load a manifest or run bundle root.'),
+      },
+      {
+        label: 'Dispatch packet',
+        tone: selectedDispatchPacketPath ? 'completed' : 'needs_review',
+        detail: selectedDispatchPacketPath || 'No dispatch packet is linked for the selected runtime step.',
+      },
+      {
+        label: 'Session evidence',
+        tone: selectedSessionMetricsPath ? 'completed' : 'needs_review',
+        detail: selectedSessionMetricsPath || 'No session record is linked for the selected runtime step.',
+      },
+      {
+        label: 'Result artifact',
+        tone: selectedResultPath ? 'completed' : 'needs_review',
+        detail: selectedResultPath || 'Result evidence is unavailable for the selected runtime step.',
+      },
+      {
+        label: 'Outcome artifact',
+        tone: selectedNodeOutcomePath ? 'completed' : 'needs_review',
+        detail: selectedNodeOutcomePath || 'Outcome evidence is unavailable for the selected runtime step.',
+      },
+      {
+        label: 'Review link',
+        tone: selectedArtifactStep?.review_decision_path ? 'completed' : 'needs_review',
+        detail:
+          selectedArtifactStep?.review_decision_path ||
+          'No review decision is linked for the selected runtime step.',
+      },
+      {
+        label: 'Timeline API',
+        tone: replayTimeline.data
+          ? 'completed'
+          : replayTimeline.isError
+            ? 'blocked'
+            : 'needs_review',
+        detail: replayTimeline.data
+          ? `${replayTimeline.data.events.length} timeline events loaded.`
+          : replayTimeline.isError
+            ? replayTimeline.error instanceof Error
+              ? replayTimeline.error.message
+              : 'Timeline loading failed.'
+            : 'Timeline has not loaded yet.',
+      },
+    ];
+    const completedCount = items.filter((item) => item.tone === 'completed').length;
+    const missingCount = items.filter((item) => item.tone !== 'completed').length;
+    const actionability =
+      selectedAssignmentPath && selectedDispatchPacketPath && selectedResultPath && selectedNodeOutcomePath
+        ? 'actionable'
+        : 'inspect-only';
+    return { items, completedCount, missingCount, actionability };
+  }, [
+    artifactManifestPath,
+    artifactSessionManifest.data,
+    replayTimeline.data,
+    replayTimeline.error,
+    replayTimeline.isError,
+    selectedArtifactStep?.review_decision_path,
+    selectedAssignmentPath,
+    selectedDispatchPacketPath,
+    selectedNodeOutcomePath,
+    selectedResultPath,
+    selectedSessionMetricsPath,
+  ]);
+  const historyApiSummary = useMemo(() => {
+    const timelineCount = replayTimeline.data?.events.length ?? 0;
+    const snapshotCursor =
+      replaySnapshot.data?.cursor.through_event_id ??
+      (typeof replaySnapshot.data?.cursor.through_event_ordinal === 'number'
+        ? `#${replaySnapshot.data.cursor.through_event_ordinal}`
+        : 'current');
+    const diffEvents = replayDiff.data?.events_between.length ?? 0;
+    return { timelineCount, snapshotCursor, diffEvents };
+  }, [replayDiff.data, replaySnapshot.data, replayTimeline.data]);
+  const runtimeOperatorActionSummary = useMemo(() => {
+    const pendingCount = runtimeOperatorActions.statusEntries.filter((entry) => entry.state === 'pending').length;
+    const errorCount = runtimeOperatorActions.statusEntries.filter((entry) => entry.state === 'error').length;
+    const successCount = runtimeOperatorActions.statusEntries.filter((entry) => entry.state === 'success').length;
+    return { pendingCount, errorCount, successCount };
+  }, [runtimeOperatorActions.statusEntries]);
 
   const currentGraphDependenciesForTarget = (targetId: string): DependencyDraft => {
     if (graphDependencyDraft?.targetId === targetId) {
@@ -1421,6 +1811,208 @@ function Workbench() {
                 <GitBranch size={16} />
                 Runtime sources
               </div>
+              <div className="runtime-source-block" aria-label="Runtime demo bootstrap">
+                <div className="pane-title">
+                  <FolderOpen size={16} />
+                  Runtime demo bootstrap
+                </div>
+                <div className="metadata-form runtime-source-form">
+                  <label className="field">
+                    <span>Workspace</span>
+                    <input
+                      type="text"
+                      value={runtimeDemoDraft.workspace}
+                      onChange={(event) =>
+                        setRuntimeDemoDraft((current) => ({ ...current, workspace: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Agent</span>
+                    <input
+                      type="text"
+                      value={runtimeDemoDraft.agent}
+                      onChange={(event) =>
+                        setRuntimeDemoDraft((current) => ({ ...current, agent: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Assignment ID</span>
+                    <input
+                      type="text"
+                      value={runtimeDemoDraft.assignmentId}
+                      onChange={(event) =>
+                        setRuntimeDemoDraft((current) => ({ ...current, assignmentId: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Session ID</span>
+                    <input
+                      type="text"
+                      value={runtimeDemoDraft.sessionId}
+                      onChange={(event) =>
+                        setRuntimeDemoDraft((current) => ({ ...current, sessionId: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Result ID</span>
+                    <input
+                      type="text"
+                      value={runtimeDemoDraft.resultId}
+                      onChange={(event) =>
+                        setRuntimeDemoDraft((current) => ({ ...current, resultId: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Shell command</span>
+                    <input
+                      type="text"
+                      value={runtimeDemoDraft.shellCommand}
+                      onChange={(event) =>
+                        setRuntimeDemoDraft((current) => ({ ...current, shellCommand: event.target.value }))
+                      }
+                    />
+                  </label>
+                  <div className="metadata-actions">
+                    <button
+                      type="button"
+                      className="metadata-save"
+                      onClick={() =>
+                        runtimeDemoBootstrap.mutate({
+                          workspace: runtimeDemoDraft.workspace.trim(),
+                          agent: runtimeDemoDraft.agent.trim() || 'shell-dummy',
+                          assignment_id: runtimeDemoDraft.assignmentId.trim() || 'assign-implement-demo',
+                          session_id: runtimeDemoDraft.sessionId.trim() || 'session-implement-demo',
+                          result_id: runtimeDemoDraft.resultId.trim() || 'result-implement-demo',
+                          shell_command: runtimeDemoDraft.shellCommand.trim() || null,
+                        })
+                      }
+                      disabled={runtimeDemoBootstrap.isPending || runtimeDemoDraft.workspace.trim().length === 0}
+                    >
+                      Bootstrap runtime demo
+                    </button>
+                    <span
+                      className={`runtime-source-status ${runtimeDemoStatus.kind}`}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {runtimeDemoStatus.text}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="runtime-source-block runtime-source-navigator" aria-label="Runtime source navigator">
+                <div className="pane-title">
+                  <GitBranch size={16} />
+                  Runtime source navigator
+                </div>
+                <dl className="runtime-source-facts">
+                  <div>
+                    <dt>Current root</dt>
+                    <dd>
+                      <code title={currentRuntimeSourceRoot}>{currentRuntimeSourceRoot}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Artifact family</dt>
+                    <dd>{labelRuntimeSourceRootKind(currentRuntimeSourceRootKind)}</dd>
+                  </div>
+                  <div>
+                    <dt>Provenance</dt>
+                    <dd>{labelRuntimeSourceProvenance(currentRuntimeSourceProvenance)}</dd>
+                  </div>
+                  <div>
+                    <dt>Manifest root</dt>
+                    <dd>
+                      <code title={artifactSessionManifest.data?.manifest_path ?? 'unavailable'}>
+                        {artifactSessionManifest.data?.manifest_path ?? 'unavailable'}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Mission path</dt>
+                    <dd>
+                      <code title={resolvedMutationPaths.missionPath || 'unavailable'}>
+                        {resolvedMutationPaths.missionPath || 'unavailable'}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Workflow path</dt>
+                    <dd>
+                      <code title={resolvedMutationPaths.workflowPath || 'unavailable'}>
+                        {resolvedMutationPaths.workflowPath || 'unavailable'}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Ledger path</dt>
+                    <dd>
+                      <code title={resolvedMutationPaths.ledgerPath || 'unavailable'}>
+                        {resolvedMutationPaths.ledgerPath || 'unavailable'}
+                      </code>
+                    </dd>
+                  </div>
+                </dl>
+                {runtimeSourceChoices.length > 0 ? (
+                  <div className="runtime-source-choice-list" aria-label="Runtime source choices">
+                    {runtimeSourceChoices.map((choice) => {
+                      const currentChoiceSelected =
+                        choice.rootKind === 'direct_runtime_paths'
+                          ? mutationPaths.artifactManifestPath.trim().length === 0 &&
+                            choice.missionPath.trim() === mutationPaths.missionPath.trim() &&
+                            choice.workflowPath.trim() === mutationPaths.workflowPath.trim() &&
+                            choice.ledgerPath.trim() === mutationPaths.ledgerPath.trim()
+                          : choice.artifactManifestPath.trim() === mutationPaths.artifactManifestPath.trim();
+                      return (
+                        <button
+                          key={choice.id}
+                          type="button"
+                          className={currentChoiceSelected ? 'runtime-source-choice selected' : 'runtime-source-choice'}
+                          onClick={() => activateRuntimeSourceChoice(choice)}
+                          disabled={currentChoiceSelected}
+                        >
+                          <strong>{choice.label}</strong>
+                          <small>{choice.description}</small>
+                          <span>
+                            {labelRuntimeSourceRootKind(choice.rootKind)} via {labelRuntimeSourceProvenance(choice.provenance)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="runtime-source-note">
+                    No backend-returned alternate source roots are available yet.
+                  </p>
+                )}
+              </div>
+              <div className="runtime-source-block runtime-readiness-panel" aria-label="Artifact readiness summary">
+                <div className="pane-title">
+                  <CheckCircle2 size={16} />
+                  Artifact readiness summary
+                  <span className="pane-count">{runtimeReadinessSummary.completedCount}</span>
+                </div>
+                <p className="runtime-source-note">
+                  Actionability: <strong>{runtimeReadinessSummary.actionability}</strong> | Missing signals:{' '}
+                  {runtimeReadinessSummary.missingCount}
+                </p>
+                <div className="runtime-readiness-list">
+                  {runtimeReadinessSummary.items.map((item) => (
+                    <article key={item.label} className={`runtime-readiness-item ${item.tone}`}>
+                      <div className="runtime-readiness-item-header">
+                        <strong>{item.label}</strong>
+                        <span className={`state-pill runtime-state-pill ${item.tone}`}>{item.tone}</span>
+                      </div>
+                      <p>{item.detail}</p>
+                    </article>
+                  ))}
+                </div>
+              </div>
               <div className="metadata-form runtime-source-form">
                 <label className="field">
                   <span>Artifact manifest path</span>
@@ -1462,6 +2054,69 @@ function Workbench() {
                     }
                   />
                 </label>
+                <label className="field">
+                  <span>Snapshot event ID</span>
+                  <input
+                    type="text"
+                    value={mutationPathDraft.throughEventId}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, throughEventId: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Snapshot ordinal</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={mutationPathDraft.throughEventOrdinal}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, throughEventOrdinal: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Diff from event ID</span>
+                  <input
+                    type="text"
+                    value={mutationPathDraft.compareFromEventId}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, compareFromEventId: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Diff from ordinal</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={mutationPathDraft.compareFromEventOrdinal}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, compareFromEventOrdinal: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Diff to event ID</span>
+                  <input
+                    type="text"
+                    value={mutationPathDraft.compareToEventId}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, compareToEventId: event.target.value }))
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Diff to ordinal</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={mutationPathDraft.compareToEventOrdinal}
+                    onChange={(event) =>
+                      setMutationPathDraft((current) => ({ ...current, compareToEventOrdinal: event.target.value }))
+                    }
+                  />
+                </label>
                 <div className="metadata-actions">
                   <button
                     type="button"
@@ -1479,6 +2134,16 @@ function Workbench() {
                     {runtimeSourceStatus.text}
                   </span>
                 </div>
+              </div>
+              <div className="runtime-source-note">
+                <strong>History API state</strong>
+                <br />
+                Timeline events: {historyApiSummary.timelineCount} | Snapshot cursor: {historyApiSummary.snapshotCursor} | Diff events: {historyApiSummary.diffEvents}
+              </div>
+              <div className="runtime-source-note">
+                <strong>Operator action baseline</strong>
+                <br />
+                Pending: {runtimeOperatorActionSummary.pendingCount} | Errors: {runtimeOperatorActionSummary.errorCount} | Succeeded: {runtimeOperatorActionSummary.successCount}
               </div>
               <p className="runtime-source-note">
                 Runtime mode reads the workflow, mission, ledger, and optional artifact manifest directly. Switch back to Planning DAG to edit graph structure.
@@ -1647,11 +2312,35 @@ function Workbench() {
               missionPath={runtimeMissionPath}
               artifactManifestPath={artifactManifestPath}
               workflow={runtimeWorkflow}
+              replayTimeline={replayTimeline.data ?? null}
+              replayTimelineLoading={replayTimeline.isLoading}
+              replayTimelineError={replayTimeline.error instanceof Error ? replayTimeline.error.message : null}
+              replaySnapshot={replaySnapshot.data ?? null}
+              replaySnapshotLoading={replaySnapshot.isLoading}
+              replaySnapshotError={replaySnapshot.error instanceof Error ? replaySnapshot.error.message : null}
+              replayDiff={replayDiff.data ?? null}
+              replayDiffLoading={replayDiff.isLoading}
+              replayDiffError={replayDiff.error instanceof Error ? replayDiff.error.message : null}
+              selectedAssignmentPath={selectedAssignmentPath}
+              selectedResultPath={selectedResultPath}
+              selectedNodeOutcomePath={selectedNodeOutcomePath}
+              selectedReviewDecisionPath={selectedArtifactStep?.review_decision_path?.trim() ?? ''}
+              selectedDispatchPacketPath={selectedDispatchPacketPath}
+              routingDecisionPath={routingDecisionPath}
+              selectedContextRequestPath={selectedContextRequestPath}
+              contextRequestData={contextRequest.data ?? null}
+              contextResolveAction={runtimeOperatorActions.contextResolve}
+              dispatchCompileAction={runtimeOperatorActions.dispatchCompile}
+              sessionDispatchAction={runtimeOperatorActions.sessionDispatch}
+              resultStageAction={runtimeOperatorActions.resultStage}
+              reviewImportAction={runtimeOperatorActions.reviewImport}
+              outcomeDecideAction={runtimeOperatorActions.outcomeDecide}
+              runtimeActionStatusEntries={runtimeOperatorActions.statusEntries}
               artifactManifestQuery={artifactSessionManifest}
               routingDecisionQuery={routingDecision}
+              assignmentQuery={assignment}
               advisorOutcomeQuery={advisorOutcome}
               selectedArtifactStep={selectedArtifactStep}
-              assignmentQuery={assignment}
               contextCapsuleQuery={contextCapsule}
               contextRequestQuery={contextRequest}
               nodeOutcomeQuery={nodeOutcome}
@@ -1675,6 +2364,24 @@ function Workbench() {
               selectedEdge={selectedRuntimeEdge}
               onSelectNode={(nodeId) => setSelectedRuntimeNodeId(nodeId)}
               onSelectEdge={setSelectedRuntimeEdge}
+              onSelectHistoryCursor={(cursor) => {
+                setMutationPaths((current) =>
+                  sanitizeMutationWorkbenchPaths({
+                    ...current,
+                    throughEventId: cursor.eventId ?? '',
+                    throughEventOrdinal:
+                      typeof cursor.eventOrdinal === 'number' ? String(cursor.eventOrdinal) : '',
+                  }),
+                );
+                setMutationPathDraft((current) =>
+                  sanitizeMutationWorkbenchPaths({
+                    ...current,
+                    throughEventId: cursor.eventId ?? '',
+                    throughEventOrdinal:
+                      typeof cursor.eventOrdinal === 'number' ? String(cursor.eventOrdinal) : '',
+                  }),
+                );
+              }}
             />
             <MutationPanel
               proposals={mutations.data?.proposals ?? []}
@@ -1768,11 +2475,35 @@ function RuntimeWorkflowOverview({
   missionPath,
   artifactManifestPath,
   workflow,
+  replayTimeline,
+  replayTimelineLoading,
+  replayTimelineError,
+  replaySnapshot,
+  replaySnapshotLoading,
+  replaySnapshotError,
+  replayDiff,
+  replayDiffLoading,
+  replayDiffError,
+  selectedAssignmentPath,
+  selectedResultPath,
+  selectedNodeOutcomePath,
+  selectedReviewDecisionPath,
+  selectedDispatchPacketPath,
+  routingDecisionPath,
+  selectedContextRequestPath,
+  contextRequestData,
+  contextResolveAction,
+  dispatchCompileAction,
+  sessionDispatchAction,
+  resultStageAction,
+  reviewImportAction,
+  outcomeDecideAction,
+  runtimeActionStatusEntries,
   artifactManifestQuery,
   routingDecisionQuery,
+  assignmentQuery,
   advisorOutcomeQuery,
   selectedArtifactStep,
-  assignmentQuery,
   contextCapsuleQuery,
   contextRequestQuery,
   nodeOutcomeQuery,
@@ -1796,6 +2527,7 @@ function RuntimeWorkflowOverview({
   selectedEdge,
   onSelectNode,
   onSelectEdge,
+  onSelectHistoryCursor,
 }: {
   workflowId: string;
   workflowPath: string;
@@ -1803,6 +2535,30 @@ function RuntimeWorkflowOverview({
   missionPath: string;
   artifactManifestPath: string;
   workflow: RuntimeWorkflow | null;
+  replayTimeline: ReplayHistoryTimelineResponse | null;
+  replayTimelineLoading: boolean;
+  replayTimelineError: string | null;
+  replaySnapshot: ReplayHistorySnapshotResponse | null;
+  replaySnapshotLoading: boolean;
+  replaySnapshotError: string | null;
+  replayDiff: ReplayHistoryDiffResponse | null;
+  replayDiffLoading: boolean;
+  replayDiffError: string | null;
+  selectedAssignmentPath: string;
+  selectedResultPath: string;
+  selectedNodeOutcomePath: string;
+  selectedReviewDecisionPath: string;
+  selectedDispatchPacketPath: string;
+  routingDecisionPath: string;
+  selectedContextRequestPath: string;
+  contextRequestData: ContextRequestResponse | null;
+  contextResolveAction: UseMutationResult<ContextResolutionResponse, Error, ContextResolveRequest>;
+  dispatchCompileAction: UseMutationResult<DispatchPacketResponse, Error, DispatchPacketCompileRequest>;
+  sessionDispatchAction: UseMutationResult<SessionDispatchResponse, Error, SessionDispatchRequest>;
+  resultStageAction: UseMutationResult<ResultStageResponse, Error, ResultStageRequest>;
+  reviewImportAction: UseMutationResult<ReviewDecisionImportResponse, Error, ReviewDecisionImportRequest>;
+  outcomeDecideAction: UseMutationResult<OutcomeDecisionResponse, Error, OutcomeDecisionRequest>;
+  runtimeActionStatusEntries: RuntimeActionStatusEntry[];
   artifactManifestQuery: {
     data?: ArtifactSessionManifestResponse;
     isLoading: boolean;
@@ -1811,6 +2567,12 @@ function RuntimeWorkflowOverview({
   };
   routingDecisionQuery: {
     data?: RoutingDecisionResponse;
+    isLoading: boolean;
+    isError: boolean;
+    error: unknown;
+  };
+  assignmentQuery: {
+    data?: AssignmentResponse;
     isLoading: boolean;
     isError: boolean;
     error: unknown;
@@ -1831,12 +2593,6 @@ function RuntimeWorkflowOverview({
     session_path: string;
     result_path?: string | null;
   } | null;
-  assignmentQuery: {
-    data?: AssignmentResponse;
-    isLoading: boolean;
-    isError: boolean;
-    error: unknown;
-  };
   contextCapsuleQuery: {
     data?: ContextCapsuleResponse;
     isLoading: boolean;
@@ -1931,6 +2687,7 @@ function RuntimeWorkflowOverview({
   selectedEdge: { source: string; target: string; eventRef: string } | null;
   onSelectNode: (nodeId: string) => void;
   onSelectEdge: (edge: { source: string; target: string; eventRef: string } | null) => void;
+  onSelectHistoryCursor: (cursor: { eventId?: string; eventOrdinal?: number }) => void;
 }) {
   const pendingCount = proposals.filter((proposal) => proposal.state === 'pending').length;
   const currentNodeIds = workflow?.nodes.map((node) => node.id) ?? [];
@@ -1975,6 +2732,160 @@ function RuntimeWorkflowOverview({
     sessionMetricsQuery.data?.entries && sessionMetricsQuery.data.entries.length > 0
       ? sessionMetricsQuery.data.entries[0]
       : null;
+  const selectedHistoryEventId = replaySnapshot?.cursor.through_event_id ?? null;
+  const selectedHistoryVersionId = replaySnapshot?.cursor.workflow_version_id ?? replay?.workflow_version_id ?? null;
+  const historicalWorkflowNode =
+    selectedNodeId && replaySnapshot?.workflow
+      ? replaySnapshot.workflow.nodes.find((node) => node.id === selectedNodeId) ?? null
+      : null;
+  const historicalWaitsFor = historicalWorkflowNode
+    ? splitRuntimeWaitsFor(historicalWorkflowNode.waits_for)
+    : { allOf: [], anyOf: [] };
+  const historicalReplayNode =
+    selectedNodeId && replaySnapshot?.replay.nodes
+      ? replaySnapshot.replay.nodes[selectedNodeId] ?? null
+      : null;
+  const historicalGatekeeperDecision =
+    selectedNodeId && replaySnapshot?.gatekeeper.decisions
+      ? replaySnapshot.gatekeeper.decisions[selectedNodeId] ?? null
+      : null;
+  const historicalAssignmentValidity = useMemo(
+    () =>
+      replaySnapshot?.replay.assignment_validity
+        ? Object.values(replaySnapshot.replay.assignment_validity).filter(
+            (validity) => validity.node_id === (selectedNodeId ?? ''),
+          )
+        : [],
+    [replaySnapshot, selectedNodeId],
+  );
+  const historicalNodeCount = replaySnapshot?.workflow.nodes.length ?? 0;
+  const historicalSelectedLabel =
+    selectedHistoryEventId ??
+    (typeof replaySnapshot?.cursor.through_event_ordinal === 'number'
+      ? `#${replaySnapshot.cursor.through_event_ordinal}`
+      : 'current');
+  const [contextResolveMaxArtifacts, setContextResolveMaxArtifacts] = useState('1');
+  const [dispatchPacketId, setDispatchPacketId] = useState('packet-runtime-workbench');
+  const [sessionRecordPathDraft, setSessionRecordPathDraft] = useState('');
+  const [runBundlePathDraft, setRunBundlePathDraft] = useState('');
+  const [dispatchAgentDraft, setDispatchAgentDraft] = useState('');
+  const [dispatchWorkdirDraft, setDispatchWorkdirDraft] = useState('');
+  const [dispatchTimeoutDraft, setDispatchTimeoutDraft] = useState('30');
+  const [dispatchDryRun, setDispatchDryRun] = useState(true);
+  const [dispatchIsolationMode, setDispatchIsolationMode] = useState<'copy' | 'worktree'>('copy');
+  const [dispatchSandboxMode, setDispatchSandboxMode] = useState<'read-only' | 'workspace-write' | 'danger-full-access'>('workspace-write');
+  const [reviewDecisionEventIdDraft, setReviewDecisionEventIdDraft] = useState('');
+  const [reviewDecisionRefDraft, setReviewDecisionRefDraft] = useState('');
+  const [outcomeVerificationStatusDraft, setOutcomeVerificationStatusDraft] = useState('passed');
+  const [outcomeReviewEventIdDraft, setOutcomeReviewEventIdDraft] = useState('');
+  const [outcomeAcceptedEventsDraft, setOutcomeAcceptedEventsDraft] = useState('');
+  const [outcomeValidationRuleDraft, setOutcomeValidationRuleDraft] = useState('acceptance_policy_v1');
+  const [outcomePolicyDraft, setOutcomePolicyDraft] = useState('{\n  "policy_version": "acceptance-v1-workbench",\n  "require_review": true,\n  "required_verification_statuses": ["passed"]\n}');
+  const agentsQuery = useQuery({
+    queryKey: ['agents'],
+    queryFn: () => fetchAgents(),
+  });
+  const selectedAgentDoctorQuery = useQuery({
+    queryKey: ['agent-doctor', dispatchAgentDraft.trim()],
+    queryFn: () => fetchAgentDoctor(dispatchAgentDraft.trim()),
+    enabled: dispatchAgentDraft.trim().length > 0,
+  });
+  const selectedAgentSpec =
+    dispatchAgentDraft.trim().length > 0
+      ? agentsQuery.data?.agents.find((agent) => agent.agent_id === dispatchAgentDraft.trim()) ?? null
+      : null;
+  const runtimeActionErrors = useMemo(
+    () =>
+      [
+        contextResolveAction.error,
+        dispatchCompileAction.error,
+        sessionDispatchAction.error,
+        resultStageAction.error,
+        reviewImportAction.error,
+        outcomeDecideAction.error,
+        selectedAgentDoctorQuery.error instanceof Error ? selectedAgentDoctorQuery.error : null,
+      ].filter((error): error is Error => error instanceof Error),
+    [
+      contextResolveAction.error,
+      dispatchCompileAction.error,
+      sessionDispatchAction.error,
+      resultStageAction.error,
+      reviewImportAction.error,
+      outcomeDecideAction.error,
+      selectedAgentDoctorQuery.error,
+    ],
+  );
+  const launchSafetyTone =
+    !dispatchDryRun && dispatchSandboxMode === 'danger-full-access'
+      ? 'blocked'
+      : !dispatchDryRun || dispatchSandboxMode === 'workspace-write'
+        ? 'needs_review'
+        : 'completed';
+  const diffSummary = replayDiff
+    ? {
+        workflowChanges:
+          replayDiff.workflow_diff.nodes_added.length +
+          replayDiff.workflow_diff.nodes_removed.length +
+          replayDiff.workflow_diff.nodes_changed.length +
+          replayDiff.workflow_diff.gates_added.length +
+          replayDiff.workflow_diff.gates_removed.length +
+          replayDiff.workflow_diff.gates_changed.length,
+        stateChanges:
+          replayDiff.state_diff.node_changes.length +
+          replayDiff.state_diff.assignment_validity_changes.length +
+          replayDiff.state_diff.mutation_changes.length,
+      }
+    : null;
+  useEffect(() => {
+    if (!assignmentQuery.data?.assignment_id) {
+      return;
+    }
+    setDispatchPacketId((current) =>
+      current === 'packet-runtime-workbench' || current.trim().length === 0
+        ? `packet-${assignmentQuery.data?.assignment_id}`
+        : current,
+    );
+    setSessionRecordPathDraft((current) =>
+      current.trim().length === 0
+        ? `.bureauless/sessions/${assignmentQuery.data?.assignment_id}.session.yaml`
+        : current,
+    );
+    setRunBundlePathDraft((current) =>
+      current.trim().length === 0
+        ? `.bureauless/sessions/${assignmentQuery.data?.assignment_id}.bundle.yaml`
+        : current,
+    );
+  }, [assignmentQuery.data?.assignment_id]);
+  useEffect(() => {
+    if (!artifactManifestQuery.data) {
+      return;
+    }
+    setDispatchAgentDraft((current) => (current.trim().length === 0 ? artifactManifestQuery.data?.agent ?? '' : current));
+    setDispatchWorkdirDraft((current) => (current.trim().length === 0 ? artifactManifestQuery.data?.workspace ?? '.' : current));
+  }, [artifactManifestQuery.data]);
+  useEffect(() => {
+    if (!selectedReviewDecisionPath) {
+      return;
+    }
+    setReviewDecisionRefDraft((current) => (current.trim().length === 0 ? selectedReviewDecisionPath : current));
+  }, [selectedReviewDecisionPath]);
+  useEffect(() => {
+    if (!selectedArtifactStep?.review_event_id) {
+      return;
+    }
+    setOutcomeReviewEventIdDraft((current) => (current.trim().length === 0 ? selectedArtifactStep.review_event_id ?? '' : current));
+  }, [selectedArtifactStep?.review_event_id]);
+  useEffect(() => {
+    const events = resultQuery.data?.emitted_events ?? [];
+    if (events.length === 0) {
+      return;
+    }
+    setOutcomeAcceptedEventsDraft((current) => (current.trim().length === 0 ? events.join(', ') : current));
+    const verificationStatus = stringField(resultQuery.data?.verification ?? {}, 'status');
+    if (verificationStatus) {
+      setOutcomeVerificationStatusDraft((current) => (current === 'passed' ? verificationStatus : current));
+    }
+  }, [resultQuery.data]);
 
   const handleRuntimeGraphPointerDownCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
@@ -2276,6 +3187,1009 @@ function RuntimeWorkflowOverview({
           )}
         </section>
       </div>
+      <section className="runtime-history-panel" aria-labelledby="runtime-history-heading">
+        <div className="runtime-history-header">
+          <div className="pane-title" id="runtime-history-heading">
+            <GitBranch size={16} />
+            Timeline and versions
+            <span className="pane-count">{replayTimeline?.events.length ?? 0}</span>
+          </div>
+          <span className="review-note">Read-only Runtime M4 history from the API</span>
+        </div>
+        {replayTimelineError ? (
+          <p className="mutation-error" role="alert">{replayTimelineError}</p>
+        ) : replayTimelineLoading ? (
+          <p className="diagnostics-text">Loading history timeline.</p>
+        ) : !replayTimeline ? (
+          <div className="empty-state-card" role="status" aria-live="polite">
+            <strong>No history data</strong>
+            <p>The runtime history APIs did not return timeline evidence for this workflow.</p>
+          </div>
+        ) : (
+          <div className="runtime-history-grid">
+            <div className="runtime-history-versions">
+              <div className="runtime-history-section-header">
+                <strong>Workflow versions</strong>
+                <span className="pane-count">{replayTimeline.versions.length}</span>
+              </div>
+              <div className="runtime-history-version-list">
+                <button
+                  type="button"
+                  className={`runtime-history-version-card${selectedHistoryEventId === null ? ' selected' : ''}`}
+                  onClick={() => onSelectHistoryCursor({})}
+                >
+                  <strong>Current</strong>
+                  <small>{replayTimeline.current_workflow_version_id}</small>
+                </button>
+                {replayTimeline.versions.map((version) => {
+                  const isSelected = version.version_id === selectedHistoryVersionId;
+                  const selectionEvent =
+                    version.accepted_event_id && replayTimeline.events.find((event) => event.event_id === version.accepted_event_id);
+                  return (
+                    <button
+                      type="button"
+                      key={version.version_id}
+                      className={`runtime-history-version-card${isSelected ? ' selected' : ''}`}
+                      onClick={() =>
+                        onSelectHistoryCursor(
+                          selectionEvent
+                            ? { eventId: selectionEvent.event_id, eventOrdinal: selectionEvent.event_ordinal }
+                            : {},
+                        )
+                      }
+                    >
+                      <strong>v{String(version.sequence).padStart(4, '0')}</strong>
+                      <small>{version.version_id}</small>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="runtime-history-timeline">
+              <div className="runtime-history-section-header">
+                <strong>Event timeline</strong>
+                <span className="pane-count">
+                  {replaySnapshotLoading
+                    ? 'loading'
+                    : replaySnapshot?.cursor.through_event_id ?? 'current'}
+                </span>
+              </div>
+              {replaySnapshotError ? (
+                <p className="mutation-error" role="alert">{replaySnapshotError}</p>
+              ) : null}
+              <div className="runtime-history-event-list">
+                <button
+                  type="button"
+                  className={`runtime-history-event-card${selectedHistoryEventId === null ? ' selected' : ''}`}
+                  onClick={() => onSelectHistoryCursor({})}
+                >
+                  <div className="runtime-history-event-head">
+                    <strong>Current replay</strong>
+                    <span>latest</span>
+                  </div>
+                  <p>Use the final ledger state and active workflow version.</p>
+                </button>
+                {replayTimeline.events.map((event) => {
+                  const isSelected = selectedHistoryEventId === event.event_id;
+                  return (
+                    <button
+                      type="button"
+                      key={event.event_id}
+                      className={`runtime-history-event-card${isSelected ? ' selected' : ''}`}
+                      onClick={() =>
+                        onSelectHistoryCursor({
+                          eventId: event.event_id,
+                          eventOrdinal: event.event_ordinal,
+                        })
+                      }
+                    >
+                      <div className="runtime-history-event-head">
+                        <strong>{event.event_type ?? 'unknown'}</strong>
+                        <span>#{event.event_ordinal}</span>
+                      </div>
+                      <p>{event.event_id}</p>
+                      <small>
+                        {event.version_transition.changed
+                          ? `${event.version_transition.workflow_version_before} -> ${event.version_transition.workflow_version_after}`
+                          : event.active_workflow_version_id}
+                      </small>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+      <section className="runtime-history-panel" aria-labelledby="runtime-actions-heading">
+        <div className="runtime-history-header">
+          <div className="pane-title" id="runtime-actions-heading">
+            <GitBranch size={16} />
+            Operator action status
+            <span className="pane-count">{runtimeActionStatusEntries.length}</span>
+          </div>
+          <span className="review-note">Shared action-state layer for validated Runtime APIs</span>
+        </div>
+        <div className="runtime-history-version-list">
+          {runtimeActionStatusEntries.map((entry) => (
+            <article className="runtime-history-version-card" key={entry.key}>
+              <div className="runtime-history-event-head">
+                <strong>{entry.label}</strong>
+                <span className={`state-pill runtime-state-pill ${runtimeActionStatusTone(entry.state)}`}>
+                  {entry.state}
+                </span>
+              </div>
+              <small>{entry.detail}</small>
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="runtime-history-panel" aria-labelledby="runtime-context-resolve-heading">
+        <div className="runtime-history-header">
+          <div className="pane-title" id="runtime-context-resolve-heading">
+            <GitBranch size={16} />
+            Context request resolution
+            <span className="pane-count">{contextRequestData?.requested_refs.length ?? 0}</span>
+          </div>
+          <span className="review-note">Validated Runtime M3.5 continuation action</span>
+        </div>
+        {!selectedContextRequestPath || !selectedAssignmentPath ? (
+          <div className="empty-state-card" role="status" aria-live="polite">
+            <strong>No context request selected</strong>
+            <p>Select a manifest-backed runtime node with a context request artifact to resolve it here.</p>
+          </div>
+        ) : (
+          <div className="runtime-operator-panel">
+            <div className="runtime-operator-grid">
+              <label className="field field-wide">
+                <span>Assignment path</span>
+                <input type="text" value={selectedAssignmentPath} readOnly />
+              </label>
+              <label className="field field-wide">
+                <span>Context request path</span>
+                <input type="text" value={selectedContextRequestPath} readOnly />
+              </label>
+              <label className="field">
+                <span>Ledger path</span>
+                <input type="text" value={ledgerPath} readOnly />
+              </label>
+              <label className="field">
+                <span>Max artifacts</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={contextResolveMaxArtifacts}
+                  onChange={(event) => setContextResolveMaxArtifacts(event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="runtime-operator-actions">
+              <button
+                type="button"
+                className="review-retry"
+                disabled={contextResolveAction.isPending}
+                onClick={() =>
+                  contextResolveAction.mutate({
+                    assignment_path: selectedAssignmentPath,
+                    ledger_path: ledgerPath,
+                    context_request_path: selectedContextRequestPath,
+                    max_artifacts: parsePositiveIntegerInput(contextResolveMaxArtifacts) ?? 1,
+                  })
+                }
+              >
+                Resolve request
+              </button>
+              <span className="runtime-source-status">
+                {contextResolveAction.isPending
+                  ? 'Resolving bounded context request.'
+                  : contextResolveAction.isSuccess
+                    ? 'Context request resolved.'
+                    : 'Backend-owned action; no request sent yet.'}
+              </span>
+            </div>
+            {contextRequestData ? (
+              <article className="runtime-replay-card">
+                <div className="runtime-replay-card-head">
+                  <strong>{contextRequestData.context_request_id}</strong>
+                  <span className="state-pill runtime-state-pill unknown">request</span>
+                </div>
+                <p>{contextRequestData.missing_information}</p>
+                <div className="runtime-link-list">
+                  {contextRequestData.requested_refs.map((ref) => (
+                    <code className="runtime-link-chip" key={ref}>{ref}</code>
+                  ))}
+                </div>
+              </article>
+            ) : null}
+            {contextResolveAction.isError ? (
+              <p className="mutation-error" role="alert">
+                {contextResolveAction.error instanceof Error
+                  ? contextResolveAction.error.message
+                  : 'Context request resolution failed'}
+              </p>
+            ) : null}
+            {contextResolveAction.data ? (
+              <div className="runtime-replay-section">
+                <div className="runtime-replay-section-header">
+                  <strong>Resolution result</strong>
+                  <span className="pane-count">{contextResolveAction.data.status}</span>
+                </div>
+                <dl className="runtime-node-inspector-facts">
+                  <div>
+                    <dt>Policy version</dt>
+                    <dd>{contextResolveAction.data.policy_version}</dd>
+                  </div>
+                  <div>
+                    <dt>Added tokens</dt>
+                    <dd>{contextResolveAction.data.added_tokens_estimate}</dd>
+                  </div>
+                  <div>
+                    <dt>Continuation</dt>
+                    <dd>{contextResolveAction.data.continuation_id ?? 'none'}</dd>
+                  </div>
+                  <div>
+                    <dt>Session</dt>
+                    <dd>{contextResolveAction.data.session_id ?? 'none'}</dd>
+                  </div>
+                </dl>
+                <div className="runtime-operator-results">
+                  <div className="runtime-replay-section">
+                    <div className="runtime-replay-section-header">
+                      <strong>Granted artifacts</strong>
+                      <span className="pane-count">{contextResolveAction.data.granted_artifacts.length}</span>
+                    </div>
+                    <div className="runtime-link-list">
+                      {contextResolveAction.data.granted_artifacts.length > 0 ? (
+                        contextResolveAction.data.granted_artifacts.map((artifact, index) => (
+                          <code className="runtime-link-chip" key={`granted:${index}`}>
+                            {stringField(artifact, 'artifact_id') ?? stringField(artifact, 'path') ?? `artifact-${index + 1}`}
+                          </code>
+                        ))
+                      ) : (
+                        <span className="runtime-link-empty">none</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="runtime-replay-section">
+                    <div className="runtime-replay-section-header">
+                      <strong>Denied refs</strong>
+                      <span className="pane-count">{contextResolveAction.data.denied_refs.length}</span>
+                    </div>
+                    <div className="runtime-replay-list">
+                      {contextResolveAction.data.denied_refs.length > 0 ? (
+                        contextResolveAction.data.denied_refs.map((ref, index) => (
+                          <article className="runtime-replay-card" key={`denied:${index}`}>
+                            <div className="runtime-replay-card-head">
+                              <strong>{ref.ref ?? `denied-${index + 1}`}</strong>
+                              <span className="state-pill runtime-state-pill blocked">denied</span>
+                            </div>
+                            <p>{ref.reason ?? 'No reason provided.'}</p>
+                          </article>
+                        ))
+                      ) : (
+                        <span className="runtime-link-empty">none</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="runtime-replay-section">
+                    <div className="runtime-replay-section-header">
+                      <strong>Unavailable refs</strong>
+                      <span className="pane-count">{contextResolveAction.data.unavailable_refs.length}</span>
+                    </div>
+                    <div className="runtime-replay-list">
+                      {contextResolveAction.data.unavailable_refs.length > 0 ? (
+                        contextResolveAction.data.unavailable_refs.map((ref, index) => (
+                          <article className="runtime-replay-card" key={`unavailable:${index}`}>
+                            <div className="runtime-replay-card-head">
+                              <strong>{ref.ref ?? `unavailable-${index + 1}`}</strong>
+                              <span className="state-pill runtime-state-pill needs_review">unavailable</span>
+                            </div>
+                            <p>{ref.reason ?? 'No reason provided.'}</p>
+                          </article>
+                        ))
+                      ) : (
+                        <span className="runtime-link-empty">none</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </section>
+      <section className="runtime-history-panel" aria-labelledby="runtime-dispatch-controls-heading">
+        <div className="runtime-history-header">
+          <div className="pane-title" id="runtime-dispatch-controls-heading">
+            <GitBranch size={16} />
+            Dispatch and launch controls
+            <span className="pane-count">{selectedDispatchPacketPath ? 'packet' : 'preview'}</span>
+          </div>
+          <span className="review-note">Validated Runtime M3.5 handoff actions</span>
+        </div>
+        <div className="runtime-operator-panel">
+          <div className="runtime-replay-section">
+            <div className="runtime-replay-section-header">
+              <strong>Dispatch packet compile preview</strong>
+              <span className="pane-count">{dispatchCompileAction.data?.packet_id ?? 'idle'}</span>
+            </div>
+            {!routingDecisionPath || !selectedAssignmentPath ? (
+              <div className="empty-state-card" role="status" aria-live="polite">
+                <strong>Compile inputs unavailable</strong>
+                <p>The current runtime selection does not expose both routing-decision and assignment artifacts.</p>
+              </div>
+            ) : (
+              <>
+                <div className="runtime-operator-grid">
+                  <label className="field">
+                    <span>Mission path</span>
+                    <input type="text" value={missionPath} readOnly />
+                  </label>
+                  <label className="field">
+                    <span>Workflow path</span>
+                    <input type="text" value={workflowPath} readOnly />
+                  </label>
+                  <label className="field field-wide">
+                    <span>Routing decision path</span>
+                    <input type="text" value={routingDecisionPath} readOnly />
+                  </label>
+                  <label className="field field-wide">
+                    <span>Assignment path</span>
+                    <input type="text" value={selectedAssignmentPath} readOnly />
+                  </label>
+                  <label className="field">
+                    <span>Packet id</span>
+                    <input
+                      type="text"
+                      value={dispatchPacketId}
+                      onChange={(event) => setDispatchPacketId(event.target.value)}
+                    />
+                  </label>
+                </div>
+                <div className="runtime-operator-actions">
+                  <button
+                    type="button"
+                    className="review-retry"
+                    disabled={dispatchCompileAction.isPending}
+                    onClick={() =>
+                      dispatchCompileAction.mutate({
+                        mission_path: missionPath,
+                        workflow_path: workflowPath,
+                        routing_decision_path: routingDecisionPath,
+                        assignment_path: selectedAssignmentPath,
+                        packet_id: dispatchPacketId.trim() || 'packet-runtime-workbench',
+                      })
+                    }
+                  >
+                    Compile preview
+                  </button>
+                  <span className="runtime-source-status">
+                    {dispatchCompileAction.isPending
+                      ? 'Compiling validated dispatch preview.'
+                      : dispatchCompileAction.isSuccess
+                        ? 'Dispatch packet preview ready.'
+                        : 'Backend-owned compile action; no request sent yet.'}
+                  </span>
+                </div>
+                {dispatchCompileAction.isError ? (
+                  <p className="mutation-error" role="alert">
+                    {dispatchCompileAction.error instanceof Error
+                      ? dispatchCompileAction.error.message
+                      : 'Dispatch packet compile failed'}
+                  </p>
+                ) : null}
+                {dispatchCompileAction.data ? (
+                  <article className="runtime-replay-card">
+                    <div className="runtime-replay-card-head">
+                      <strong>{dispatchCompileAction.data.packet_id}</strong>
+                      <span className="state-pill runtime-state-pill completed">preview</span>
+                    </div>
+                    <dl className="runtime-link-facts">
+                      <div>
+                        <dt>Mission</dt>
+                        <dd>{dispatchCompileAction.data.mission_id}</dd>
+                      </div>
+                      <div>
+                        <dt>Workflow</dt>
+                        <dd>{dispatchCompileAction.data.workflow_id}</dd>
+                      </div>
+                      <div>
+                        <dt>Assignment</dt>
+                        <dd>{dispatchCompileAction.data.assignment.assignment_id}</dd>
+                      </div>
+                      <div>
+                        <dt>Mode</dt>
+                        <dd>{dispatchCompileAction.data.routing_decision.selected_mode}</dd>
+                      </div>
+                    </dl>
+                  </article>
+                ) : null}
+              </>
+            )}
+          </div>
+          <div className="runtime-replay-section">
+            <div className="runtime-replay-section-header">
+              <strong>Session dispatch</strong>
+              <span className="pane-count">{sessionDispatchAction.data?.status ?? 'idle'}</span>
+            </div>
+            {!selectedDispatchPacketPath ? (
+              <div className="empty-state-card" role="status" aria-live="polite">
+                <strong>No dispatch packet path</strong>
+                <p>The selected runtime artifact set does not expose a dispatch-packet file for launch.</p>
+              </div>
+            ) : (
+              <>
+                <div className="runtime-operator-grid">
+                  <label className="field">
+                    <span>Dispatch packet path</span>
+                    <input type="text" value={selectedDispatchPacketPath} readOnly />
+                  </label>
+                  <label className="field">
+                    <span>Agent</span>
+                    <input
+                      type="text"
+                      value={dispatchAgentDraft}
+                      onChange={(event) => setDispatchAgentDraft(event.target.value)}
+                    />
+                  </label>
+                  <label className="field field-wide">
+                    <span>Workdir</span>
+                    <input
+                      type="text"
+                      value={dispatchWorkdirDraft}
+                      onChange={(event) => setDispatchWorkdirDraft(event.target.value)}
+                    />
+                  </label>
+                  <label className="field field-wide">
+                    <span>Session record path</span>
+                    <input
+                      type="text"
+                      value={sessionRecordPathDraft}
+                      onChange={(event) => setSessionRecordPathDraft(event.target.value)}
+                    />
+                  </label>
+                  <label className="field field-wide">
+                    <span>Run bundle path</span>
+                    <input
+                      type="text"
+                      value={runBundlePathDraft}
+                      onChange={(event) => setRunBundlePathDraft(event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Timeout seconds</span>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={dispatchTimeoutDraft}
+                      onChange={(event) => setDispatchTimeoutDraft(event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Isolation mode</span>
+                    <select value={dispatchIsolationMode} onChange={(event) => setDispatchIsolationMode(event.target.value as 'copy' | 'worktree')}>
+                      <option value="copy">copy</option>
+                      <option value="worktree">worktree</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Sandbox mode</span>
+                    <select
+                      value={dispatchSandboxMode}
+                      onChange={(event) =>
+                        setDispatchSandboxMode(event.target.value as 'read-only' | 'workspace-write' | 'danger-full-access')
+                      }
+                    >
+                      <option value="read-only">read-only</option>
+                      <option value="workspace-write">workspace-write</option>
+                      <option value="danger-full-access">danger-full-access</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Launch mode</span>
+                    <select value={dispatchDryRun ? 'dry_run' : 'live'} onChange={(event) => setDispatchDryRun(event.target.value === 'dry_run')}>
+                      <option value="dry_run">dry_run</option>
+                      <option value="live">live</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="runtime-operator-actions">
+                  <button
+                    type="button"
+                    className="review-retry"
+                    disabled={sessionDispatchAction.isPending || !dispatchAgentDraft.trim() || !dispatchWorkdirDraft.trim() || !sessionRecordPathDraft.trim()}
+                    onClick={() =>
+                      sessionDispatchAction.mutate({
+                        mission_path: missionPath,
+                        workflow_path: workflowPath,
+                        dispatch_packet_path: selectedDispatchPacketPath,
+                        session_record_path: sessionRecordPathDraft.trim(),
+                        ledger_path: ledgerPath,
+                        run_bundle_path: runBundlePathDraft.trim() || undefined,
+                        agent: dispatchAgentDraft.trim(),
+                        workdir: dispatchWorkdirDraft.trim(),
+                        timeout_seconds: parseFloat(dispatchTimeoutDraft) || 30,
+                        dry_run: dispatchDryRun,
+                        isolation_mode: dispatchIsolationMode,
+                        sandbox_mode: dispatchSandboxMode,
+                        target_model: artifactManifestQuery.data?.target_model ?? undefined,
+                        target_provider: artifactManifestQuery.data?.target_provider ?? undefined,
+                      })
+                    }
+                  >
+                    Launch session
+                  </button>
+                  <span className="runtime-source-status">
+                    {dispatchDryRun ? 'Dry-run mode enabled.' : 'Live launch mode selected.'}
+                  </span>
+                </div>
+                {sessionDispatchAction.isError ? (
+                  <p className="mutation-error" role="alert">
+                    {sessionDispatchAction.error instanceof Error
+                      ? sessionDispatchAction.error.message
+                      : 'Session dispatch failed'}
+                  </p>
+                ) : null}
+                {sessionDispatchAction.data ? (
+                  <article className="runtime-replay-card">
+                    <div className="runtime-replay-card-head">
+                      <strong>{sessionDispatchAction.data.session_id}</strong>
+                      <span className={`state-pill runtime-state-pill ${sessionDispatchAction.data.status === 'completed' ? 'completed' : 'needs_review'}`}>
+                        {sessionDispatchAction.data.status}
+                      </span>
+                    </div>
+                    <dl className="runtime-link-facts">
+                      <div>
+                        <dt>Assignment</dt>
+                        <dd>{sessionDispatchAction.data.assignment_id}</dd>
+                      </div>
+                      <div>
+                        <dt>Agent</dt>
+                        <dd>{sessionDispatchAction.data.agent_id}</dd>
+                      </div>
+                      <div>
+                        <dt>Started</dt>
+                        <dd>{sessionDispatchAction.data.started_at}</dd>
+                      </div>
+                      <div>
+                        <dt>Finished</dt>
+                        <dd>{sessionDispatchAction.data.finished_at}</dd>
+                      </div>
+                    </dl>
+                    <div className="runtime-link-list">
+                      <code className="runtime-link-chip">
+                        run bundle: {sessionDispatchAction.data.run_bundle_path ?? 'none'}
+                      </code>
+                    </div>
+                  </article>
+                ) : null}
+              </>
+            )}
+          </div>
+        </div>
+      </section>
+      <section className="runtime-history-panel" aria-labelledby="runtime-acceptance-controls-heading">
+        <div className="runtime-history-header">
+          <div className="pane-title" id="runtime-acceptance-controls-heading">
+            <GitBranch size={16} />
+            Acceptance and ledger advancement
+            <span className="pane-count">{selectedResultPath ? 'ready' : 'idle'}</span>
+          </div>
+          <span className="review-note">Validated Runtime M3.5 acceptance-spine actions</span>
+        </div>
+        <div className="runtime-operator-panel">
+          <div className="runtime-operator-results">
+            <div className="runtime-replay-section">
+              <div className="runtime-replay-section-header">
+                <strong>Stage result</strong>
+                <span className="pane-count">{resultStageAction.data?.status ?? 'idle'}</span>
+              </div>
+              {!selectedAssignmentPath || !selectedResultPath ? (
+                <div className="empty-state-card" role="status" aria-live="polite">
+                  <strong>Stage inputs unavailable</strong>
+                  <p>The current runtime selection does not expose both assignment and result artifacts.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="runtime-operator-grid">
+                    <label className="field field-wide">
+                      <span>Assignment path</span>
+                      <input type="text" value={selectedAssignmentPath} readOnly />
+                    </label>
+                    <label className="field field-wide">
+                      <span>Result path</span>
+                      <input type="text" value={selectedResultPath} readOnly />
+                    </label>
+                    <label className="field">
+                      <span>Workflow path</span>
+                      <input type="text" value={workflowPath} readOnly />
+                    </label>
+                    <label className="field">
+                      <span>Ledger path</span>
+                      <input type="text" value={ledgerPath} readOnly />
+                    </label>
+                  </div>
+                  <div className="runtime-operator-actions">
+                    <button
+                      type="button"
+                      className="review-retry"
+                      disabled={resultStageAction.isPending}
+                      onClick={() =>
+                        resultStageAction.mutate({
+                          workflow_path: workflowPath,
+                          ledger_path: ledgerPath,
+                          assignment_path: selectedAssignmentPath,
+                          result_path: selectedResultPath,
+                        })
+                      }
+                    >
+                      Stage result
+                    </button>
+                  </div>
+                  {resultStageAction.isError ? (
+                    <p className="mutation-error" role="alert">
+                      {resultStageAction.error instanceof Error ? resultStageAction.error.message : 'Result staging failed'}
+                    </p>
+                  ) : null}
+                  {resultStageAction.data ? (
+                    <article className="runtime-replay-card">
+                      <div className="runtime-replay-card-head">
+                        <strong>{resultStageAction.data.result_event_id}</strong>
+                        <span className="state-pill runtime-state-pill needs_review">{resultStageAction.data.status}</span>
+                      </div>
+                      <p>Replay and gatekeeper were refreshed from the backend response.</p>
+                    </article>
+                  ) : null}
+                </>
+              )}
+            </div>
+            <div className="runtime-replay-section">
+              <div className="runtime-replay-section-header">
+                <strong>Import review decision</strong>
+                <span className="pane-count">{reviewImportAction.isSuccess ? 'imported' : 'idle'}</span>
+              </div>
+              {!selectedReviewDecisionPath ? (
+                <div className="empty-state-card" role="status" aria-live="polite">
+                  <strong>No review decision artifact</strong>
+                  <p>The selected runtime artifact set does not expose a review-decision file to import.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="runtime-operator-grid">
+                    <label className="field field-wide">
+                      <span>Decision path</span>
+                      <input type="text" value={selectedReviewDecisionPath} readOnly />
+                    </label>
+                    <label className="field field-wide">
+                      <span>Decision ref</span>
+                      <input
+                        type="text"
+                        value={reviewDecisionRefDraft}
+                        onChange={(event) => setReviewDecisionRefDraft(event.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Workflow path</span>
+                      <input type="text" value={workflowPath} readOnly />
+                    </label>
+                    <label className="field">
+                      <span>Ledger path</span>
+                      <input type="text" value={ledgerPath} readOnly />
+                    </label>
+                    <label className="field field-wide">
+                      <span>Event id (optional)</span>
+                      <input
+                        type="text"
+                        value={reviewDecisionEventIdDraft}
+                        onChange={(event) => setReviewDecisionEventIdDraft(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="runtime-operator-actions">
+                    <button
+                      type="button"
+                      className="review-retry"
+                      disabled={reviewImportAction.isPending || !reviewDecisionRefDraft.trim()}
+                      onClick={() =>
+                        reviewImportAction.mutate({
+                          workflow_path: workflowPath,
+                          ledger_path: ledgerPath,
+                          decision_path: selectedReviewDecisionPath,
+                          decision_ref: reviewDecisionRefDraft.trim(),
+                          event_id: reviewDecisionEventIdDraft.trim() || undefined,
+                        })
+                      }
+                    >
+                      Import review
+                    </button>
+                  </div>
+                  {reviewImportAction.isError ? (
+                    <p className="mutation-error" role="alert">
+                      {reviewImportAction.error instanceof Error ? reviewImportAction.error.message : 'Review import failed'}
+                    </p>
+                  ) : null}
+                  {reviewImportAction.data ? (
+                    <article className="runtime-replay-card">
+                      <div className="runtime-replay-card-head">
+                        <strong>{stringField(reviewImportAction.data, 'event_id') ?? 'review event recorded'}</strong>
+                        <span className="state-pill runtime-state-pill completed">imported</span>
+                      </div>
+                      <p>{stringField(reviewImportAction.data, 'event_type') ?? 'Review decision appended to the ledger.'}</p>
+                    </article>
+                  ) : null}
+                </>
+              )}
+            </div>
+            <div className="runtime-replay-section">
+              <div className="runtime-replay-section-header">
+                <strong>Outcome decision</strong>
+                <span className="pane-count">{outcomeDecideAction.data?.status ?? 'idle'}</span>
+              </div>
+              {!selectedAssignmentPath || !selectedResultPath || !selectedNodeOutcomePath ? (
+                <div className="empty-state-card" role="status" aria-live="polite">
+                  <strong>Outcome inputs unavailable</strong>
+                  <p>The current runtime selection does not expose assignment, result, and node-outcome artifacts together.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="runtime-operator-grid">
+                    <label className="field field-wide">
+                      <span>Assignment path</span>
+                      <input type="text" value={selectedAssignmentPath} readOnly />
+                    </label>
+                    <label className="field field-wide">
+                      <span>Result path</span>
+                      <input type="text" value={selectedResultPath} readOnly />
+                    </label>
+                    <label className="field field-wide">
+                      <span>Outcome path</span>
+                      <input type="text" value={selectedNodeOutcomePath} readOnly />
+                    </label>
+                    <label className="field">
+                      <span>Verification status</span>
+                      <input
+                        type="text"
+                        value={outcomeVerificationStatusDraft}
+                        onChange={(event) => setOutcomeVerificationStatusDraft(event.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Review event id</span>
+                      <input
+                        type="text"
+                        value={outcomeReviewEventIdDraft}
+                        onChange={(event) => setOutcomeReviewEventIdDraft(event.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Validation rule</span>
+                      <input
+                        type="text"
+                        value={outcomeValidationRuleDraft}
+                        onChange={(event) => setOutcomeValidationRuleDraft(event.target.value)}
+                      />
+                    </label>
+                    <label className="field field-wide">
+                      <span>Accepted event types</span>
+                      <input
+                        type="text"
+                        value={outcomeAcceptedEventsDraft}
+                        onChange={(event) => setOutcomeAcceptedEventsDraft(event.target.value)}
+                      />
+                    </label>
+                    <label className="field field-wide">
+                      <span>Acceptance policy JSON</span>
+                      <textarea
+                        value={outcomePolicyDraft}
+                        onChange={(event) => setOutcomePolicyDraft(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="runtime-operator-actions">
+                    <button
+                      type="button"
+                      className="review-retry"
+                      disabled={outcomeDecideAction.isPending}
+                      onClick={() => {
+                        const policy = parseJsonObjectInput(outcomePolicyDraft);
+                        if (!policy) {
+                          outcomeDecideAction.reset();
+                          return;
+                        }
+                        outcomeDecideAction.mutate({
+                          workflow_path: workflowPath,
+                          ledger_path: ledgerPath,
+                          assignment_path: selectedAssignmentPath,
+                          result_path: selectedResultPath,
+                          outcome_path: selectedNodeOutcomePath,
+                          verification_status: outcomeVerificationStatusDraft.trim() || 'passed',
+                          review_event_id: outcomeReviewEventIdDraft.trim() || undefined,
+                          accepted_event_types: parseCommaSeparatedList(outcomeAcceptedEventsDraft),
+                          acceptance_policy: policy,
+                          validation_rule: outcomeValidationRuleDraft.trim() || 'acceptance_policy_v1',
+                        });
+                      }}
+                    >
+                      Decide outcome
+                    </button>
+                  </div>
+                  {outcomeDecideAction.isError ? (
+                    <p className="mutation-error" role="alert">
+                      {outcomeDecideAction.error instanceof Error ? outcomeDecideAction.error.message : 'Outcome decision failed'}
+                    </p>
+                  ) : null}
+                  {outcomeDecideAction.data ? (
+                    <article className="runtime-replay-card">
+                      <div className="runtime-replay-card-head">
+                        <strong>{stringField(outcomeDecideAction.data.decision, 'event_id') ?? 'node outcome decided'}</strong>
+                        <span className={`state-pill runtime-state-pill ${outcomeDecideAction.data.status === 'accepted' ? 'completed' : 'needs_review'}`}>
+                          {outcomeDecideAction.data.status}
+                        </span>
+                      </div>
+                      <p>{joinStringArray(readStringArrayField(outcomeDecideAction.data.decision, 'accepted_event_types'))}</p>
+                    </article>
+                  ) : null}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+      <section className="runtime-history-panel" aria-labelledby="runtime-safety-heading">
+        <div className="runtime-history-header">
+          <div className="pane-title" id="runtime-safety-heading">
+            <GitBranch size={16} />
+            Action safety and doctoring
+            <span className="pane-count">{runtimeActionErrors.length}</span>
+          </div>
+          <span className="review-note">Launch readiness, ledger write safety, and structured backend rejections</span>
+        </div>
+        <div className="runtime-operator-results">
+          <div className="runtime-replay-section">
+            <div className="runtime-replay-section-header">
+              <strong>Agent readiness</strong>
+              <span className="pane-count">{selectedAgentDoctorQuery.data?.status ?? (dispatchAgentDraft.trim() ? 'loading' : 'none')}</span>
+            </div>
+            {!dispatchAgentDraft.trim() ? (
+              <div className="empty-state-card" role="status" aria-live="polite">
+                <strong>No agent selected</strong>
+                <p>Choose a launch agent to inspect doctor and capability status before dispatch.</p>
+              </div>
+            ) : selectedAgentDoctorQuery.isError ? (
+              <p className="mutation-error" role="alert">
+                {selectedAgentDoctorQuery.error instanceof Error ? selectedAgentDoctorQuery.error.message : 'Agent doctor failed'}
+              </p>
+            ) : selectedAgentDoctorQuery.isLoading ? (
+              <p className="diagnostics-text">Checking selected agent capabilities.</p>
+            ) : selectedAgentDoctorQuery.data ? (
+              <>
+                <article className="runtime-replay-card">
+                  <div className="runtime-replay-card-head">
+                    <strong>{selectedAgentDoctorQuery.data.agent_id}</strong>
+                    <span className={`state-pill runtime-state-pill ${runtimeDoctorTone(selectedAgentDoctorQuery.data.status, selectedAgentDoctorQuery.data.control_level)}`}>
+                      {selectedAgentDoctorQuery.data.status}
+                    </span>
+                  </div>
+                  <dl className="runtime-link-facts">
+                    <div>
+                      <dt>Control level</dt>
+                      <dd>{selectedAgentDoctorQuery.data.control_level}</dd>
+                    </div>
+                    <div>
+                      <dt>Binary</dt>
+                      <dd>{selectedAgentDoctorQuery.data.binary_path ?? selectedAgentDoctorQuery.data.binary}</dd>
+                    </div>
+                    <div>
+                      <dt>Version</dt>
+                      <dd>{selectedAgentDoctorQuery.data.version ?? 'unavailable'}</dd>
+                    </div>
+                    <div>
+                      <dt>Cancellation</dt>
+                      <dd>{selectedAgentSpec?.cancellation ?? 'unavailable'}</dd>
+                    </div>
+                  </dl>
+                </article>
+                <div className="runtime-replay-list">
+                  {selectedAgentDoctorQuery.data.checks.map((check) => (
+                    <article className="runtime-replay-card" key={check.name}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{check.name}</strong>
+                        <span className={`state-pill runtime-state-pill ${runtimeDoctorCheckTone(check.status)}`}>
+                          {check.status}
+                        </span>
+                      </div>
+                      <p>
+                        {check.missing_markers.length > 0
+                          ? `Missing markers: ${check.missing_markers.join(', ')}`
+                          : 'Required markers present.'}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+                {selectedAgentDoctorQuery.data.warnings.length > 0 ? (
+                  <div className="runtime-replay-list">
+                    {selectedAgentDoctorQuery.data.warnings.map((warning, index) => (
+                      <article className="runtime-replay-card" key={`doctor-warning:${index}`}>
+                        <div className="runtime-replay-card-head">
+                          <strong>Doctor warning</strong>
+                          <span className="state-pill runtime-state-pill needs_review">warning</span>
+                        </div>
+                        <p>{warning}</p>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+          <div className="runtime-replay-section">
+            <div className="runtime-replay-section-header">
+              <strong>Launch and ledger safety</strong>
+              <span className="pane-count">{dispatchDryRun ? 'dry-run' : 'live'}</span>
+            </div>
+            <div className="runtime-replay-list">
+              <article className="runtime-replay-card">
+                <div className="runtime-replay-card-head">
+                  <strong>Launch mode</strong>
+                  <span className={`state-pill runtime-state-pill ${launchSafetyTone}`}>
+                    {dispatchDryRun ? 'dry-run' : 'live'}
+                  </span>
+                </div>
+                <p>
+                  {dispatchDryRun
+                    ? 'Dry-run launch keeps the dispatch bridge inspectable before starting a real external process.'
+                    : 'Live launch starts an external agent session and should only be used with a doctor-healthy agent and intentional runtime paths.'}
+                </p>
+              </article>
+              <article className="runtime-replay-card">
+                <div className="runtime-replay-card-head">
+                  <strong>Ledger mutation path</strong>
+                  <span className="state-pill runtime-state-pill needs_review">strict write</span>
+                </div>
+                <p>
+                  Acceptance and review actions write to the canonical runtime ledger at <code>{ledgerPath}</code>. Backend strict-ledger validation remains authoritative.
+                </p>
+              </article>
+              <article className="runtime-replay-card">
+                <div className="runtime-replay-card-head">
+                  <strong>Sandbox</strong>
+                  <span className={`state-pill runtime-state-pill ${launchSafetyTone}`}>
+                    {dispatchSandboxMode}
+                  </span>
+                </div>
+                <p>
+                  {dispatchSandboxMode === 'danger-full-access'
+                    ? 'Danger-full-access removes filesystem guardrails and should stay exceptional.'
+                    : dispatchSandboxMode === 'workspace-write'
+                      ? 'Workspace-write allows bounded mutation inside the selected workdir.'
+                      : 'Read-only mode keeps launch verification-oriented.'}
+                </p>
+              </article>
+            </div>
+          </div>
+          <div className="runtime-replay-section">
+            <div className="runtime-replay-section-header">
+              <strong>Structured action failures</strong>
+              <span className="pane-count">{runtimeActionErrors.length}</span>
+            </div>
+            <div className="runtime-replay-list">
+              {runtimeActionErrors.length > 0 ? (
+                runtimeActionErrors.map((error, index) => (
+                  <article className="runtime-replay-card" key={`runtime-action-error:${index}`}>
+                    <div className="runtime-replay-card-head">
+                      <strong>Error {index + 1}</strong>
+                      <span className="state-pill runtime-state-pill blocked">backend rejection</span>
+                    </div>
+                    <p>{error.message}</p>
+                  </article>
+                ))
+              ) : (
+                <span className="runtime-link-empty">No structured action failures.</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
       {gatekeeperError ? <p className="mutation-error" role="alert">{gatekeeperError}</p> : null}
       <section className="runtime-graph-panel" aria-label="Runtime workflow canvas">
         <div className="runtime-graph-header">
@@ -2493,6 +4407,479 @@ function RuntimeWorkflowOverview({
                   ) : (
                     <span className="runtime-link-empty">none</span>
                   )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+      <section className="runtime-replay-panel" aria-labelledby="runtime-history-inspector-heading" aria-busy={replaySnapshotLoading}>
+        <div className="runtime-graph-header">
+          <div className="pane-title" id="runtime-history-inspector-heading">
+            <GitBranch size={16} />
+            Historical snapshot inspector
+            <span className="pane-count">{selectedHistoryEventId ? 'historical' : 'current'}</span>
+          </div>
+          <span className="review-note">Snapshot, gatekeeper, and assignment validity from Runtime M4</span>
+        </div>
+        <div className="runtime-replay-body">
+          {replaySnapshotLoading ? (
+            <p className="diagnostics-text">Loading historical snapshot.</p>
+          ) : replaySnapshotError ? (
+            <p className="mutation-error" role="alert">{replaySnapshotError}</p>
+          ) : !replaySnapshot ? (
+            <div className="empty-state-card" role="status" aria-live="polite">
+              <strong>No snapshot data</strong>
+              <p>The runtime history APIs did not return a cursor-selected snapshot.</p>
+            </div>
+          ) : !selectedNodeId ? (
+            <div className="empty-state-card" role="status" aria-live="polite">
+              <strong>No runtime node selected</strong>
+              <p>Select a runtime node to inspect its historical state at the chosen cursor.</p>
+            </div>
+          ) : (
+            <>
+              <div className="runtime-replay-summary">
+                <div className="runtime-summary-card">
+                  <span>Cursor</span>
+                  <strong>{historicalSelectedLabel}</strong>
+                  <small>{replaySnapshot.cursor.workflow_version_id}</small>
+                </div>
+                <div className="runtime-summary-card">
+                  <span>Historical workflow</span>
+                  <strong>{historicalNodeCount} nodes</strong>
+                  <small>
+                    {replaySnapshot.workflow.nodes.map((node) => node.id).join(', ') || 'unavailable'}
+                  </small>
+                </div>
+                <div className="runtime-summary-card">
+                  <span>Selected node</span>
+                  <strong>{selectedNodeId}</strong>
+                  <small>
+                    {historicalReplayNode?.state ??
+                      (historicalWorkflowNode ? 'present without replay state' : 'not present in this version')}
+                  </small>
+                </div>
+              </div>
+              {replaySnapshot.selected_event ? (
+                <div className="runtime-replay-section">
+                  <div className="runtime-replay-section-header">
+                    <strong>Selected event</strong>
+                    <span className="pane-count">#{replaySnapshot.selected_event.event_ordinal}</span>
+                  </div>
+                  <article className="runtime-replay-card">
+                    <div className="runtime-replay-card-head">
+                      <strong>{replaySnapshot.selected_event.event_type ?? 'unknown'}</strong>
+                      <span className={`state-pill runtime-state-pill ${replaySnapshot.selected_event.version_transition.changed ? 'completed' : 'unknown'}`}>
+                        {replaySnapshot.selected_event.version_transition.changed ? 'version change' : 'state event'}
+                      </span>
+                    </div>
+                    <p>{replaySnapshot.selected_event.event_id}</p>
+                    <div className="runtime-link-list">
+                      <code className="runtime-link-chip">
+                        active version: {replaySnapshot.selected_event.active_workflow_version_id}
+                      </code>
+                      <code className="runtime-link-chip">
+                        before: {replaySnapshot.selected_event.version_transition.workflow_version_before}
+                      </code>
+                      <code className="runtime-link-chip">
+                        after: {replaySnapshot.selected_event.version_transition.workflow_version_after}
+                      </code>
+                    </div>
+                  </article>
+                </div>
+              ) : null}
+              {!historicalWorkflowNode ? (
+                <div className="empty-state-card" role="status" aria-live="polite">
+                  <strong>Node not present at this cursor</strong>
+                  <p>The selected node is not part of the workflow version active at this snapshot.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="runtime-replay-section">
+                    <div className="runtime-replay-section-header">
+                      <strong>Historical node and gatekeeper state</strong>
+                      <span className="pane-count">
+                        {historicalGatekeeperDecision?.state ?? historicalReplayNode?.state ?? 'unknown'}
+                      </span>
+                    </div>
+                    <div className="runtime-replay-list">
+                      <article className="runtime-replay-card">
+                        <div className="runtime-replay-card-head">
+                          <strong>{historicalWorkflowNode.id}</strong>
+                          <span className={`state-pill runtime-state-pill ${runtimeDecisionTone(historicalGatekeeperDecision ?? undefined)}`}>
+                            {formatRuntimeStateLabel(historicalGatekeeperDecision?.state ?? historicalReplayNode?.state)}
+                          </span>
+                        </div>
+                        <dl className="runtime-link-facts">
+                          <div>
+                            <dt>Role</dt>
+                            <dd>{historicalWorkflowNode.role}</dd>
+                          </div>
+                          <div>
+                            <dt>Waits for all</dt>
+                            <dd>{historicalWaitsFor.allOf.join(', ') || 'none'}</dd>
+                          </div>
+                          <div>
+                            <dt>Waits for any</dt>
+                            <dd>{historicalWaitsFor.anyOf.join(', ') || 'none'}</dd>
+                          </div>
+                          <div>
+                            <dt>Emits</dt>
+                            <dd>{historicalWorkflowNode.emits.join(', ') || 'none'}</dd>
+                          </div>
+                        </dl>
+                      </article>
+                    </div>
+                  </div>
+                  <div className="runtime-replay-section">
+                    <div className="runtime-replay-section-header">
+                      <strong>Historical blocked reasons</strong>
+                      <span className="pane-count">
+                        {(historicalReplayNode?.blocked_reasons.length ?? 0) + (historicalGatekeeperDecision?.blocked_reasons.length ?? 0)}
+                      </span>
+                    </div>
+                    <div className="runtime-replay-list">
+                      {(historicalReplayNode?.blocked_reasons.length ?? 0) > 0 ? (
+                        historicalReplayNode?.blocked_reasons.map((reason, index) => (
+                          <article className="runtime-replay-card" key={`${historicalWorkflowNode.id}:snapshot-reason:${reason.code}:${index}`}>
+                            <div className="runtime-replay-card-head">
+                              <span className={`state-pill runtime-state-pill ${runtimeReasonTone(reason.code)}`}>
+                                {formatReasonCode(reason.code)}
+                              </span>
+                              <p>{reason.message}</p>
+                            </div>
+                            <div className="runtime-reason-meta">
+                              {reason.missing_ref ? <span>Missing ref: <code>{reason.missing_ref}</code></span> : null}
+                              {reason.assignment_id ? <span>Assignment: <code>{reason.assignment_id}</code></span> : null}
+                              {reason.gate_id ? <span>Gate: <code>{reason.gate_id}</code></span> : null}
+                              {reason.mutation_event_id ? <span>Decision: <code>{reason.mutation_event_id}</code></span> : null}
+                            </div>
+                          </article>
+                        ))
+                      ) : historicalGatekeeperDecision?.blocked_reasons.length ? (
+                        historicalGatekeeperDecision.blocked_reasons.map((reason, index) => (
+                          <article className="runtime-replay-card" key={`${historicalWorkflowNode.id}:gatekeeper-reason:${reason.code}:${index}`}>
+                            <div className="runtime-replay-card-head">
+                              <span className={`state-pill runtime-state-pill ${runtimeReasonTone(reason.code)}`}>
+                                {formatReasonCode(reason.code)}
+                              </span>
+                              <p>{reason.message}</p>
+                            </div>
+                            <div className="runtime-reason-meta">
+                              {reason.missing_ref ? <span>Missing ref: <code>{reason.missing_ref}</code></span> : null}
+                              {reason.assignment_id ? <span>Assignment: <code>{reason.assignment_id}</code></span> : null}
+                              {reason.gate_id ? <span>Gate: <code>{reason.gate_id}</code></span> : null}
+                              {reason.mutation_event_id ? <span>Decision: <code>{reason.mutation_event_id}</code></span> : null}
+                            </div>
+                          </article>
+                        ))
+                      ) : (
+                        <span className="runtime-link-empty">none</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="runtime-replay-section">
+                    <div className="runtime-replay-section-header">
+                      <strong>Historical assignment attempts</strong>
+                      <span className="pane-count">{historicalReplayNode?.assignment_attempts.length ?? 0}</span>
+                    </div>
+                    <div className="runtime-replay-list">
+                      {(historicalReplayNode?.assignment_attempts.length ?? 0) > 0 ? (
+                        historicalReplayNode?.assignment_attempts.map((attempt) => (
+                          <article className="runtime-replay-card" key={`${historicalWorkflowNode.id}:historical-attempt:${attempt.assignment_id}`}>
+                            <div className="runtime-replay-card-head">
+                              <strong>{attempt.assignment_id}</strong>
+                              <span className={`state-pill runtime-state-pill ${runtimeAssignmentAttemptTone(attempt.state)}`}>
+                                {attempt.state}
+                              </span>
+                            </div>
+                            <dl className="runtime-link-facts">
+                              <div>
+                                <dt>Created</dt>
+                                <dd>{attempt.created_event_id ?? 'none'}</dd>
+                              </div>
+                              <div>
+                                <dt>Terminal</dt>
+                                <dd>{attempt.terminal_event_type ?? attempt.terminal_event_id ?? 'none'}</dd>
+                              </div>
+                              <div>
+                                <dt>Retry of</dt>
+                                <dd>{attempt.retry_of ?? 'none'}</dd>
+                              </div>
+                              <div>
+                                <dt>Superseded by</dt>
+                                <dd>{attempt.superseded_by ?? 'none'}</dd>
+                              </div>
+                            </dl>
+                          </article>
+                        ))
+                      ) : (
+                        <span className="runtime-link-empty">none</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="runtime-replay-section">
+                    <div className="runtime-replay-section-header">
+                      <strong>Assignment validity at this version</strong>
+                      <span className="pane-count">{historicalAssignmentValidity.length}</span>
+                    </div>
+                    <div className="runtime-replay-list">
+                      {historicalAssignmentValidity.length > 0 ? (
+                        historicalAssignmentValidity.map((validity) => (
+                          <article className="runtime-replay-card" key={`${historicalWorkflowNode.id}:validity:${validity.assignment_id}`}>
+                            <div className="runtime-replay-card-head">
+                              <strong>{validity.assignment_id}</strong>
+                              <span className={`state-pill runtime-state-pill ${runtimeAssignmentValidityTone(validity.status)}`}>
+                                {validity.status}
+                              </span>
+                            </div>
+                            <dl className="runtime-link-facts">
+                              <div>
+                                <dt>Created in</dt>
+                                <dd>{validity.creation_version_id ?? 'unavailable'}</dd>
+                              </div>
+                              <div>
+                                <dt>Active in</dt>
+                                <dd>{validity.active_version_id}</dd>
+                              </div>
+                              <div>
+                                <dt>Transition event</dt>
+                                <dd>{validity.transition_event_id ?? 'none'}</dd>
+                              </div>
+                              <div>
+                                <dt>Reasons</dt>
+                                <dd>{validity.reasons.join(', ') || 'none'}</dd>
+                              </div>
+                            </dl>
+                          </article>
+                        ))
+                      ) : (
+                        <span className="runtime-link-empty">none</span>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </section>
+      <section className="runtime-replay-panel" aria-labelledby="runtime-diff-heading" aria-busy={replayDiffLoading}>
+        <div className="runtime-graph-header">
+          <div className="pane-title" id="runtime-diff-heading">
+            <GitBranch size={16} />
+            Temporal diff inspector
+            <span className="pane-count">{diffSummary ? diffSummary.stateChanges + diffSummary.workflowChanges : 0}</span>
+          </div>
+          <span className="review-note">Read-only compare view between two Runtime M4 cursors</span>
+        </div>
+        <div className="runtime-replay-body">
+          {replayDiffLoading ? (
+            <p className="diagnostics-text">Loading temporal diff.</p>
+          ) : replayDiffError ? (
+            <p className="mutation-error" role="alert">{replayDiffError}</p>
+          ) : !replayDiff ? (
+            <div className="empty-state-card" role="status" aria-live="polite">
+              <strong>No diff data</strong>
+              <p>Enter valid compare cursors to inspect workflow and state changes.</p>
+            </div>
+          ) : (
+            <>
+              <div className="runtime-replay-summary">
+                <div className="runtime-summary-card">
+                  <span>From cursor</span>
+                  <strong>{replayDiff.from_cursor.through_event_id ?? `#${replayDiff.from_cursor.through_event_ordinal ?? 0}`}</strong>
+                  <small>{replayDiff.from_cursor.workflow_version_id}</small>
+                </div>
+                <div className="runtime-summary-card">
+                  <span>To cursor</span>
+                  <strong>{replayDiff.to_cursor.through_event_id ?? `#${replayDiff.to_cursor.through_event_ordinal ?? 0}`}</strong>
+                  <small>{replayDiff.to_cursor.workflow_version_id}</small>
+                </div>
+                <div className="runtime-summary-card">
+                  <span>Events traversed</span>
+                  <strong>{replayDiff.events_between.length}</strong>
+                  <small>{diffSummary?.workflowChanges ?? 0} workflow / {diffSummary?.stateChanges ?? 0} state changes</small>
+                </div>
+              </div>
+              <div className="runtime-replay-section">
+                <div className="runtime-replay-section-header">
+                  <strong>Events between cursors</strong>
+                  <span className="pane-count">{replayDiff.events_between.length}</span>
+                </div>
+                <div className="runtime-replay-list">
+                  {replayDiff.events_between.length > 0 ? (
+                    replayDiff.events_between.map((event) => (
+                      <article className="runtime-replay-card" key={`diff-event:${event.event_id ?? event.event_ordinal}`}>
+                        <div className="runtime-replay-card-head">
+                          <strong>{event.event_type ?? 'unknown'}</strong>
+                          <span className="state-pill runtime-state-pill unknown">#{event.event_ordinal}</span>
+                        </div>
+                        <p>{event.event_id ?? 'unavailable'}</p>
+                      </article>
+                    ))
+                  ) : (
+                    <span className="runtime-link-empty">none</span>
+                  )}
+                </div>
+              </div>
+              <div className="runtime-replay-section">
+                <div className="runtime-replay-section-header">
+                  <strong>Workflow diff</strong>
+                  <span className="pane-count">{diffSummary?.workflowChanges ?? 0}</span>
+                </div>
+                <div className="runtime-replay-list">
+                  {replayDiff.workflow_diff.nodes_added.map((node) => (
+                    <article className="runtime-replay-card" key={`node-added:${node.id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{node.id}</strong>
+                        <span className="state-pill runtime-state-pill completed">node added</span>
+                      </div>
+                      <p>{node.role}</p>
+                    </article>
+                  ))}
+                  {replayDiff.workflow_diff.nodes_removed.map((node) => (
+                    <article className="runtime-replay-card" key={`node-removed:${node.id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{node.id}</strong>
+                        <span className="state-pill runtime-state-pill blocked">node removed</span>
+                      </div>
+                      <p>{node.role}</p>
+                    </article>
+                  ))}
+                  {replayDiff.workflow_diff.nodes_changed.map((change) => (
+                    <article className="runtime-replay-card" key={`node-changed:${change.node_id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{change.node_id}</strong>
+                        <span className="state-pill runtime-state-pill needs_review">node changed</span>
+                      </div>
+                      <dl className="runtime-link-facts">
+                        <div>
+                          <dt>Before role</dt>
+                          <dd>{change.before.role}</dd>
+                        </div>
+                        <div>
+                          <dt>After role</dt>
+                          <dd>{change.after.role}</dd>
+                        </div>
+                        <div>
+                          <dt>Before emits</dt>
+                          <dd>{change.before.emits.join(', ') || 'none'}</dd>
+                        </div>
+                        <div>
+                          <dt>After emits</dt>
+                          <dd>{change.after.emits.join(', ') || 'none'}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                  {replayDiff.workflow_diff.gates_added.map((gate) => (
+                    <article className="runtime-replay-card" key={`gate-added:${gate.id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{gate.id}</strong>
+                        <span className="state-pill runtime-state-pill completed">gate added</span>
+                      </div>
+                      <p>{gate.node_id}</p>
+                    </article>
+                  ))}
+                  {replayDiff.workflow_diff.gates_removed.map((gate) => (
+                    <article className="runtime-replay-card" key={`gate-removed:${gate.id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{gate.id}</strong>
+                        <span className="state-pill runtime-state-pill blocked">gate removed</span>
+                      </div>
+                      <p>{gate.node_id}</p>
+                    </article>
+                  ))}
+                  {replayDiff.workflow_diff.gates_changed.map((change) => (
+                    <article className="runtime-replay-card" key={`gate-changed:${change.gate_id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{change.gate_id}</strong>
+                        <span className="state-pill runtime-state-pill needs_review">gate changed</span>
+                      </div>
+                      <dl className="runtime-link-facts">
+                        <div>
+                          <dt>Before node</dt>
+                          <dd>{change.before.node_id}</dd>
+                        </div>
+                        <div>
+                          <dt>After node</dt>
+                          <dd>{change.after.node_id}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                  {!replayDiff.workflow_diff.changed ? (
+                    <span className="runtime-link-empty">no workflow changes</span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="runtime-replay-section">
+                <div className="runtime-replay-section-header">
+                  <strong>State diff</strong>
+                  <span className="pane-count">{diffSummary?.stateChanges ?? 0}</span>
+                </div>
+                <div className="runtime-replay-list">
+                  {replayDiff.state_diff.node_changes.map((change) => (
+                    <article className="runtime-replay-card" key={`state-node:${change.node_id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{change.node_id}</strong>
+                        <span className="state-pill runtime-state-pill needs_review">node state</span>
+                      </div>
+                      <dl className="runtime-link-facts">
+                        <div>
+                          <dt>Before</dt>
+                          <dd>{change.before?.state ?? 'absent'}</dd>
+                        </div>
+                        <div>
+                          <dt>After</dt>
+                          <dd>{change.after?.state ?? 'absent'}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                  {replayDiff.state_diff.assignment_validity_changes.map((change) => (
+                    <article className="runtime-replay-card" key={`state-assignment:${change.assignment_id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{change.assignment_id}</strong>
+                        <span className={`state-pill runtime-state-pill ${runtimeAssignmentValidityTone(change.after?.status ?? change.before?.status ?? 'needs_review')}`}>
+                          assignment validity
+                        </span>
+                      </div>
+                      <dl className="runtime-link-facts">
+                        <div>
+                          <dt>Before</dt>
+                          <dd>{change.before?.status ?? 'absent'}</dd>
+                        </div>
+                        <div>
+                          <dt>After</dt>
+                          <dd>{change.after?.status ?? 'absent'}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                  {replayDiff.state_diff.mutation_changes.map((change) => (
+                    <article className="runtime-replay-card" key={`state-mutation:${change.proposal_event_id}`}>
+                      <div className="runtime-replay-card-head">
+                        <strong>{change.proposal_event_id}</strong>
+                        <span className="state-pill runtime-state-pill needs_review">mutation state</span>
+                      </div>
+                      <dl className="runtime-link-facts">
+                        <div>
+                          <dt>Before</dt>
+                          <dd>{change.before?.state ?? 'absent'}</dd>
+                        </div>
+                        <div>
+                          <dt>After</dt>
+                          <dd>{change.after?.state ?? 'absent'}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                  {(diffSummary?.stateChanges ?? 0) === 0 ? (
+                    <span className="runtime-link-empty">no state changes</span>
+                  ) : null}
                 </div>
               </div>
             </>
@@ -4384,6 +6771,43 @@ function runtimeDecisionTone(
   return 'unknown';
 }
 
+function runtimeAssignmentAttemptTone(
+  state: ReplayAssignmentAttempt['state'],
+): 'blocked' | 'completed' | 'needs_review' | 'superseded' | 'unknown' {
+  switch (state) {
+    case 'completed':
+      return 'completed';
+    case 'superseded':
+      return 'superseded';
+    case 'awaiting_context':
+    case 'retry_scheduled':
+    case 'awaiting_acceptance':
+      return 'needs_review';
+    case 'context_blocked':
+    case 'rejected':
+    case 'timed_out':
+    case 'cancelled':
+      return 'blocked';
+    case 'in_flight':
+    default:
+      return 'unknown';
+  }
+}
+
+function runtimeAssignmentValidityTone(
+  status: ReplayAssignmentValidity['status'],
+): 'completed' | 'blocked' | 'needs_review' {
+  switch (status) {
+    case 'affected':
+      return 'needs_review';
+    case 'needs_review':
+      return 'blocked';
+    case 'unaffected':
+    default:
+      return 'completed';
+  }
+}
+
 function summarizePrimaryReason(reasons: GatekeeperBlockedReason[]): string | null {
   const reason = reasons[0];
   if (!reason) {
@@ -4434,6 +6858,155 @@ function useDependencySave(paths: WorkbenchPaths) {
       ]);
     },
   });
+}
+
+function useRuntimeOperatorActions(
+  queryClient: QueryClient,
+  paths: MutationWorkbenchPaths,
+): {
+  statusEntries: RuntimeActionStatusEntry[];
+  contextResolve: UseMutationResult<ContextResolutionResponse, Error, ContextResolveRequest>;
+  dispatchCompile: UseMutationResult<DispatchPacketResponse, Error, DispatchPacketCompileRequest>;
+  sessionDispatch: UseMutationResult<SessionDispatchResponse, Error, SessionDispatchRequest>;
+  resultStage: UseMutationResult<ResultStageResponse, Error, ResultStageRequest>;
+  reviewImport: UseMutationResult<ReviewDecisionImportResponse, Error, ReviewDecisionImportRequest>;
+  outcomeDecide: UseMutationResult<OutcomeDecisionResponse, Error, OutcomeDecisionRequest>;
+} {
+  const contextResolve = useMutation({
+    mutationFn: resolveContextRequest,
+  });
+  const dispatchCompile = useMutation({
+    mutationFn: compileDispatchPacket,
+  });
+  const sessionDispatch = useMutation({
+    mutationFn: dispatchSession,
+  });
+  const resultStage = useMutation({
+    mutationFn: stageResult,
+    onSuccess: async (response) => {
+      queryClient.setQueryData(['replay', paths.workflowPath, paths.ledgerPath], response.replay);
+      queryClient.setQueryData(['gatekeeper', paths.workflowPath, paths.ledgerPath], response.gatekeeper);
+      await invalidateRuntimeWorkbenchQueries(queryClient, paths);
+    },
+  });
+  const reviewImport = useMutation({
+    mutationFn: importReviewDecision,
+    onSuccess: async () => {
+      await invalidateRuntimeWorkbenchQueries(queryClient, paths);
+    },
+  });
+  const outcomeDecide = useMutation({
+    mutationFn: decideOutcome,
+    onSuccess: async (response) => {
+      queryClient.setQueryData(['replay', paths.workflowPath, paths.ledgerPath], response.replay);
+      queryClient.setQueryData(['gatekeeper', paths.workflowPath, paths.ledgerPath], response.gatekeeper);
+      await invalidateRuntimeWorkbenchQueries(queryClient, paths);
+    },
+  });
+
+  return {
+    statusEntries: [
+      runtimeActionStatusEntry('contextResolve', 'Context resolve', contextResolve),
+      runtimeActionStatusEntry('dispatchCompile', 'Dispatch compile', dispatchCompile),
+      runtimeActionStatusEntry('sessionDispatch', 'Session dispatch', sessionDispatch),
+      runtimeActionStatusEntry('resultStage', 'Result stage', resultStage),
+      runtimeActionStatusEntry('reviewImport', 'Review import', reviewImport),
+      runtimeActionStatusEntry('outcomeDecide', 'Outcome decide', outcomeDecide),
+    ],
+    contextResolve,
+    dispatchCompile,
+    sessionDispatch,
+    resultStage,
+    reviewImport,
+    outcomeDecide,
+  };
+}
+
+async function invalidateRuntimeWorkbenchQueries(
+  queryClient: QueryClient,
+  paths: MutationWorkbenchPaths,
+): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['ledger', paths.ledgerPath] }),
+    queryClient.invalidateQueries({ queryKey: ['mutations', paths.workflowPath, paths.ledgerPath] }),
+    queryClient.invalidateQueries({ queryKey: ['replay', paths.workflowPath, paths.ledgerPath] }),
+    queryClient.invalidateQueries({ queryKey: ['replay-timeline', paths.workflowPath, paths.ledgerPath] }),
+    queryClient.invalidateQueries({ queryKey: ['replay-snapshot', paths.workflowPath, paths.ledgerPath] }),
+    queryClient.invalidateQueries({ queryKey: ['replay-diff', paths.workflowPath, paths.ledgerPath] }),
+    queryClient.invalidateQueries({ queryKey: ['gatekeeper', paths.workflowPath, paths.ledgerPath] }),
+  ]);
+}
+
+function runtimeActionStatusEntry(
+  key: RuntimeActionStatusEntry['key'],
+  label: string,
+  mutation: {
+    isPending: boolean;
+    isSuccess: boolean;
+    isError: boolean;
+    error: Error | null;
+  },
+): RuntimeActionStatusEntry {
+  if (mutation.isPending) {
+    return { key, label, state: 'pending', detail: 'Request in flight.' };
+  }
+  if (mutation.isError) {
+    return {
+      key,
+      label,
+      state: 'error',
+      detail: mutation.error?.message ?? 'Action failed.',
+    };
+  }
+  if (mutation.isSuccess) {
+    return { key, label, state: 'success', detail: 'Last request completed.' };
+  }
+  return { key, label, state: 'idle', detail: 'Client ready; no request sent yet.' };
+}
+
+function runtimeActionStatusTone(
+  state: RuntimeActionState,
+): 'completed' | 'blocked' | 'needs_review' | 'unknown' {
+  switch (state) {
+    case 'success':
+      return 'completed';
+    case 'error':
+      return 'blocked';
+    case 'pending':
+      return 'needs_review';
+    case 'idle':
+    default:
+      return 'unknown';
+  }
+}
+
+function runtimeDoctorTone(
+  status: string,
+  controlLevel: string,
+): 'completed' | 'blocked' | 'needs_review' | 'unknown' {
+  if (status === 'unavailable') {
+    return 'blocked';
+  }
+  if (status === 'degraded' || controlLevel === 'low') {
+    return 'needs_review';
+  }
+  if (status === 'usable') {
+    return 'completed';
+  }
+  return 'unknown';
+}
+
+function runtimeDoctorCheckTone(status: string): 'completed' | 'blocked' | 'needs_review' | 'unknown' {
+  if (status === 'passed') {
+    return 'completed';
+  }
+  if (status === 'missing') {
+    return 'blocked';
+  }
+  if (status === 'partial') {
+    return 'needs_review';
+  }
+  return 'unknown';
 }
 
 function FullPageError({ error, dagPath, onRetry }: { error: unknown; dagPath: string; onRetry: () => void }) {
@@ -5789,6 +8362,53 @@ function findDependencyCycleNode(nodes: TaskNode[], targetId: string, dependenci
   return null;
 }
 
+function loadRuntimeDemoBootstrapDraft(): RuntimeDemoBootstrapDraft {
+  if (typeof window === 'undefined') {
+    return {
+      workspace: '/tmp/bureauless-runtime-demo',
+      agent: 'shell-dummy',
+      shellCommand: '',
+      assignmentId: 'assign-implement-demo',
+      sessionId: 'session-implement-demo',
+      resultId: 'result-implement-demo',
+    };
+  }
+  return sanitizeRuntimeDemoBootstrapDraft({
+    workspace: window.localStorage.getItem('bureauless.runtimeDemoWorkspace') ?? '/tmp/bureauless-runtime-demo',
+    agent: window.localStorage.getItem('bureauless.runtimeDemoAgent') ?? 'shell-dummy',
+    shellCommand: window.localStorage.getItem('bureauless.runtimeDemoShellCommand') ?? '',
+    assignmentId: window.localStorage.getItem('bureauless.runtimeDemoAssignmentId') ?? 'assign-implement-demo',
+    sessionId: window.localStorage.getItem('bureauless.runtimeDemoSessionId') ?? 'session-implement-demo',
+    resultId: window.localStorage.getItem('bureauless.runtimeDemoResultId') ?? 'result-implement-demo',
+  });
+}
+
+function sanitizeRuntimeDemoBootstrapDraft(
+  draft: RuntimeDemoBootstrapDraft,
+): RuntimeDemoBootstrapDraft {
+  return {
+    workspace: draft.workspace.trim(),
+    agent: draft.agent.trim(),
+    shellCommand: draft.shellCommand.trim(),
+    assignmentId: draft.assignmentId.trim(),
+    sessionId: draft.sessionId.trim(),
+    resultId: draft.resultId.trim(),
+  };
+}
+
+function persistRuntimeDemoBootstrapDraft(draft: RuntimeDemoBootstrapDraft): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const normalized = sanitizeRuntimeDemoBootstrapDraft(draft);
+  window.localStorage.setItem('bureauless.runtimeDemoWorkspace', normalized.workspace);
+  window.localStorage.setItem('bureauless.runtimeDemoAgent', normalized.agent);
+  window.localStorage.setItem('bureauless.runtimeDemoShellCommand', normalized.shellCommand);
+  window.localStorage.setItem('bureauless.runtimeDemoAssignmentId', normalized.assignmentId);
+  window.localStorage.setItem('bureauless.runtimeDemoSessionId', normalized.sessionId);
+  window.localStorage.setItem('bureauless.runtimeDemoResultId', normalized.resultId);
+}
+
 function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
   if (typeof window === 'undefined') {
     return {
@@ -5796,6 +8416,12 @@ function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
       workflowPath: DEFAULT_WORKFLOW_PATH,
       ledgerPath: DEFAULT_LEDGER_PATH,
       artifactManifestPath: '',
+      throughEventId: '',
+      throughEventOrdinal: '',
+      compareFromEventId: '',
+      compareFromEventOrdinal: '',
+      compareToEventId: '',
+      compareToEventOrdinal: '',
     };
   }
   const search = new URLSearchParams(window.location.search);
@@ -5803,6 +8429,12 @@ function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
   const searchWorkflowPath = search.get('workflow_path')?.trim();
   const searchMissionPath = search.get('mission_path')?.trim();
   const searchArtifactManifestPath = search.get('artifact_manifest_path')?.trim();
+  const searchThroughEventId = search.get('through_event_id')?.trim();
+  const searchThroughEventOrdinal = search.get('through_event_ordinal')?.trim();
+  const searchFromEventId = search.get('from_event_id')?.trim();
+  const searchFromEventOrdinal = search.get('from_event_ordinal')?.trim();
+  const searchToEventId = search.get('to_event_id')?.trim();
+  const searchToEventOrdinal = search.get('to_event_ordinal')?.trim();
   if (hasExplicitRuntimeSourceQuery(search)) {
     const explicitArtifactOnly =
       Boolean(searchArtifactManifestPath) &&
@@ -5815,6 +8447,12 @@ function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
         workflowPath: '',
         ledgerPath: '',
         artifactManifestPath: searchArtifactManifestPath ?? '',
+        throughEventId: searchThroughEventId ?? '',
+        throughEventOrdinal: searchThroughEventOrdinal ?? '',
+        compareFromEventId: searchFromEventId ?? '',
+        compareFromEventOrdinal: searchFromEventOrdinal ?? '',
+        compareToEventId: searchToEventId ?? '',
+        compareToEventOrdinal: searchToEventOrdinal ?? '',
       });
     }
     return sanitizeMutationWorkbenchPaths({
@@ -5822,6 +8460,12 @@ function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
       workflowPath: searchWorkflowPath ?? '',
       ledgerPath: searchLedgerPath ?? '',
       artifactManifestPath: searchArtifactManifestPath ?? '',
+      throughEventId: searchThroughEventId ?? '',
+      throughEventOrdinal: searchThroughEventOrdinal ?? '',
+      compareFromEventId: searchFromEventId ?? '',
+      compareFromEventOrdinal: searchFromEventOrdinal ?? '',
+      compareToEventId: searchToEventId ?? '',
+      compareToEventOrdinal: searchToEventOrdinal ?? '',
     });
   }
 
@@ -5829,11 +8473,23 @@ function loadMutationWorkbenchPaths(): MutationWorkbenchPaths {
   const storedWorkflowPath = window.localStorage.getItem('bureauless.workflowPath');
   const storedLedgerPath = window.localStorage.getItem('bureauless.ledgerPath');
   const storedArtifactManifestPath = window.localStorage.getItem('bureauless.artifactManifestPath');
+  const storedThroughEventId = window.localStorage.getItem('bureauless.throughEventId');
+  const storedThroughEventOrdinal = window.localStorage.getItem('bureauless.throughEventOrdinal');
+  const storedCompareFromEventId = window.localStorage.getItem('bureauless.compareFromEventId');
+  const storedCompareFromEventOrdinal = window.localStorage.getItem('bureauless.compareFromEventOrdinal');
+  const storedCompareToEventId = window.localStorage.getItem('bureauless.compareToEventId');
+  const storedCompareToEventOrdinal = window.localStorage.getItem('bureauless.compareToEventOrdinal');
   return sanitizeMutationWorkbenchPaths({
     missionPath: storedMissionPath?.trim() || deriveMissionPath(storedLedgerPath?.trim() || DEFAULT_LEDGER_PATH),
     workflowPath: storedWorkflowPath?.trim() || DEFAULT_WORKFLOW_PATH,
     ledgerPath: storedLedgerPath?.trim() || DEFAULT_LEDGER_PATH,
     artifactManifestPath: storedArtifactManifestPath?.trim() || '',
+    throughEventId: storedThroughEventId?.trim() || '',
+    throughEventOrdinal: storedThroughEventOrdinal?.trim() || '',
+    compareFromEventId: storedCompareFromEventId?.trim() || '',
+    compareFromEventOrdinal: storedCompareFromEventOrdinal?.trim() || '',
+    compareToEventId: storedCompareToEventId?.trim() || '',
+    compareToEventOrdinal: storedCompareToEventOrdinal?.trim() || '',
   });
 }
 
@@ -5842,7 +8498,13 @@ function hasExplicitRuntimeSourceQuery(search: URLSearchParams): boolean {
     search.has('mission_path') ||
     search.has('workflow_path') ||
     search.has('ledger_path') ||
-    search.has('artifact_manifest_path')
+    search.has('artifact_manifest_path') ||
+    search.has('through_event_id') ||
+    search.has('through_event_ordinal') ||
+    search.has('from_event_id') ||
+    search.has('from_event_ordinal') ||
+    search.has('to_event_id') ||
+    search.has('to_event_ordinal')
   );
 }
 
@@ -5851,13 +8513,71 @@ function deriveMissionPath(ledgerPath: string): string {
   return missionFromLedger === ledgerPath ? DEFAULT_MISSION_PATH : missionFromLedger;
 }
 
+function parseHistoryOrdinalInput(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  return Number.parseInt(trimmed, 10);
+}
+
+function parsePositiveIntegerInput(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return parsed > 0 ? parsed : undefined;
+}
+
 function sanitizeMutationWorkbenchPaths(paths: MutationWorkbenchPaths): MutationWorkbenchPaths {
   return {
     missionPath: paths.missionPath.trim(),
     workflowPath: paths.workflowPath.trim(),
     ledgerPath: paths.ledgerPath.trim(),
     artifactManifestPath: paths.artifactManifestPath.trim(),
+    throughEventId: paths.throughEventId.trim(),
+    throughEventOrdinal: paths.throughEventOrdinal.trim(),
+    compareFromEventId: paths.compareFromEventId.trim(),
+    compareFromEventOrdinal: paths.compareFromEventOrdinal.trim(),
+    compareToEventId: paths.compareToEventId.trim(),
+    compareToEventOrdinal: paths.compareToEventOrdinal.trim(),
   };
+}
+
+function inferRuntimeSourceRootKind(artifactManifestPath: string): RuntimeSourceRootKind {
+  const normalized = artifactManifestPath.trim();
+  if (!normalized) {
+    return 'direct_runtime_paths';
+  }
+  return normalized.endsWith('.bundle.yaml') ? 'run_bundle' : 'artifact_manifest';
+}
+
+function labelRuntimeSourceRootKind(kind: RuntimeSourceRootKind): string {
+  switch (kind) {
+    case 'run_bundle':
+      return 'run bundle';
+    case 'artifact_manifest':
+      return 'artifact manifest';
+    default:
+      return 'direct runtime paths';
+  }
+}
+
+function labelRuntimeSourceProvenance(provenance: RuntimeSourceProvenance): string {
+  switch (provenance) {
+    case 'bootstrap':
+      return 'bootstrap';
+    case 'direct_manifest':
+      return 'direct manifest';
+    case 'run_bundle':
+      return 'run bundle';
+    default:
+      return 'manual runtime paths';
+  }
 }
 
 function persistMutationWorkbenchPaths(paths: MutationWorkbenchPaths): void {
@@ -5870,6 +8590,12 @@ function persistMutationWorkbenchPaths(paths: MutationWorkbenchPaths): void {
   window.localStorage.setItem('bureauless.workflowPath', normalized.workflowPath);
   window.localStorage.setItem('bureauless.ledgerPath', normalized.ledgerPath);
   window.localStorage.setItem('bureauless.artifactManifestPath', normalized.artifactManifestPath);
+  window.localStorage.setItem('bureauless.throughEventId', normalized.throughEventId);
+  window.localStorage.setItem('bureauless.throughEventOrdinal', normalized.throughEventOrdinal);
+  window.localStorage.setItem('bureauless.compareFromEventId', normalized.compareFromEventId);
+  window.localStorage.setItem('bureauless.compareFromEventOrdinal', normalized.compareFromEventOrdinal);
+  window.localStorage.setItem('bureauless.compareToEventId', normalized.compareToEventId);
+  window.localStorage.setItem('bureauless.compareToEventOrdinal', normalized.compareToEventOrdinal);
 }
 
 function resolveMutationWorkbenchPaths(
@@ -5899,6 +8625,12 @@ function resolveMutationWorkbenchPaths(
       DEFAULT_WORKFLOW_PATH,
     ledgerPath,
     artifactManifestPath: sanitized.artifactManifestPath,
+    throughEventId: sanitized.throughEventId,
+    throughEventOrdinal: sanitized.throughEventOrdinal,
+    compareFromEventId: sanitized.compareFromEventId,
+    compareFromEventOrdinal: sanitized.compareFromEventOrdinal,
+    compareToEventId: sanitized.compareToEventId,
+    compareToEventOrdinal: sanitized.compareToEventOrdinal,
   };
 }
 
@@ -5990,6 +8722,31 @@ function formatArtifactReference(reference: Record<string, unknown>): string {
 function stringField(record: Record<string, unknown>, key: string): string | null {
   const value = record[key];
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function readStringArrayField(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : [];
+}
+
+function parseCommaSeparatedList(value: string): string[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function parseJsonObjectInput(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function recordArray(value: unknown): Record<string, unknown>[] {

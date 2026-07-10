@@ -1,8 +1,7 @@
 # Runtime Harness Milestone 4 Task List
 
-Status: in progress. RM4-00 is complete under accepted ADR-004; RM4-01 is next.
-Runtime implementation has not started. The required Runtime M3.5 acceptance
-and dispatch foundations are complete.
+Status: completed. RM4-00 through RM4-11 are complete. The
+required Runtime M3.5 acceptance and dispatch foundations are complete.
 
 This is the implementation task list for Runtime Harness Milestone 4:
 validated agent mutation intake and linear temporal workflow replay. It builds
@@ -167,9 +166,9 @@ Goal: settle replay and mutation-intake semantics before changing runtime code.
   - Canonical protocol documentation distinguishes the implemented M2.5/M3
     compatibility shape from the accepted Runtime M4 extension.
 
-### [ ] RM4-01: Worker Intent And Trusted Proposal Envelope
+### [x] RM4-01: Worker Intent And Trusted Proposal Envelope
 
-- Status: planned
+- Status: completed
 - Priority: critical
 - Recommended model: gpt-5.5
 - Risk: high
@@ -201,15 +200,29 @@ Goal: settle replay and mutation-intake semantics before changing runtime code.
   - Agent-controlled output cannot choose or spoof canonical provenance, IDs,
     workflow version, or approval policy.
   - Validation remains inert and appends no event on failure.
+- Completion evidence:
+  - `WorkflowMutationIntent` is a closed worker-authored schema that reuses the
+    maintained mutation vocabulary and returns structured validation errors.
+  - `TrustedWorkflowMutationProposal` owns deterministic proposal identity,
+    workflow/base-version binding, assignment/session/agent provenance, and
+    approval policy.
+  - `ResultProposal.control_intents` is independent from completed/blocked
+    execution status, limited to one item, and cannot mix with legacy refs.
+  - Existing `completed_with_proposal` and `mutation_proposal_refs` records
+    remain readable and validated by the M2.5 compatibility path.
+  - Focused mutation/result regression: 46 passed; final backend regression:
+    216 passed.
+  - Workbench regression: 34 passed; TypeScript and Vite production build
+    completed successfully.
 
 ## Workstream 1: Real Agent Mutation Intake
 
 Goal: close the bounded real-agent mutation proposal loop without granting the
 agent canonical write authority.
 
-### [ ] RM4-02: Universal Structural Escape Hatch And Output Contract
+### [x] RM4-02: Universal Structural Escape Hatch And Output Contract
 
-- Status: planned
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: medium
@@ -237,10 +250,23 @@ agent canonical write authority.
   - The output contract does not invite direct workflow or ledger edits.
   - An incorrectly planned assignment cannot omit the worker's structural escape
     hatch.
+- Completion evidence:
+  - Every exported assignment carries a deterministic current workflow version,
+    compact graph vocabulary, and active assignment references.
+  - The shared assignment prompt exposes the exact inert mutation intent and
+    forbids worker-owned IDs, provenance, approval, ledger, or workflow writes.
+  - Codex final structured output and the shared adapter parser preserve
+    `control_intents` through extraction, result creation, and packaging.
+  - Normal results omit the channel; completed and blocked intent results,
+    malformed intent preservation, non-Codex transport, and legacy refs are
+    covered by focused tests.
+  - Focused assignment/session/mutation regression: 62 passed.
+  - Final backend regression: 217 passed; Workbench regression: 34 passed;
+    TypeScript and Vite production build completed successfully.
 
-### [ ] RM4-03: Deterministic Intent Intake And Proposal Registration
+### [x] RM4-03: Deterministic Intent Intake And Proposal Registration
 
-- Status: planned
+- Status: completed
 - Priority: critical
 - Recommended model: gpt-5.5
 - Risk: high
@@ -265,10 +291,22 @@ agent canonical write authority.
   - An invalid intent creates no proposal event but does not erase an otherwise
     valid imported result; its intake disposition remains inspectable.
   - Proposal event ordering and identifiers are deterministic.
+- Completion evidence:
+  - Maintained session staging appends `result_submitted` before mutation intake
+    and preserves valid results for every failed intake disposition.
+  - Valid ledger-v3 intake writes and verifies an immutable canonical proposal
+    artifact before appending its deterministic proposal event.
+  - Duplicate transport appends no event; orphan artifacts are recoverable;
+    missing artifacts behind committed events are reported as corruption.
+  - Ledger, replay, materialization, mutation decisions, and API inspection read
+    both legacy flat proposals and trusted nested envelopes.
+  - Focused mutation/session/acceptance/replay regression: 76 passed.
+  - Final backend regression: 221 passed; Workbench regression: 34 passed;
+    TypeScript and Vite production build completed successfully.
 
-### [ ] RM4-04: Retry Classification And Stuck-Loop Circuit Breaker
+### [x] RM4-04: Retry Classification And Stuck-Loop Circuit Breaker
 
-- Status: planned
+- Status: completed
 - Priority: critical
 - Recommended model: gpt-5.5
 - Risk: high
@@ -300,10 +338,25 @@ agent canonical write authority.
     agent attempts.
   - Retry and circuit-break decisions are append-only, attributable, and
     replayable.
+- Completion evidence:
+  - `retry-v1` classifies all accepted failure families and derives a stable
+    SHA-256 fingerprint from assignment, version, evidence, runtime, and
+    strategy identity.
+  - Attempt limits and the 20,000-token aggregate cap produce either a new
+    deterministic attempt identity or an append-only circuit event.
+  - Verification repair requires evidence plus strategy; capability rerouting
+    requires a routing decision plus changed strategy; structural and stale
+    failures stop without an execution retry.
+  - Replay terminates prior attempts, exposes scheduled retries, derives
+    `needs_review`/`needs_replan`, and clears old circuit blocks only after an
+    explicit new assignment revision.
+  - Focused session/retry/replay/gatekeeper/ledger regression: 58 passed.
+  - Final backend regression: 225 passed; Workbench regression: 34 passed;
+    TypeScript and Vite production build completed successfully.
 
-### [ ] RM4-05: Maintained Real-Agent Mutation And Retry Demo
+### [x] RM4-05: Maintained Real-Agent Mutation And Retry Demo
 
-- Status: planned
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high
@@ -326,14 +379,31 @@ agent canonical write authority.
     version -> replay` without manual ledger editing.
   - Agent failure or malformed output never mutates canonical state.
   - The demo does not retry an unchanged structural or deterministic failure.
+- Completion evidence:
+  - `bureauless mission mutation-retry-demo <workspace>` runs the maintained
+    two-turn deterministic `codex-cli` fixture through normal dispatch,
+    session packaging, mutation intake, acceptance, supersession, and resumed
+    dispatch paths.
+  - `--real-agent --target-model <model> --target-provider <provider>` exposes
+    the same bounded path as an explicit opt-in real-model smoke test.
+  - The generated report proves pending gatekeeper state, explicit version
+    advance, retry scheduling, repeated deterministic circuit opening with zero
+    additional agent turns, and inert malformed intent handling.
+  - Ledger v3 is now accepted by the maintained disk loader, so Runtime M4
+    writable state can start from persisted workspaces rather than memory-only
+    test fixtures.
+  - Focused RM4-05 regression: 3 passed; deterministic CLI acceptance report:
+    7 checks passed.
+  - Final backend regression: 228 passed; Workbench regression: 34 passed;
+    TypeScript and Vite production build completed successfully.
 
 ## Workstream 2: Linear Temporal Replay
 
 Goal: derive historical workflow and runtime state from append-only event order.
 
-### [ ] RM4-06: Workflow Version Projection
+### [x] RM4-06: Workflow Version Projection
 
-- Status: planned
+- Status: completed
 - Priority: critical
 - Recommended model: gpt-5.5
 - Risk: high
@@ -354,10 +424,24 @@ Goal: derive historical workflow and runtime state from append-only event order.
   - Equal initial workflow and ledger inputs always produce equal version IDs
     and event mappings.
   - Proposed and rejected mutations do not advance the workflow version.
+- Completion evidence:
+  - Canonical workflow hashing and version identity now share one protocol
+    implementation used by assignment export, native writes, and replay.
+  - Native ledger-v3 acceptance derives and records full before/after hashes,
+    parent identity, and `workflow_version_before` / `workflow_version_after`;
+    caller-supplied mismatches are rejected before append.
+  - `project_workflow_versions` derives version zero, one child per accepted
+    mutation, and an inclusive active-version mapping for every ledger event.
+  - Compatibility projection accepts historical v1/v2 transitions without
+    recorded metadata while validating every recorded field that is present.
+  - Focused mutation/version/retry regression: 40 passed; final backend
+    regression: 230 passed.
+  - Workbench regression: 34 passed; TypeScript and Vite production build
+    completed successfully.
 
-### [ ] RM4-07: Event-Prefix State Replay
+### [x] RM4-07: Event-Prefix State Replay
 
-- Status: planned
+- Status: completed
 - Priority: critical
 - Recommended model: gpt-5.5
 - Risk: high
@@ -378,10 +462,24 @@ Goal: derive historical workflow and runtime state from append-only event order.
   - Future result, decision, and mutation events cannot leak into an earlier
     historical projection.
   - Current-state replay remains equivalent to replay through the final event.
+- Completion evidence:
+  - `replay_workflow` and `evaluate_gatekeeper` accept one inclusive
+    `through_event_id` or zero-based `through_event_ordinal` selector and reject
+    unknown or ambiguous cursors.
+  - Prefix selection rebuilds ledger projections before deriving workflow,
+    mutation, node, assignment, terminal, and gatekeeper state.
+  - Replay output identifies the active workflow version and effective cursor;
+    existing node state, blocked reasons, and assignment attempts provide the
+    historical explanation without a parallel rules engine.
+  - Tests prove a future mutation acceptance and assignment cannot leak into an
+    earlier cursor, acceptance sees its child version, and final-cursor replay
+    is structurally equal to current replay.
+  - Focused replay/gatekeeper/cursor regression: 18 passed; final backend
+    regression: 232 passed.
 
-### [ ] RM4-08: Assignment Validity Across Workflow Versions
+### [x] RM4-08: Assignment Validity Across Workflow Versions
 
-- Status: planned
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.5
 - Risk: high
@@ -403,15 +501,32 @@ Goal: derive historical workflow and runtime state from append-only event order.
     superseded after it without rewriting either state.
   - Gatekeeper explanations identify the relevant assignment and mutation
     version transition.
+- Completion evidence:
+  - Replay exposes an `assignment_validity` map with creation version, active
+    version, affected/unaffected/needs-review status, reasons, and transition
+    event identity at every cursor.
+  - Assignment creation keeps its exported workflow version; compatibility
+    records without that field infer it conservatively from the creation event's
+    active version.
+  - Deterministic mutation impact makes affected assignments invalid at the
+    inclusive acceptance cursor, before the following explicit supersession
+    lifecycle event, while unaffected siblings remain valid.
+  - Gatekeeper blocked reasons name the superseded assignment and accepted
+    mutation; explicit supersession remains append-only evidence and does not
+    rewrite the original assignment or result.
+  - Focused assignment/version/supersession regression: 4 passed; final backend
+    regression: 232 passed.
+  - Workbench regression: 34 passed; TypeScript and Vite production build
+    completed successfully.
 
 ## Workstream 3: Historical Inspection API
 
 Goal: expose runtime-owned history projections without moving replay logic into
 the Workbench.
 
-### [ ] RM4-09: Timeline And Historical Snapshot API
+### [x] RM4-09: Timeline And Historical Snapshot API
 
-- Status: planned
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4
 - Risk: medium
@@ -432,10 +547,18 @@ the Workbench.
   - API consumers can answer "what was the workflow and why was this node in
     that state then?" without reading YAML or replaying rules themselves.
   - Existing current-state replay and mutation APIs remain compatible.
+- Notes:
+  - Added `/api/replay/timeline`, `/api/replay/snapshot`, and
+    `/api/replay/diff` with event-cursor selectors, workflow-version
+    transitions, runtime-owned workflow/state diffs, and structured cursor
+    errors.
+  - Verification:
+    `uv run python -m pytest tests/test_server.py` and
+    `uv run python -m pytest tests/test_harness.py -k 'inclusive_event_prefix or unknown_or_ambiguous_historical_cursor or mutation_supersession_preserves_history or replay_is_deterministic_and_explains_expired_gate'`
 
-### [ ] RM4-10: Temporal Replay Determinism And Scale Guardrails
+### [x] RM4-10: Temporal Replay Determinism And Scale Guardrails
 
-- Status: planned
+- Status: completed
 - Priority: high
 - Recommended model: gpt-5.4-mini
 - Risk: medium
@@ -455,12 +578,27 @@ the Workbench.
   - Focused runtime and server suites cover every event/version boundary.
   - The measured baseline is recorded and no correctness path depends on a
     cache.
+- Notes:
+  - Added runtime fixtures that cover two accepted mutations, one rejected
+    proposal, deterministic supersession, stale mutation intake that preserves
+    the active workflow version, and repeated replay/current-state equivalence.
+  - Added API coverage for multi-version timeline and snapshot inspection
+    across accepted and rejected proposals.
+  - Measured synthetic prefix replay baseline on July 4, 2026:
+    59 ledger events, 12 sampled prefixes, two full replay passes in 27.568 ms
+    on the maintained local test environment.
+  - First checkpoint threshold remains deferred. The recorded baseline is well
+    below any correctness-driven need for cache or checkpoint machinery, so no
+    replay path depends on speculative caching.
+  - Verification:
+    `uv run python -m pytest tests/test_server.py` and
+    `uv run python -m pytest tests/test_harness.py -k 'inclusive_event_prefix or unknown_or_ambiguous_historical_cursor or mutation_supersession_preserves_history or replay_is_deterministic_and_explains_expired_gate or multi_version_history or stale_mutation_intake_preserves_workflow_version_projection or prefix_replay_synthetic_ledger_baseline_is_deterministic'`
 
 ## Workstream 4: Acceptance And Handoff
 
-### [ ] RM4-11: Protocol, Roadmap, And Workbench Handoff
+### [x] RM4-11: Protocol, Roadmap, And Workbench Handoff
 
-- Status: planned
+- Status: completed
 - Priority: medium
 - Recommended model: gpt-5.4-mini
 - Risk: low
@@ -482,6 +620,18 @@ the Workbench.
     and completion.
   - The Workbench handoff names API contracts rather than duplicating runtime
     logic.
+- Notes:
+  - Promoted Runtime M4 history APIs and completion status into the canonical
+    protocol and roadmap docs.
+  - Declared planned Workbench Milestone 5 as the read-only consumer of
+    `/api/replay/timeline`, `/api/replay/snapshot`, and `/api/replay/diff`
+    instead of duplicating replay logic in the frontend.
+  - Updated runtime and workbench task indexes so Runtime M4 is closed and the
+    next UI milestone is explicit.
+  - Verification:
+    `uv run python -m pytest tests/test_server.py`
+    and
+    `uv run python -m pytest tests/test_harness.py -k 'inclusive_event_prefix or unknown_or_ambiguous_historical_cursor or mutation_supersession_preserves_history or replay_is_deterministic_and_explains_expired_gate or multi_version_history or stale_mutation_intake_preserves_workflow_version_projection or prefix_replay_synthetic_ledger_baseline_is_deterministic'`
 
 ## Required Execution Order
 

@@ -32,11 +32,16 @@ internal implementation grouping inside that milestone.
   retry/circuit-break control, workflow versions, and linear temporal replay
   through ledger event cursors.
 
-Runtime Milestone 3.5 is complete. Runtime Milestone 4 is active. RM4-00 accepted
+Runtime Milestone 3.5 is complete. Runtime Milestone 4 is complete. RM4-00 accepted
 [`RFC-004`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
 through
-[`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md);
-RM4-01 is the next implementation task.
+[`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md).
+RM4-01 through RM4-11 implemented the worker intent, trusted envelope,
+universal assignment escape hatch, structured result transport, and
+deterministic proposal registration, bounded retry/circuit control, and the
+maintained mutation/retry demo, workflow version projection, inclusive
+event-prefix replay, assignment validity, historical inspection APIs, and
+determinism/scale guardrails, plus the final protocol/workbench handoff.
 
 RM35-01 produced
 [`RFC-005`](../rfcs/005-authoritative-result-acceptance-spine.md). Acceptance
@@ -58,5 +63,5 @@ compatibility is implemented under accepted
    [`runtime execution gap analysis`](../audits/2026-07-02-runtime-execution-gap-analysis.md)
    and Milestone 3.5 for the required execution-spine remediation.
 9. Read Milestone 4 and RFC-004 for the selected agent mutation intake,
-   retry-control, and temporal replay scope. RM4-00 and the required RM35
-   foundations are complete; begin implementation with RM4-01.
+   retry-control, and temporal replay scope. Runtime M4 is complete; use
+   Workbench Milestone 5 for the next read-only history-inspection UI work.
