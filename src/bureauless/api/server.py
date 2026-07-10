@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from ..protocol.assignments import compile_context_capsule, export_assignment, l
 from ..protocol.context import load_context_request, resolve_context_request
 from ..protocol.dispatch import compile_dispatch_packet, load_dispatch_packet, load_turn_report
 from ..protocol.harness import load_ledger, load_mission, load_workflow
+from ..protocol.mutations import mutation_proposed_changes
 from ..protocol.ledger import (
     append_ledger_event,
     require_strict_writable_ledger,
@@ -47,7 +49,9 @@ from ..runtime import (
     build_mutation_supersession_events,
     evaluate_assignment_impacts,
     evaluate_gatekeeper,
+    project_workflow_versions,
     replay_workflow,
+    select_ledger_prefix,
     summarize_metrics,
 )
 from ..runtime.sessions import (
@@ -374,6 +378,51 @@ def create_app() -> FastAPI:
         ledger = load_ledger(Path(ledger_path))
         return replay_workflow(workflow, ledger).to_dict()
 
+    @app.get("/api/replay/timeline")
+    def api_replay_timeline(
+        workflow_path: str = "examples/missions/demo/workflows/coder_reviewer_committer.yaml",
+        ledger_path: str = "examples/missions/demo/ledger.yaml",
+    ) -> dict[str, Any]:
+        workflow = load_workflow(Path(workflow_path))
+        ledger = load_ledger(Path(ledger_path))
+        return replay_timeline_payload(workflow, ledger)
+
+    @app.get("/api/replay/snapshot")
+    def api_replay_snapshot(
+        workflow_path: str = "examples/missions/demo/workflows/coder_reviewer_committer.yaml",
+        ledger_path: str = "examples/missions/demo/ledger.yaml",
+        through_event_id: str | None = None,
+        through_event_ordinal: int | None = None,
+    ) -> dict[str, Any]:
+        workflow = load_workflow(Path(workflow_path))
+        ledger = load_ledger(Path(ledger_path))
+        return replay_snapshot_payload(
+            workflow,
+            ledger,
+            through_event_id=through_event_id,
+            through_event_ordinal=through_event_ordinal,
+        )
+
+    @app.get("/api/replay/diff")
+    def api_replay_diff(
+        workflow_path: str = "examples/missions/demo/workflows/coder_reviewer_committer.yaml",
+        ledger_path: str = "examples/missions/demo/ledger.yaml",
+        from_event_id: str | None = None,
+        from_event_ordinal: int | None = None,
+        to_event_id: str | None = None,
+        to_event_ordinal: int | None = None,
+    ) -> dict[str, Any]:
+        workflow = load_workflow(Path(workflow_path))
+        ledger = load_ledger(Path(ledger_path))
+        return replay_diff_payload(
+            workflow,
+            ledger,
+            from_event_id=from_event_id,
+            from_event_ordinal=from_event_ordinal,
+            to_event_id=to_event_id,
+            to_event_ordinal=to_event_ordinal,
+        )
+
     @app.get("/api/gatekeeper")
     def api_gatekeeper(
         workflow_path: str = "examples/missions/demo/workflows/coder_reviewer_committer.yaml",
@@ -429,7 +478,7 @@ def create_app() -> FastAPI:
             proposal = proposal_event.get("mutation_proposal")
             if not isinstance(proposal, dict):
                 raise ProtocolError("Mutation proposal event is missing mutation_proposal")
-            proposed_changes = proposal.get("proposed_changes")
+            proposed_changes = mutation_proposed_changes(proposal)
             if not isinstance(proposed_changes, dict):
                 raise ProtocolError("Mutation proposal is missing proposed_changes")
             decision_event["applied_changes"] = (
@@ -851,6 +900,8 @@ def mutation_inspection_payload(workflow, ledger) -> dict[str, Any]:
     for event_id, mutation in replay.mutation_proposals.items():
         event = event_by_id.get(event_id, {})
         proposal = event.get("mutation_proposal", {})
+        intent = proposal.get("intent") if isinstance(proposal, dict) else None
+        evidence_source = intent if isinstance(intent, dict) else proposal
         affected_assignments = sorted(
             assignment_id
             for assignment_id, node_id in assignment_nodes.items()
@@ -868,8 +919,8 @@ def mutation_inspection_payload(workflow, ledger) -> dict[str, Any]:
                 **mutation.to_dict(),
                 "proposal": proposal,
                 "evidence_refs": (
-                    proposal.get("evidence_refs", [])
-                    if isinstance(proposal, dict)
+                    evidence_source.get("evidence_refs", [])
+                    if isinstance(evidence_source, dict)
                     else []
                 ),
                 "affected_assignments": affected_assignments,
@@ -883,8 +934,312 @@ def mutation_inspection_payload(workflow, ledger) -> dict[str, Any]:
     }
 
 
+def replay_timeline_payload(workflow, ledger) -> dict[str, Any]:
+    projection = project_workflow_versions(workflow, ledger)
+    versions_by_id = {version.version_id: version for version in projection.versions}
+    events = [
+        _timeline_event_payload(
+            event,
+            ledger.event_log[event.event_ordinal],
+            versions_by_id=versions_by_id,
+        )
+        for event in projection.events
+    ]
+    return {
+        "workflow_id": workflow.workflow_id,
+        "ledger_version": ledger.ledger_version,
+        "initial_workflow_version_id": projection.initial_version_id,
+        "current_workflow_version_id": projection.current_version_id,
+        "versions": [version.to_dict() for version in projection.versions],
+        "events": events,
+    }
+
+
+def replay_snapshot_payload(
+    workflow,
+    ledger,
+    *,
+    through_event_id: str | None = None,
+    through_event_ordinal: int | None = None,
+) -> dict[str, Any]:
+    prefix = select_ledger_prefix(
+        ledger,
+        through_event_id=through_event_id,
+        through_event_ordinal=through_event_ordinal,
+    )
+    replay = replay_workflow(workflow, prefix)
+    gatekeeper = evaluate_gatekeeper(workflow, prefix)
+    active_workflow = materialize_current_workflow(workflow, prefix)
+    selected_event = None
+    if prefix.event_log:
+        projection = project_workflow_versions(workflow, prefix)
+        selected_event = _timeline_event_payload(
+            projection.events[-1],
+            prefix.event_log[-1],
+            versions_by_id={version.version_id: version for version in projection.versions},
+        )
+    return {
+        "workflow_id": workflow.workflow_id,
+        "cursor": {
+            "through_event_id": replay.through_event_id,
+            "through_event_ordinal": replay.through_event_ordinal,
+            "workflow_version_id": replay.workflow_version_id,
+        },
+        "selected_event": selected_event,
+        "workflow": workflow_payload(active_workflow),
+        "replay": replay.to_dict(),
+        "gatekeeper": gatekeeper.to_dict(),
+    }
+
+
+def replay_diff_payload(
+    workflow,
+    ledger,
+    *,
+    from_event_id: str | None = None,
+    from_event_ordinal: int | None = None,
+    to_event_id: str | None = None,
+    to_event_ordinal: int | None = None,
+) -> dict[str, Any]:
+    before = _resolve_history_cursor(
+        workflow,
+        ledger,
+        event_id=from_event_id,
+        event_ordinal=from_event_ordinal,
+        event_id_label="from_event_id",
+        event_ordinal_label="from_event_ordinal",
+        default_mode="initial",
+    )
+    after = _resolve_history_cursor(
+        workflow,
+        ledger,
+        event_id=to_event_id,
+        event_ordinal=to_event_ordinal,
+        event_id_label="to_event_id",
+        event_ordinal_label="to_event_ordinal",
+        default_mode="current",
+    )
+    before_ordinal = before["cursor"]["through_event_ordinal"]
+    after_ordinal = after["cursor"]["through_event_ordinal"]
+    before_index = -1 if before_ordinal is None else before_ordinal
+    after_index = -1 if after_ordinal is None else after_ordinal
+    if after_index < before_index:
+        raise ProtocolError(
+            "Unsupported temporal diff request: branch or rollback comparisons are outside Runtime M4"
+        )
+
+    between = ledger.event_log[before_index + 1 : after_index + 1]
+    projection = project_workflow_versions(workflow, after["ledger"])
+    versions_by_id = {version.version_id: version for version in projection.versions}
+    timeline = [
+        _timeline_event_payload(
+            projection.events[index],
+            ledger.event_log[index],
+            versions_by_id=versions_by_id,
+        )
+        for index in range(before_index + 1, after_index + 1)
+    ]
+    return {
+        "workflow_id": workflow.workflow_id,
+        "from_cursor": before["cursor"],
+        "to_cursor": after["cursor"],
+        "events_between": [
+            {
+                "event_ordinal": before_index + offset + 1,
+                "event_id": event.get("event_id"),
+                "event_type": event.get("event_type"),
+            }
+            for offset, event in enumerate(between)
+        ],
+        "timeline_between": timeline,
+        "workflow_diff": _workflow_diff_payload(before["workflow"], after["workflow"]),
+        "state_diff": _state_diff_payload(before["replay"], after["replay"]),
+    }
+
+
+def _resolve_history_cursor(
+    workflow,
+    ledger,
+    *,
+    event_id: str | None,
+    event_ordinal: int | None,
+    event_id_label: str,
+    event_ordinal_label: str,
+    default_mode: Literal["initial", "current"],
+) -> dict[str, Any]:
+    if event_id is not None and event_ordinal is not None:
+        raise ProtocolError(
+            f"Specify either {event_id_label} or {event_ordinal_label}, not both"
+        )
+    if event_id is None and event_ordinal is None:
+        if default_mode == "initial":
+            prefix = replace(ledger, event_log=[])
+        else:
+            prefix = ledger
+    else:
+        prefix = select_ledger_prefix(
+            ledger,
+            through_event_id=event_id,
+            through_event_ordinal=event_ordinal,
+        )
+    return _history_snapshot_from_prefix(workflow, prefix)
+
+
+def _history_snapshot_from_prefix(workflow, prefix) -> dict[str, Any]:
+    replay = replay_workflow(workflow, prefix)
+    active_workflow = materialize_current_workflow(workflow, prefix)
+    return {
+        "ledger": prefix,
+        "cursor": {
+            "through_event_id": replay.through_event_id,
+            "through_event_ordinal": replay.through_event_ordinal,
+            "workflow_version_id": replay.workflow_version_id,
+        },
+        "workflow": workflow_payload(active_workflow),
+        "replay": replay.to_dict(),
+    }
+
+
+def _timeline_event_payload(
+    event_projection,
+    raw_event: dict[str, Any],
+    *,
+    versions_by_id: dict[str, Any],
+) -> dict[str, Any]:
+    after_version = versions_by_id.get(event_projection.workflow_version_after)
+    payload = {
+        "event_ordinal": event_projection.event_ordinal,
+        "event_id": event_projection.event_id,
+        "event_type": raw_event.get("event_type"),
+        "active_workflow_version_id": event_projection.workflow_version_id,
+        "version_transition": {
+            "changed": (
+                event_projection.workflow_version_before
+                != event_projection.workflow_version_after
+            ),
+            "workflow_version_before": event_projection.workflow_version_before,
+            "workflow_version_after": event_projection.workflow_version_after,
+            "parent_workflow_version_id": (
+                after_version.parent_version_id if after_version is not None else None
+            ),
+            "accepted_event_id": (
+                after_version.accepted_event_id if after_version is not None else None
+            ),
+        },
+    }
+    if "assignment_id" in raw_event:
+        payload["assignment_id"] = raw_event.get("assignment_id")
+    if "node_id" in raw_event:
+        payload["node_id"] = raw_event.get("node_id")
+    return payload
+
+
+def _workflow_diff_payload(
+    before_workflow: dict[str, Any],
+    after_workflow: dict[str, Any],
+) -> dict[str, Any]:
+    before_nodes = {node["id"]: node for node in before_workflow["nodes"]}
+    after_nodes = {node["id"]: node for node in after_workflow["nodes"]}
+    before_gates = {gate["id"]: gate for gate in before_workflow["gates"]}
+    after_gates = {gate["id"]: gate for gate in after_workflow["gates"]}
+    return {
+        "changed": before_workflow != after_workflow,
+        "nodes_added": [
+            after_nodes[node_id]
+            for node_id in sorted(set(after_nodes) - set(before_nodes))
+        ],
+        "nodes_removed": [
+            before_nodes[node_id]
+            for node_id in sorted(set(before_nodes) - set(after_nodes))
+        ],
+        "nodes_changed": [
+            {
+                "node_id": node_id,
+                "before": before_nodes[node_id],
+                "after": after_nodes[node_id],
+            }
+            for node_id in sorted(set(before_nodes) & set(after_nodes))
+            if before_nodes[node_id] != after_nodes[node_id]
+        ],
+        "gates_added": [
+            after_gates[gate_id]
+            for gate_id in sorted(set(after_gates) - set(before_gates))
+        ],
+        "gates_removed": [
+            before_gates[gate_id]
+            for gate_id in sorted(set(before_gates) - set(after_gates))
+        ],
+        "gates_changed": [
+            {
+                "gate_id": gate_id,
+                "before": before_gates[gate_id],
+                "after": after_gates[gate_id],
+            }
+            for gate_id in sorted(set(before_gates) & set(after_gates))
+            if before_gates[gate_id] != after_gates[gate_id]
+        ],
+        "terminal_events_before": before_workflow["terminal_events"],
+        "terminal_events_after": after_workflow["terminal_events"],
+    }
+
+
+def _state_diff_payload(
+    before_replay: dict[str, Any],
+    after_replay: dict[str, Any],
+) -> dict[str, Any]:
+    before_nodes = before_replay["nodes"]
+    after_nodes = after_replay["nodes"]
+    before_assignments = before_replay["assignment_validity"]
+    after_assignments = after_replay["assignment_validity"]
+    before_mutations = before_replay["mutation_proposals"]
+    after_mutations = after_replay["mutation_proposals"]
+    return {
+        "terminal_complete_before": before_replay["terminal_complete"],
+        "terminal_complete_after": after_replay["terminal_complete"],
+        "node_changes": [
+            {
+                "node_id": node_id,
+                "before": before_nodes.get(node_id),
+                "after": after_nodes.get(node_id),
+            }
+            for node_id in sorted(set(before_nodes) | set(after_nodes))
+            if before_nodes.get(node_id) != after_nodes.get(node_id)
+        ],
+        "assignment_validity_changes": [
+            {
+                "assignment_id": assignment_id,
+                "before": before_assignments.get(assignment_id),
+                "after": after_assignments.get(assignment_id),
+            }
+            for assignment_id in sorted(set(before_assignments) | set(after_assignments))
+            if before_assignments.get(assignment_id) != after_assignments.get(assignment_id)
+        ],
+        "mutation_changes": [
+            {
+                "proposal_event_id": proposal_event_id,
+                "before": before_mutations.get(proposal_event_id),
+                "after": after_mutations.get(proposal_event_id),
+            }
+            for proposal_event_id in sorted(set(before_mutations) | set(after_mutations))
+            if before_mutations.get(proposal_event_id) != after_mutations.get(proposal_event_id)
+        ],
+    }
+
+
 def protocol_error_payload(exc: Exception) -> dict[str, str]:
-    return {"error": str(exc)}
+    message = str(exc)
+    payload = {"error": message}
+    if message.startswith("Unknown through_event_id") or message.startswith(
+        "Unknown through_event_ordinal"
+    ):
+        payload["code"] = "unknown_cursor"
+    elif message.startswith("Specify either through_event_id") or message.startswith(
+        "Specify either from_event_id"
+    ) or message.startswith("Specify either to_event_id"):
+        payload["code"] = "ambiguous_cursor"
+    elif message.startswith("Unsupported temporal diff request"):
+        payload["code"] = "unsupported_temporal_request"
+    return payload
 
 
 def _runtime_demo_shell_command(result_id: str) -> str:

@@ -8,7 +8,15 @@ import yaml
 
 from ..errors import ProtocolError
 from .harness import STRICT_ACCEPTANCE_LEDGER_VERSION, Ledger, Workflow
-from .mutations import load_workflow_mutation_proposal
+from .mutations import (
+    TrustedWorkflowMutationProposal,
+    build_trusted_workflow_mutation_proposal,
+    load_workflow_mutation_proposal,
+    materialize_current_workflow,
+    mutation_proposed_changes,
+    workflow_content_hash,
+    workflow_version_identity,
+)
 
 
 LIFECYCLE_EVENT_TYPES = {
@@ -19,6 +27,8 @@ LIFECYCLE_EVENT_TYPES = {
     "worker_timeout",
     "assignment_cancelled",
     "assignment_retry_requested",
+    "assignment_retry_scheduled",
+    "assignment_circuit_opened",
     "assignment_superseded",
     "budget_soft_limit_reached",
     "budget_hard_limit_reached",
@@ -48,8 +58,49 @@ def append_ledger_event(
     event: dict[str, Any],
     workflow: Workflow | None = None,
 ) -> Ledger:
-    validate_ledger_event(ledger, event, workflow)
-    return rebuild_ledger_projection(replace(ledger, event_log=[*ledger.event_log, event]))
+    normalized = _with_workflow_version_transition(ledger, event, workflow)
+    validate_ledger_event(ledger, normalized, workflow)
+    return rebuild_ledger_projection(
+        replace(ledger, event_log=[*ledger.event_log, normalized])
+    )
+
+
+def _with_workflow_version_transition(
+    ledger: Ledger,
+    event: dict[str, Any],
+    workflow: Workflow | None,
+) -> dict[str, Any]:
+    if (
+        ledger.ledger_version < 3
+        or event.get("event_type") != "workflow_mutation_accepted"
+        or workflow is None
+    ):
+        return event
+
+    before = materialize_current_workflow(workflow, ledger)
+    sequence = sum(
+        item.get("event_type") == "workflow_mutation_accepted"
+        and item.get("workflow_id") == workflow.workflow_id
+        for item in ledger.event_log
+    )
+    provisional = replace(ledger, event_log=[*ledger.event_log, event])
+    after = materialize_current_workflow(workflow, provisional)
+    version_before = workflow_version_identity(before, sequence)
+    version_after = workflow_version_identity(after, sequence + 1)
+    expected = {
+        "workflow_version_before": version_before,
+        "workflow_version_after": version_after,
+        "workflow_hash_before": workflow_content_hash(before),
+        "workflow_hash_after": workflow_content_hash(after),
+        "parent_workflow_version_id": version_before,
+    }
+    for field, value in expected.items():
+        supplied = event.get(field)
+        if supplied is not None and supplied != value:
+            raise ProtocolError(
+                f"workflow_mutation_accepted {field} does not match derived transition"
+            )
+    return {**event, **expected}
 
 
 def require_strict_writable_ledger(ledger: Ledger, operation: str) -> None:
@@ -97,6 +148,8 @@ def validate_ledger_event(
         _validate_review_decision_recorded_event(ledger, event)
     elif event_type == "advisor_outcome_recorded":
         _validate_advisor_outcome_recorded_event(event)
+    elif event_type in {"assignment_retry_scheduled", "assignment_circuit_opened"}:
+        _validate_retry_control_event(ledger, event, event_type)
     elif event_type in {"context_requested", "context_resolved", "context_resumed"}:
         _validate_context_lifecycle_event(ledger, event, event_type)
 
@@ -177,6 +230,68 @@ def _validate_context_lifecycle_event(
         raise ProtocolError("context_resumed requires a granted resolution")
 
 
+def _validate_retry_control_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+    event_type: str,
+) -> None:
+    _required_string(event, "assignment_id")
+    _required_string(event, "root_assignment_id")
+    prior_attempt_id = _required_string(event, "prior_attempt_id")
+    _required_string(event, "node_id")
+    _required_string(event, "role")
+    failure_class = _required_string(event, "failure_class")
+    if failure_class not in {
+        "transient_infrastructure",
+        "malformed_output_contract",
+        "verification_failure",
+        "capability_mismatch",
+        "deterministic_failure",
+        "workflow_structure",
+        "stale_or_superseded",
+        "policy_rejection",
+    }:
+        raise ProtocolError("Retry control failure_class is invalid")
+    fingerprint = _required_string(event, "failure_fingerprint")
+    if len(fingerprint) != 64:
+        raise ProtocolError("Retry control failure_fingerprint must be SHA-256")
+    _required_string(event, "error_code")
+    strategy_id = event.get("strategy_id")
+    if not isinstance(strategy_id, str) or not strategy_id:
+        raise ProtocolError("Retry control strategy_id must be a string")
+    evidence = event.get("changed_evidence_refs")
+    if not isinstance(evidence, list) or not all(
+        isinstance(item, str) and item for item in evidence
+    ):
+        raise ProtocolError("Retry control changed_evidence_refs must be strings")
+    budget = event.get("budget_snapshot")
+    if not isinstance(budget, dict) or budget.get("policy_version") != "retry-v1":
+        raise ProtocolError("Retry control requires retry-v1 budget_snapshot")
+    for field in ("attempts_used", "attempts_allowed", "tokens_used", "token_budget"):
+        if not isinstance(budget.get(field), int) or budget[field] < 0:
+            raise ProtocolError(f"Retry control budget_snapshot.{field} must be an integer")
+    prior_exists = any(
+        candidate.get("assignment_id") == prior_attempt_id
+        and candidate.get("event_type")
+        in {"assignment_created", "assignment_retry_scheduled"}
+        for candidate in ledger.event_log
+    )
+    if not prior_exists:
+        raise ProtocolError("Retry control prior_attempt_id is unknown")
+    if event_type == "assignment_retry_scheduled":
+        attempt_id = _required_string(event, "attempt_id")
+        if event.get("assignment_id") != attempt_id:
+            raise ProtocolError("Scheduled retry assignment_id must match attempt_id")
+        if event.get("retry_of") != prior_attempt_id:
+            raise ProtocolError("Scheduled retry retry_of must match prior_attempt_id")
+        _required_string(event, "retry_reason")
+    else:
+        terminal_state = _required_string(event, "terminal_state")
+        if terminal_state not in {"needs_review", "needs_replan"}:
+            raise ProtocolError("Circuit terminal_state is invalid")
+        _required_string(event, "reason")
+
+
 def _validate_mutation_proposed_event(
     ledger: Ledger,
     event: dict[str, Any],
@@ -192,6 +307,8 @@ def _validate_mutation_proposed_event(
         raise ProtocolError(
             "Mutation proposal workflow_id does not match the active workflow"
         )
+    if isinstance(proposal, TrustedWorkflowMutationProposal):
+        _validate_trusted_mutation_proposed_event(ledger, event, proposal)
     for existing in ledger.event_log:
         existing_proposal = existing.get("mutation_proposal")
         if (
@@ -201,6 +318,86 @@ def _validate_mutation_proposed_event(
             raise ProtocolError(
                 f"Duplicate workflow mutation proposal id: {proposal.proposal_id}"
             )
+
+
+def _validate_trusted_mutation_proposed_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+    proposal: TrustedWorkflowMutationProposal,
+) -> None:
+    source_event_id = _required_string(event, "source_event_id")
+    source_event = next(
+        (
+            candidate
+            for candidate in ledger.event_log
+            if candidate.get("event_id") == source_event_id
+        ),
+        None,
+    )
+    if source_event is None or source_event.get("event_type") != "result_submitted":
+        raise ProtocolError(
+            "Trusted mutation source_event_id must reference result_submitted"
+        )
+    if source_event.get("workflow_version_id") != proposal.base_workflow_version_id:
+        raise ProtocolError(
+            "Trusted mutation base workflow version does not match source result"
+        )
+    if source_event.get("assignment_id") != proposal.source.assignment_id:
+        raise ProtocolError("Trusted mutation assignment provenance mismatch")
+    if source_event.get("agent_id") != proposal.source.agent_id:
+        raise ProtocolError("Trusted mutation agent provenance mismatch")
+    if event.get("assignment_id") != proposal.source.assignment_id:
+        raise ProtocolError("Trusted mutation event assignment provenance mismatch")
+    if event.get("session_id") != proposal.source.session_id:
+        raise ProtocolError("Trusted mutation event session provenance mismatch")
+    if event.get("agent_id") != proposal.source.agent_id:
+        raise ProtocolError("Trusted mutation event agent provenance mismatch")
+    assignment_event = next(
+        (
+            candidate
+            for candidate in ledger.event_log
+            if candidate.get("event_type") == "assignment_created"
+            and candidate.get("assignment_id") == proposal.source.assignment_id
+        ),
+        None,
+    )
+    if assignment_event is None:
+        raise ProtocolError("Trusted mutation requires assignment_created provenance")
+    if (
+        assignment_event.get("session_id") != proposal.source.session_id
+        or assignment_event.get("agent_id") != proposal.source.agent_id
+    ):
+        raise ProtocolError("Trusted mutation assignment creation provenance mismatch")
+
+    rebuilt = build_trusted_workflow_mutation_proposal(
+        proposal.intent.to_dict(),
+        workflow_id=proposal.workflow_id,
+        assignment_id=proposal.source.assignment_id,
+        session_id=proposal.source.session_id,
+        agent_id=proposal.source.agent_id,
+        source_result_event_id=source_event_id,
+        assignment_workflow_version_id=proposal.base_workflow_version_id,
+        current_workflow_version_id=proposal.base_workflow_version_id,
+        requires_approval=proposal.requires_approval,
+    )
+    if rebuilt.proposal != proposal:
+        raise ProtocolError("Trusted mutation proposal identity is not deterministic")
+    if event.get("event_id") != f"event-{proposal.proposal_id}":
+        raise ProtocolError("Trusted mutation event_id does not match proposal_id")
+
+    artifact = event.get("proposal_artifact")
+    if not isinstance(artifact, dict):
+        raise ProtocolError("Trusted mutation event requires proposal_artifact")
+    for field in ("artifact_id", "path", "sha256", "created_by", "source_event"):
+        value = artifact.get(field)
+        if not isinstance(value, str) or not value:
+            raise ProtocolError(
+                f"Trusted mutation proposal_artifact.{field} must be a string"
+            )
+    if artifact.get("mutable") is not False:
+        raise ProtocolError("Trusted mutation proposal artifact must be immutable")
+    if artifact.get("source_event") != source_event_id:
+        raise ProtocolError("Trusted mutation proposal artifact source mismatch")
 
 
 def _validate_mutation_decision_event(
@@ -260,7 +457,7 @@ def _validate_applied_changes_subset(
     proposal = source_event.get("mutation_proposal")
     if not isinstance(proposal, dict):
         raise ProtocolError("Mutation proposal event is missing mutation_proposal")
-    proposed_changes = proposal.get("proposed_changes")
+    proposed_changes = mutation_proposed_changes(proposal)
     if not isinstance(proposed_changes, dict):
         raise ProtocolError("Mutation proposal is missing proposed_changes")
 

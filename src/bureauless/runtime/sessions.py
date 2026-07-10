@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,9 @@ import subprocess
 import threading
 import time
 from typing import Any, Callable
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 from uuid import uuid4
 
 import yaml
@@ -19,7 +23,7 @@ import yaml
 from ..agents import resolve_agent_binding
 from ..errors import ProtocolError
 from ..protocol.artifacts import sha256_file
-from ..protocol.assignments import AssignmentPacket
+from ..protocol.assignments import AssignmentPacket, workflow_version_id
 from ..protocol.assignments import render_assignment_prompt
 from ..protocol.context import (
     build_context_lifecycle_events,
@@ -51,6 +55,18 @@ from ..runtime_workspace import (
 
 
 SUPPORTED_SESSION_AGENTS = {"fake", "shell-dummy", "codex-cli"}
+
+RETRY_ATTEMPT_LIMITS = {
+    "transient_infrastructure": 3,
+    "malformed_output_contract": 2,
+    "verification_failure": 2,
+    "capability_mismatch": 2,
+    "deterministic_failure": 2,
+    "workflow_structure": 1,
+    "stale_or_superseded": 1,
+    "policy_rejection": 1,
+}
+DEFAULT_RETRY_TOKEN_BUDGET = 20_000
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -187,6 +203,415 @@ class SessionRecord:
             "result_proposal": self.result_proposal,
             "dispatch": self.dispatch,
         }
+
+
+@dataclass(frozen=True)
+class ProviderUsageCapture:
+    assignment_id: str
+    session_id: str
+    agent_id: str
+    provider: str
+    model: str
+    collected_at: str
+    usage: dict[str, Any]
+    source: str = "provider_usage_capture_v1"
+    result_id: str | None = None
+    source_ref: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "artifact_type": "provider_usage_capture",
+            "assignment_id": self.assignment_id,
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
+            "provider": self.provider,
+            "model": self.model,
+            "collected_at": self.collected_at,
+            "source": self.source,
+            "usage": self.usage,
+        }
+        if self.result_id is not None:
+            payload["result_id"] = self.result_id
+        if self.source_ref is not None:
+            payload["source_ref"] = self.source_ref
+        return payload
+
+
+@dataclass(frozen=True)
+class RetryControlResult:
+    ledger: Ledger
+    action: str
+    failure_class: str
+    failure_fingerprint: str
+    event: dict[str, Any]
+
+
+class _ProviderUsageCollector:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._latest_capture: dict[str, Any] | None = None
+
+    def record(
+        self,
+        *,
+        provider: str,
+        model: str,
+        usage: dict[str, Any],
+        source_ref: str | None,
+    ) -> None:
+        payload = {
+            "provider": provider,
+            "model": model,
+            "usage": dict(usage),
+            "source_ref": source_ref,
+        }
+        with self._lock:
+            self._latest_capture = payload
+
+    def snapshot(self) -> dict[str, Any] | None:
+        with self._lock:
+            if self._latest_capture is None:
+                return None
+            return dict(self._latest_capture)
+
+
+class _OpenAICompatibleTelemetryProxy:
+    def __init__(self, upstream_base_url: str) -> None:
+        self._upstream_base_url = upstream_base_url.rstrip("/")
+        self._collector = _ProviderUsageCollector()
+        server = self._build_server()
+        self._server = server
+        self.base_url = f"http://127.0.0.1:{server.server_port}"
+        self._thread = threading.Thread(target=server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def snapshot(self) -> dict[str, Any] | None:
+        return self._collector.snapshot()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=1.0)
+
+    def _build_server(self) -> ThreadingHTTPServer:
+        proxy = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_DELETE(self) -> None:
+                self._forward()
+
+            def do_GET(self) -> None:
+                self._forward()
+
+            def do_PATCH(self) -> None:
+                self._forward()
+
+            def do_POST(self) -> None:
+                self._forward()
+
+            def do_PUT(self) -> None:
+                self._forward()
+
+            def log_message(self, _format: str, *_args: Any) -> None:
+                return
+
+            def _forward(self) -> None:
+                body = b""
+                content_length = self.headers.get("Content-Length")
+                if content_length:
+                    body = self.rfile.read(int(content_length))
+                target_url = _join_upstream_url(proxy._upstream_base_url, self.path)
+                headers = {
+                    key: value
+                    for key, value in self.headers.items()
+                    if key.lower() not in {"host", "content-length", "connection"}
+                }
+                request = urllib_request.Request(
+                    target_url,
+                    data=body if self.command in {"POST", "PUT", "PATCH"} else None,
+                    headers=headers,
+                    method=self.command,
+                )
+                try:
+                    with urllib_request.urlopen(request, timeout=300) as response:
+                        status = response.status
+                        response_headers = response.headers
+                        response_body = response.read()
+                except urllib_error.HTTPError as exc:
+                    status = exc.code
+                    response_headers = exc.headers
+                    response_body = exc.read()
+                proxy._maybe_capture_response(response_body)
+                self.send_response(status)
+                for key, value in response_headers.items():
+                    lowered = key.lower()
+                    if lowered in {"connection", "content-length", "transfer-encoding"}:
+                        continue
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                if response_body:
+                    self.wfile.write(response_body)
+
+        return ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+
+    def _maybe_capture_response(self, response_body: bytes) -> None:
+        if not response_body:
+            return
+        try:
+            payload = json.loads(response_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        capture = _extract_openai_compatible_usage_capture(payload)
+        if capture is None:
+            return
+        self._collector.record(
+            provider="openai-compatible",
+            model=capture["model"],
+            usage=capture["usage"],
+            source_ref=capture.get("source_ref"),
+        )
+
+
+def classify_session_failure(
+    record: SessionRecord,
+    *,
+    error_code: str | None = None,
+) -> str:
+    normalized = (error_code or str(record.exit.get("reason", ""))).lower()
+    if record.status == "superseded" or "stale" in normalized or "supersed" in normalized:
+        return "stale_or_superseded"
+    if normalized.startswith(("policy_", "safety_", "permission_")):
+        return "policy_rejection"
+    if normalized.startswith(("capability_", "model_", "provider_")):
+        return "capability_mismatch"
+    result = record.result_proposal if isinstance(record.result_proposal, dict) else {}
+    verification = result.get("verification")
+    verification_status = (
+        verification.get("status") if isinstance(verification, dict) else None
+    )
+    if verification_status == "workflow_structure" or result.get("control_intents"):
+        return "workflow_structure"
+    extraction_status = record.extraction.get("status")
+    if record.status == "completed" and not result:
+        return "malformed_output_contract"
+    if extraction_status in {"wrapper_failed_to_extract", "agent_output_unstructured"}:
+        return "malformed_output_contract"
+    if verification_status in {"failed", "error", "rejected"}:
+        return "verification_failure"
+    if record.status == "timed_out" or any(
+        marker in normalized
+        for marker in ("network", "rate_limit", "launch_failed", "temporar", "timeout")
+    ):
+        return "transient_infrastructure"
+    return "deterministic_failure"
+
+
+def apply_retry_policy(
+    workflow: Workflow,
+    ledger: Ledger,
+    assignment: AssignmentPacket,
+    record: SessionRecord,
+    *,
+    error_code: str | None = None,
+    changed_evidence_refs: list[str] | None = None,
+    repair_strategy: str | None = None,
+    routing_decision_id: str | None = None,
+    strategy_id: str | None = None,
+    token_budget: int = DEFAULT_RETRY_TOKEN_BUDGET,
+) -> RetryControlResult:
+    if record.assignment_id != assignment.assignment_id:
+        raise ProtocolError("Retry record assignment_id does not match assignment")
+    if token_budget <= 0 or token_budget > DEFAULT_RETRY_TOKEN_BUDGET:
+        raise ProtocolError("Retry token budget must be between 1 and 20000")
+
+    failure_class = classify_session_failure(record, error_code=error_code)
+    root_assignment_id = _retry_root_assignment_id(ledger, assignment.assignment_id)
+    related_attempt_ids = {root_assignment_id}
+    related_attempt_ids.update(
+        event["assignment_id"]
+        for event in ledger.event_log
+        if event.get("event_type") == "assignment_retry_scheduled"
+        and event.get("root_assignment_id") == root_assignment_id
+        and isinstance(event.get("assignment_id"), str)
+    )
+    scheduled = [
+        event
+        for event in ledger.event_log
+        if event.get("event_type") == "assignment_retry_scheduled"
+        and event.get("root_assignment_id") == root_assignment_id
+    ]
+    total_attempts = 1 + len(scheduled)
+    used_tokens = _retry_tokens_used(ledger, related_attempt_ids)
+    used_tokens = max(
+        [
+            used_tokens,
+            *[
+                _int_value(event.get("budget_snapshot", {}).get("tokens_used"))
+                for event in scheduled
+                if isinstance(event.get("budget_snapshot"), dict)
+            ],
+        ]
+    )
+    if not any(
+        event.get("event_type") == "result_submitted"
+        and event.get("assignment_id") == record.assignment_id
+        for event in ledger.event_log
+    ):
+        used_tokens += _int_value(record.outcome_metrics.get("total_tokens"))
+
+    changed_evidence_refs = changed_evidence_refs or []
+    effective_strategy = strategy_id or repair_strategy or "unchanged"
+    fingerprint_payload = {
+        "root_assignment_id": root_assignment_id,
+        "workflow_version_id": assignment.visible_context.get("workflow_version_id")
+        or workflow_version_id(workflow, ledger),
+        "failure_class": failure_class,
+        "error_code": error_code or record.exit.get("reason") or record.status,
+        "evidence": _failure_evidence(record),
+        "agent_id": record.agent_id,
+        "model": _result_field(record, "effective_model"),
+        "provider": _result_field(record, "effective_provider"),
+        "strategy_id": effective_strategy,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    budget_snapshot = {
+        "policy_version": "retry-v1",
+        "attempts_used": total_attempts,
+        "attempts_allowed": RETRY_ATTEMPT_LIMITS[failure_class],
+        "tokens_used": used_tokens,
+        "token_budget": token_budget,
+    }
+
+    terminal_state = None
+    stop_reason = None
+    if failure_class in {"workflow_structure", "stale_or_superseded"}:
+        terminal_state = "needs_replan"
+        stop_reason = "failure_class_not_retryable"
+    elif failure_class == "policy_rejection":
+        terminal_state = "needs_review"
+        stop_reason = "failure_class_not_retryable"
+    elif failure_class == "verification_failure" and not (
+        changed_evidence_refs and repair_strategy
+    ):
+        terminal_state = "needs_review"
+        stop_reason = "repair_evidence_or_strategy_missing"
+    elif failure_class == "capability_mismatch" and not (
+        routing_decision_id and effective_strategy != "unchanged"
+    ):
+        terminal_state = "needs_review"
+        stop_reason = "routing_or_strategy_change_missing"
+    elif failure_class == "deterministic_failure" and not (
+        changed_evidence_refs or effective_strategy != "unchanged"
+    ):
+        terminal_state = "needs_review"
+        stop_reason = "changed_input_or_strategy_missing"
+    elif failure_class != "transient_infrastructure" and any(
+        event.get("failure_fingerprint") == fingerprint for event in scheduled
+    ):
+        terminal_state = "needs_review"
+        stop_reason = "repeated_deterministic_fingerprint"
+    elif total_attempts >= RETRY_ATTEMPT_LIMITS[failure_class]:
+        terminal_state = "needs_review"
+        stop_reason = "attempt_budget_exhausted"
+    elif used_tokens >= token_budget:
+        terminal_state = "needs_review"
+        stop_reason = "token_budget_exhausted"
+
+    common = {
+        "mission_id": workflow.mission_id,
+        "workflow_id": workflow.workflow_id,
+        "node_id": assignment.node_id,
+        "role": assignment.role,
+        "root_assignment_id": root_assignment_id,
+        "prior_attempt_id": assignment.assignment_id,
+        "failure_class": failure_class,
+        "failure_fingerprint": fingerprint,
+        "error_code": error_code or record.exit.get("reason") or record.status,
+        "changed_evidence_refs": changed_evidence_refs,
+        "strategy_id": effective_strategy,
+        "routing_decision_id": routing_decision_id,
+        "budget_snapshot": budget_snapshot,
+        "created_at": _now(),
+    }
+    if terminal_state is not None:
+        event = {
+            **common,
+            "event_id": f"event-circuit-{root_assignment_id}-{fingerprint[:12]}",
+            "event_type": "assignment_circuit_opened",
+            "assignment_id": assignment.assignment_id,
+            "terminal_state": terminal_state,
+            "reason": stop_reason,
+        }
+        existing = next(
+            (item for item in ledger.event_log if item.get("event_id") == event["event_id"]),
+            None,
+        )
+        if existing is not None:
+            return RetryControlResult(
+                ledger, "circuit_opened", failure_class, fingerprint, existing
+            )
+        updated = append_ledger_event(ledger, event, workflow)
+        return RetryControlResult(
+            updated, "circuit_opened", failure_class, fingerprint, event
+        )
+
+    attempt_id = f"{root_assignment_id}:attempt-{total_attempts + 1:03d}"
+    event = {
+        **common,
+        "event_id": f"event-retry-{attempt_id}",
+        "event_type": "assignment_retry_scheduled",
+        "assignment_id": attempt_id,
+        "attempt_id": attempt_id,
+        "retry_of": assignment.assignment_id,
+        "retry_reason": failure_class,
+    }
+    updated = append_ledger_event(ledger, event, workflow)
+    return RetryControlResult(updated, "retry_scheduled", failure_class, fingerprint, event)
+
+
+def _retry_root_assignment_id(ledger: Ledger, assignment_id: str) -> str:
+    event = next(
+        (
+            item
+            for item in ledger.event_log
+            if item.get("event_type") == "assignment_retry_scheduled"
+            and item.get("assignment_id") == assignment_id
+        ),
+        None,
+    )
+    root = event.get("root_assignment_id") if event is not None else None
+    return root if isinstance(root, str) and root else assignment_id
+
+
+def _retry_tokens_used(ledger: Ledger, assignment_ids: set[str]) -> int:
+    return sum(
+        _int_value(result.get("outcome_metrics", {}).get("total_tokens"))
+        for event in ledger.event_log
+        if event.get("event_type") == "result_submitted"
+        and event.get("assignment_id") in assignment_ids
+        and isinstance((result := event.get("result")), dict)
+        and isinstance(result.get("outcome_metrics"), dict)
+    )
+
+
+def _failure_evidence(record: SessionRecord) -> dict[str, Any]:
+    result = record.result_proposal if isinstance(record.result_proposal, dict) else {}
+    return {
+        "verification": result.get("verification"),
+        "warnings": record.extraction.get("warnings", []),
+        "exit_reason": record.exit.get("reason"),
+    }
+
+
+def _result_field(record: SessionRecord, field: str) -> Any:
+    if not isinstance(record.result_proposal, dict):
+        return None
+    return record.result_proposal.get(field)
 
 
 class LiveSessionHandle:
@@ -807,7 +1232,7 @@ def build_assignment_created_event(
     agent_id: str,
     event_id: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    event = {
         "event_id": event_id or f"event-{assignment.assignment_id}-created",
         "event_type": "assignment_created",
         "mission_id": workflow.mission_id,
@@ -819,6 +1244,10 @@ def build_assignment_created_event(
         "session_id": session_id,
         "created_at": _now(),
     }
+    version = assignment.visible_context.get("workflow_version_id")
+    if isinstance(version, str) and version:
+        event["workflow_version_id"] = version
+    return event
 
 
 def build_session_terminal_event(
@@ -869,6 +1298,254 @@ def load_session_record(data: dict[str, Any]) -> SessionRecord:
         result_proposal=data.get("result_proposal"),
         dispatch=data.get("dispatch") if isinstance(data.get("dispatch"), dict) else None,
     )
+
+
+def load_provider_usage_capture(data: dict[str, Any]) -> ProviderUsageCapture:
+    artifact_type = _as_string(data, "artifact_type")
+    if artifact_type != "provider_usage_capture":
+        raise ProtocolError("Provider usage capture artifact_type must be provider_usage_capture")
+    usage = _as_mapping(data, "usage", default={})
+    _validate_provider_usage_capture_usage(usage)
+    return ProviderUsageCapture(
+        assignment_id=_as_string(data, "assignment_id"),
+        session_id=_as_string(data, "session_id"),
+        agent_id=_as_string(data, "agent_id"),
+        provider=_as_string(data, "provider"),
+        model=_as_string(data, "model"),
+        collected_at=_as_string(data, "collected_at"),
+        source=_as_string(data, "source"),
+        usage=usage,
+        result_id=_string_or_none(data.get("result_id")),
+        source_ref=_string_or_none(data.get("source_ref")),
+    )
+
+
+def write_provider_usage_capture_artifact(
+    path: Path,
+    capture: ProviderUsageCapture,
+    *,
+    created_by: str = "harness",
+    source_event: str | None = None,
+) -> dict[str, Any]:
+    payload = capture.to_dict()
+    content = yaml.safe_dump(payload, sort_keys=False).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.read_bytes() != content:
+            raise ProtocolError(f"Immutable provider usage artifact differs: {path}")
+    else:
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(content)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    digest = sha256_file(path)
+    if digest != hashlib.sha256(content).hexdigest():
+        raise ProtocolError(f"Provider usage artifact hash verification failed: {path}")
+    artifact_id_suffix = capture.result_id or capture.session_id
+    artifact: dict[str, Any] = {
+        "artifact_id": f"artifact-{artifact_id_suffix}-provider-usage",
+        "path": str(path),
+        "sha256": digest,
+        "created_by": created_by,
+        "mutable": False,
+        "artifact_type": "provider_usage_capture",
+    }
+    if source_event is not None:
+        artifact["source_event"] = source_event
+    return artifact
+
+
+def _validate_provider_usage_capture_usage(usage: dict[str, Any]) -> None:
+    allowed_fields = {
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "reasoning_output_tokens",
+        "cost_usd",
+        "cost_source",
+        "cost_confidence",
+        "usage_confidence",
+    }
+    unknown_fields = sorted(set(usage) - allowed_fields)
+    if unknown_fields:
+        raise ProtocolError(
+            "Provider usage capture usage contains unknown fields: "
+            + ", ".join(unknown_fields)
+        )
+    for field in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "reasoning_output_tokens",
+    ):
+        value = usage.get(field)
+        if value is not None and (not isinstance(value, int) or value < 0):
+            raise ProtocolError(f"Provider usage capture {field} must be a non-negative integer")
+    cost_usd = usage.get("cost_usd")
+    if cost_usd is not None and (
+        not isinstance(cost_usd, (int, float))
+        or isinstance(cost_usd, bool)
+        or float(cost_usd) < 0
+    ):
+        raise ProtocolError("Provider usage capture cost_usd must be non-negative when present")
+    for field in ("cost_source", "cost_confidence", "usage_confidence"):
+        value = usage.get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ProtocolError(f"Provider usage capture {field} must be a non-empty string when present")
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
+    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+        derived_total = input_tokens + output_tokens
+        if total_tokens is None:
+            usage["total_tokens"] = derived_total
+        elif total_tokens != derived_total:
+            raise ProtocolError("Provider usage capture total_tokens must equal input_tokens + output_tokens")
+
+
+def _join_upstream_url(base_url: str, request_path: str) -> str:
+    if request_path.startswith(("http://", "https://")):
+        return request_path
+    return urllib_parse.urljoin(f"{base_url.rstrip('/')}/", request_path.lstrip("/"))
+
+
+def _extract_openai_compatible_usage_capture(payload: dict[str, Any]) -> dict[str, Any] | None:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    normalized_usage: dict[str, Any] = {}
+    input_tokens = usage.get("input_tokens")
+    if not isinstance(input_tokens, int):
+        input_tokens = usage.get("prompt_tokens")
+    if isinstance(input_tokens, int):
+        normalized_usage["input_tokens"] = input_tokens
+
+    output_tokens = usage.get("output_tokens")
+    if not isinstance(output_tokens, int):
+        output_tokens = usage.get("completion_tokens")
+    if isinstance(output_tokens, int):
+        normalized_usage["output_tokens"] = output_tokens
+
+    total_tokens = usage.get("total_tokens")
+    if isinstance(total_tokens, int):
+        normalized_usage["total_tokens"] = total_tokens
+
+    input_details = usage.get("input_tokens_details")
+    if not isinstance(input_details, dict):
+        input_details = usage.get("prompt_tokens_details")
+    cached_input_tokens = (
+        input_details.get("cached_tokens") if isinstance(input_details, dict) else None
+    )
+    if isinstance(cached_input_tokens, int):
+        normalized_usage["cached_input_tokens"] = cached_input_tokens
+
+    output_details = usage.get("output_tokens_details")
+    if not isinstance(output_details, dict):
+        output_details = usage.get("completion_tokens_details")
+    reasoning_output_tokens = (
+        output_details.get("reasoning_tokens") if isinstance(output_details, dict) else None
+    )
+    if isinstance(reasoning_output_tokens, int):
+        normalized_usage["reasoning_output_tokens"] = reasoning_output_tokens
+
+    if not normalized_usage:
+        return None
+    normalized_usage["usage_confidence"] = "high"
+    _validate_provider_usage_capture_usage(normalized_usage)
+
+    model = _string_or_none(payload.get("model"))
+    if model is None:
+        return None
+    source_ref = _string_or_none(payload.get("id"))
+    return {"model": model, "usage": normalized_usage, "source_ref": source_ref}
+
+
+def _retarget_binding_base_url(binding: Any, base_url: str) -> Any:
+    overrides = dict(getattr(binding, "codex_config_overrides", {}))
+    if binding.provider_id == "openai":
+        overrides["openai_base_url"] = base_url
+    else:
+        for key in list(overrides):
+            if key.endswith(".base_url"):
+                overrides[key] = base_url
+    return replace(binding, base_url=base_url, codex_config_overrides=overrides)
+
+
+def _build_provider_usage_capture_from_proxy(
+    telemetry_capture: dict[str, Any] | None,
+    *,
+    assignment_id: str,
+    session_id: str,
+    agent_id: str,
+    result_id: str,
+    collected_at: str,
+) -> ProviderUsageCapture | None:
+    if not isinstance(telemetry_capture, dict):
+        return None
+    usage = telemetry_capture.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    _validate_provider_usage_capture_usage(usage)
+    provider = _string_or_none(telemetry_capture.get("provider"))
+    model = _string_or_none(telemetry_capture.get("model"))
+    if provider is None or model is None:
+        return None
+    return ProviderUsageCapture(
+        assignment_id=assignment_id,
+        session_id=session_id,
+        agent_id=agent_id,
+        provider=provider,
+        model=model,
+        collected_at=collected_at,
+        usage=dict(usage),
+        result_id=result_id,
+        source_ref=_string_or_none(telemetry_capture.get("source_ref")),
+    )
+
+
+def _merge_provider_usage_into_outcome_metrics(
+    outcome_metrics: dict[str, Any],
+    capture: ProviderUsageCapture | None,
+) -> dict[str, Any]:
+    if capture is None:
+        return dict(outcome_metrics)
+    merged = dict(outcome_metrics)
+    usage = capture.usage
+    for field in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "reasoning_output_tokens",
+        "cost_usd",
+        "usage_source",
+        "usage_confidence",
+        "cost_source",
+        "cost_confidence",
+    ):
+        if field in usage:
+            merged[field] = usage[field]
+    merged["usage_source"] = "provider_attributed"
+    if (
+        "usage_confidence" not in usage
+        and any(field in usage for field in ("input_tokens", "output_tokens", "total_tokens"))
+    ):
+        merged["usage_confidence"] = "high"
+    if "cost_usd" in usage:
+        merged.setdefault("cost_source", "provider_attributed")
+        merged.setdefault("cost_confidence", "high")
+    if (
+        "total_tokens" not in merged
+        and isinstance(merged.get("input_tokens"), int)
+        and isinstance(merged.get("output_tokens"), int)
+    ):
+        merged["total_tokens"] = merged["input_tokens"] + merged["output_tokens"]
+    return merged
 
 
 def _load_session_spec(data: dict[str, Any]) -> SessionSpec:
@@ -937,6 +1614,11 @@ def package_session_result(
     packaged_result_id = result_id or base.result_id
     source_event = f"event-{packaged_result_id}"
     package_root, workspace_root = _packaging_roots(record, artifact_root)
+    provider_capture = _load_provider_usage_capture_for_record(record, result_id=packaged_result_id)
+    packaged_outcome_metrics = _merge_provider_usage_into_outcome_metrics(
+        base.outcome_metrics,
+        provider_capture,
+    )
     artifacts: list[dict[str, Any]] = []
     for index, artifact in enumerate(base.artifacts or record.artifacts, start=1):
         normalized = _normalize_packaged_artifact(
@@ -949,6 +1631,15 @@ def package_session_result(
         )
         if normalized is not None:
             artifacts.append(normalized)
+    provider_usage_artifact = _package_provider_usage_capture(
+        record,
+        base,
+        package_root=package_root,
+        workspace_root=workspace_root,
+        source_event=source_event,
+    )
+    if provider_usage_artifact is not None:
+        artifacts.append(provider_usage_artifact)
     native_log_refs = _package_native_log_refs(
         record,
         package_root,
@@ -965,11 +1656,12 @@ def package_session_result(
         effective_provider=base.effective_provider,
         emitted_events=list(base.emitted_events),
         artifacts=artifacts,
-        outcome_metrics=dict(base.outcome_metrics),
+        outcome_metrics=packaged_outcome_metrics,
         verification=dict(base.verification),
         native_log_refs=native_log_refs,
         mutation_proposal_refs=list(base.mutation_proposal_refs),
         review_status=base.review_status,
+        control_intents=list(base.control_intents),
     )
 
 
@@ -1138,6 +1830,7 @@ def _run_shell_dummy_session(
                 extraction.get("mutation_proposal_refs")
             ),
             review_status=_string_or_none(extraction.get("review_status")),
+            control_intents=_list_value(extraction.get("control_intents")),
         )
         result_proposal = result.to_dict()
 
@@ -1184,28 +1877,38 @@ def _run_codex_cli_session(
         provider_api_key_env=spec.provider_api_key_env,
         provider_wire_api=spec.provider_wire_api,
     )
-    env = _build_codex_environment(binding)
-    codex_home = _prepare_codex_home(workspace, binding, env)
-    command = _build_codex_command(spec, binding, workdir)
-    prompt = _render_codex_assignment_prompt(
-        assignment,
-        dispatch_packet=dispatch_packet,
-        context_resolution=context_resolution,
-    )
-
+    telemetry_proxy: _OpenAICompatibleTelemetryProxy | None = None
+    telemetry_capture: dict[str, Any] | None = None
     try:
+        if binding.provider_id == "openai-compatible" and binding.base_url:
+            telemetry_proxy = _OpenAICompatibleTelemetryProxy(binding.base_url)
+            binding = _retarget_binding_base_url(binding, telemetry_proxy.base_url)
+        env = _build_codex_environment(binding)
+        codex_home = _prepare_codex_home(workspace, binding, env)
+        command = _build_codex_command(spec, binding, workdir)
+        prompt = _render_codex_assignment_prompt(
+            assignment,
+            dispatch_packet=dispatch_packet,
+            context_resolution=context_resolution,
+        )
+
         try:
-            completed = _run_command_runner(
-                command_runner,
-                command,
-                cwd=workdir,
-                env=env,
-                timeout=spec.timeout_seconds,
-                input_text=prompt,
-                process_controller=process_controller,
-            )
+            try:
+                completed = _run_command_runner(
+                    command_runner,
+                    command,
+                    cwd=workdir,
+                    env=env,
+                    timeout=spec.timeout_seconds,
+                    input_text=prompt,
+                    process_controller=process_controller,
+                )
+            finally:
+                _cleanup_codex_home(codex_home)
         finally:
-            _cleanup_codex_home(codex_home)
+            if telemetry_proxy is not None:
+                telemetry_capture = telemetry_proxy.snapshot()
+                telemetry_proxy.close()
     except subprocess.TimeoutExpired as exc:
         finished_at = _now()
         native_logs = _persist_native_logs(workspace, exc.stdout or "", exc.stderr or "")
@@ -1292,6 +1995,7 @@ def _run_codex_cli_session(
         "verification",
         "native_log_refs",
         "mutation_proposal_refs",
+        "control_intents",
         "context_request",
     ):
         if field in codex_extraction:
@@ -1303,8 +2007,23 @@ def _run_codex_cli_session(
     if completed.returncode == 0:
         result_status = _string_or_none(codex_extraction.get("result_status")) or "completed"
         review_status = _string_or_none(codex_extraction.get("review_status"))
+        result_id = f"result-{spec.session_id}"
+        provider_capture = _build_provider_usage_capture_from_proxy(
+            telemetry_capture,
+            assignment_id=assignment.assignment_id,
+            session_id=spec.session_id,
+            agent_id=spec.agent_id,
+            result_id=result_id,
+            collected_at=finished_at,
+        )
+        outcome_metrics = _merge_provider_usage_into_outcome_metrics(
+            outcome_metrics,
+            provider_capture,
+        )
+        extraction["outcome_metrics"] = outcome_metrics
+        extraction["missing_fields"] = _missing_usage_fields(outcome_metrics)
         result_proposal = ResultProposal(
-            result_id=f"result-{spec.session_id}",
+            result_id=result_id,
             assignment_id=assignment.assignment_id,
             agent_id=spec.agent_id,
             status=result_status,
@@ -1322,7 +2041,11 @@ def _run_codex_cli_session(
                 codex_extraction.get("mutation_proposal_refs")
             ),
             review_status=review_status,
+            control_intents=_list_value(codex_extraction.get("control_intents")),
         ).to_dict()
+        if provider_capture is not None:
+            extraction["provider_usage_capture"] = provider_capture.to_dict()
+            extraction["parsed_fields"].append("provider_usage_capture")
 
     return SessionRecord(
         session_id=spec.session_id,
@@ -1391,12 +2114,12 @@ def _render_codex_assignment_prompt(
                 "## Output Contract",
                 "Return a YAML object as your final answer.",
                 "Required fields:",
-                "- status: completed | blocked | completed_with_proposal | context_requested",
+                "- status: completed | blocked | context_requested",
                 "- emitted_events: list of workflow events you actually satisfied",
                 "- verification: object with at least status",
                 "Optional fields:",
                 "- review_status",
-                "- mutation_proposal_refs",
+                "- control_intents: omit or use the single workflow_mutation intent defined above",
                 "- artifacts",
                 "When status is context_requested, include exactly one context_request object.",
                 "Use plain YAML scalars only. Do not use markdown backticks or code fences inside values.",
@@ -1510,6 +2233,11 @@ def _extract_structured_output(
         extraction["mutation_proposal_refs"] = mutation_proposal_refs
         extraction["parsed_fields"].append("mutation_proposal_refs")
 
+    control_intents = _list_or_none(payload.get("control_intents"))
+    if control_intents is not None:
+        extraction["control_intents"] = control_intents
+        extraction["parsed_fields"].append("control_intents")
+
     context_request = payload.get("context_request")
     if isinstance(context_request, dict):
         extraction["context_request"] = dict(context_request)
@@ -1533,6 +2261,7 @@ def _extract_structured_output(
         "output_tokens",
         "total_tokens",
         "cost_usd",
+        "usage_source",
         "cost_source",
         "cost_confidence",
         "usage_confidence",
@@ -1556,6 +2285,11 @@ def _extract_structured_output(
         output_tokens = outcome_metrics.get("output_tokens")
         if isinstance(input_tokens, int) and isinstance(output_tokens, int):
             outcome_metrics["total_tokens"] = input_tokens + output_tokens
+    if (
+        "usage_source" not in outcome_metrics
+        and any(field in outcome_metrics for field in ("input_tokens", "output_tokens", "total_tokens"))
+    ):
+        outcome_metrics["usage_source"] = "agent_reported"
 
     if patch is not None and not extraction["diff_refs"]:
         extraction["diff_refs"] = [
@@ -1733,6 +2467,7 @@ def _base_outcome_metrics(wall_time_ms: int) -> dict[str, Any]:
     return {
         "wall_time_ms": wall_time_ms,
         "changed_files_count": 0,
+        "usage_source": "unavailable",
         "usage_confidence": "none",
         "cost_source": "agent_not_supported",
         "cost_confidence": "none",
@@ -2261,6 +2996,7 @@ def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
             extraction["parsed_fields"].append("usage.reasoning_output_tokens")
 
     if "input_tokens" in metrics or "output_tokens" in metrics:
+        metrics["usage_source"] = "agent_reported"
         metrics["usage_confidence"] = "high"
     extraction["native_event_stream_observed"] = native_event_stream_observed
     extraction["native_tool_events"] = native_tool_events
@@ -2284,6 +3020,7 @@ def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
                 "verification",
                 "native_log_refs",
                 "mutation_proposal_refs",
+                "control_intents",
                 "context_request",
             ):
                 if field in structured:
@@ -2458,7 +3195,7 @@ def _normalize_packaged_artifact(
     if recorded_hash is not None and recorded_hash != actual_hash:
         raise ProtocolError(f"Session artifact hash does not match file contents: {relative_path}")
 
-    return {
+    normalized = {
         "artifact_id": _string_or_none(artifact.get("artifact_id")) or fallback_id,
         "path": relative_path,
         "sha256": actual_hash,
@@ -2466,6 +3203,10 @@ def _normalize_packaged_artifact(
         "source_event": source_event,
         "mutable": False,
     }
+    artifact_type = _string_or_none(artifact.get("artifact_type"))
+    if artifact_type is not None:
+        normalized["artifact_type"] = artifact_type
+    return normalized
 
 
 def _package_native_log_refs(
@@ -2495,6 +3236,52 @@ def _package_native_log_refs(
             }
         )
     return refs
+
+
+def _package_provider_usage_capture(
+    record: SessionRecord,
+    result: ResultProposal,
+    *,
+    package_root: Path,
+    workspace_root: Path,
+    source_event: str,
+) -> dict[str, Any] | None:
+    capture = _load_provider_usage_capture_for_record(record, result_id=result.result_id)
+    if capture is None:
+        return None
+    artifact_path = (
+        package_root / "artifacts" / "provider-usage" / f"{result.result_id}.provider-usage.yaml"
+    )
+    written = write_provider_usage_capture_artifact(
+        artifact_path,
+        capture,
+        created_by="harness",
+        source_event=source_event,
+    )
+    return _normalize_packaged_artifact(
+        written,
+        package_root=package_root,
+        workspace_root=workspace_root,
+        source_event=source_event,
+        created_by="harness",
+        fallback_id=written["artifact_id"],
+    )
+
+
+def _load_provider_usage_capture_for_record(
+    record: SessionRecord,
+    *,
+    result_id: str,
+) -> ProviderUsageCapture | None:
+    capture_data = record.extraction.get("provider_usage_capture")
+    if not isinstance(capture_data, dict):
+        return None
+    capture = load_provider_usage_capture(capture_data)
+    if capture.assignment_id != record.assignment_id or capture.session_id != record.session_id:
+        raise ProtocolError("Provider usage capture does not match the session being packaged")
+    if capture.result_id != result_id:
+        capture = replace(capture, result_id=result_id)
+    return capture
 
 
 def _resolve_artifact_path(
@@ -2593,6 +3380,10 @@ def _mapping_list_or_none(value: Any) -> list[dict[str, Any]] | None:
     return None
 
 
+def _list_or_none(value: Any) -> list[Any] | None:
+    return value if isinstance(value, list) else None
+
+
 def _mapping_value(value: Any, default: dict[str, Any] | None = None) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -2601,3 +3392,7 @@ def _mapping_value(value: Any, default: dict[str, Any] | None = None) -> dict[st
 
 def _mapping_list_value(value: Any) -> list[dict[str, Any]]:
     return value if isinstance(value, list) and all(isinstance(item, dict) for item in value) else []
+
+
+def _list_value(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []

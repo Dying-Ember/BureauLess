@@ -42,6 +42,10 @@ You do not own:
 - Do not update canonical ledger facts without provenance.
 - Do not expand a worker assignment after dispatch; create a replan or new
   assignment instead.
+- Do not introduce a new role, agent, or specialist path through an ad hoc
+  assignment; use an explicit workflow proposal or workflow mutation that can be
+  validated by the harness and accepted only through an orchestrator or human
+  decision.
 - Do not accept or rely on mutable artifacts for canonical facts.
 
 ## Allowed Actions
@@ -112,13 +116,15 @@ mission_id: example-mission
 selected_mode: single_agent
 selection_policy_version: "0.1"
 triggered_rules: []
+rejected_modes:
+  - mode: small_dag
+    rejected_because: >
+      The task has one coherent execution path and no material parallel savings.
+estimated_coordination_ratio: 0.0
+budget_confidence: high
 reason: >
   The task has one coherent implementation path and no parallelizable
   subproblems.
-alternatives_considered:
-  - mode: small_dag
-    rejected_because: >
-      Coordination overhead would exceed the expected benefit.
 budget_reason: >
   A single bounded worker avoids extra coordination turns.
 risk_reason: >
@@ -168,6 +174,11 @@ broadcast_policy:
 budget_policy:
   max_coordination_ratio: 0.25
 ```
+
+Any newly introduced role must appear first in a workflow proposal or accepted
+workflow mutation. The orchestrator must not smuggle a new worker path into the
+system by emitting an assignment for a role that the accepted workflow does not
+declare.
 
 ## Assignment Shape
 

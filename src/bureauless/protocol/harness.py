@@ -16,7 +16,7 @@ VALID_MISSION_MODES = {
     "parallel_swarm",
     "stop_and_ask_human",
 }
-SUPPORTED_LEDGER_VERSIONS = {1, 2}
+SUPPORTED_LEDGER_VERSIONS = {1, 2, 3}
 STRICT_ACCEPTANCE_LEDGER_VERSION = 2
 
 

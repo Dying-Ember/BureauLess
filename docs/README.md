@@ -38,12 +38,16 @@ acceptance criteria.
   completed artifact/protocol milestone for node outcomes, bounded context
   delivery, orchestrator decision artifacts, and advisor outcome learning.
 - [`tasks/runtime_harness_milestone_3_5_tasklist.md`](tasks/runtime_harness_milestone_3_5_tasklist.md):
-  planned remediation milestone that makes M2/M3 artifacts authoritative in the
-  real-agent execution path.
+  completed remediation milestone that makes M2/M3 artifacts authoritative in
+  the real-agent execution path.
 - [`tasks/runtime_harness_milestone_4_tasklist.md`](tasks/runtime_harness_milestone_4_tasklist.md):
   completed runtime milestone for universal inert mutation intents, trusted
   proposal intake, retry control, workflow versions, linear temporal replay,
   and history APIs.
+- [`tasks/runtime_harness_milestone_5_tasklist.md`](tasks/runtime_harness_milestone_5_tasklist.md):
+  completed runtime milestone for provider-side telemetry capture, usage
+  attribution, and backtest-ready metrics on the maintained OpenAI-compatible
+  path, with generic multi-agent telemetry still explicitly out of scope.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):

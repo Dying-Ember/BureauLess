@@ -1,11 +1,14 @@
 from pathlib import Path
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import shutil
 import subprocess
+import threading
 import time
+from urllib import request as urllib_request
 
 import pytest
 import yaml
@@ -26,6 +29,7 @@ from bureauless.cli.main import (
     run_advisor_policy_demo,
     run_live_demo,
 )
+from bureauless.application.mutation_retry_demo import run_mutation_retry_demo
 from bureauless.core import ProtocolError
 from bureauless.application.acceptance import (
     decide_staged_result,
@@ -77,23 +81,33 @@ from bureauless.protocol.harness import (
     load_mission,
     load_workflow,
 )
-from bureauless.protocol.mutations import validate_workflow_mutation_proposal
+from bureauless.protocol.mutations import (
+    build_trusted_workflow_mutation_proposal,
+    validate_workflow_mutation_intent,
+    validate_workflow_mutation_proposal,
+)
+from bureauless.protocol.results import intake_result_mutation_intent
 from bureauless.protocol.outcomes import build_node_outcome_decision_event
 from bureauless.runtime import (
     build_mutation_supersession_events,
     evaluate_advisor_policy,
     evaluate_assignment_impacts,
     evaluate_gatekeeper,
+    project_workflow_versions,
     replay_workflow,
     run_advisor_invocation,
     summarize_advisor_scores,
     summarize_metrics,
 )
 from bureauless.runtime.sessions import (
+    ProviderUsageCapture,
+    SessionRecord,
+    apply_retry_policy,
     assess_workspace_isolation,
     build_assignment_created_event,
     build_session_terminal_event,
     cancel_session_record,
+    classify_session_failure,
     create_session_spec,
     dispatch_session,
     import_session_record,
@@ -103,6 +117,8 @@ from bureauless.runtime.sessions import (
     run_session,
     start_dispatch_session,
     supersede_session_record,
+    load_provider_usage_capture,
+    write_provider_usage_capture_artifact,
 )
 
 
@@ -285,6 +301,87 @@ def _mutation_proposal(overrides: dict | None = None) -> dict:
     return data
 
 
+def _mutation_intent(overrides: dict | None = None) -> dict:
+    proposal = _mutation_proposal()
+    data = {
+        "intent_type": proposal["proposal_type"],
+        "reason": proposal["reason"],
+        "rationale": proposal["rationale"],
+        "proposed_changes": proposal["proposed_changes"],
+        "evidence_refs": proposal["evidence_refs"],
+    }
+    if overrides:
+        data.update(overrides)
+    return data
+
+
+def _mutation_session_record(
+    tmp_path: Path,
+    assignment,
+    intent: object,
+    *,
+    session_id: str = "session-001",
+):
+    workdir = tmp_path / session_id
+    workdir.mkdir(parents=True)
+    payload = yaml.safe_dump(
+        {
+            "status": "blocked",
+            "emitted_events": [],
+            "verification": {"status": "workflow_structure"},
+            "control_intents": [intent],
+        },
+        sort_keys=False,
+    ).strip()
+    return run_session(
+        create_session_spec(
+            assignment=assignment,
+            agent_id="shell-dummy",
+            workdir=workdir,
+            shell_command=f"cat <<'EOF'\n{payload}\nEOF",
+            session_id=session_id,
+        ),
+        assignment,
+    )
+
+
+def _retry_record(
+    assignment_id: str,
+    *,
+    status: str = "failed",
+    reason: str = "deterministic_failure",
+    verification_status: str | None = None,
+    control_intents: list[dict] | None = None,
+    extraction_status: str = "extracted",
+    total_tokens: int = 1000,
+) -> SessionRecord:
+    result = None
+    if verification_status is not None or control_intents:
+        result = {
+            "status": "blocked",
+            "verification": {"status": verification_status or "not_run"},
+            "control_intents": control_intents or [],
+            "effective_model": "gpt-5",
+            "effective_provider": "openai",
+        }
+    return SessionRecord(
+        session_id=f"session-{assignment_id}",
+        assignment_id=assignment_id,
+        agent_id="codex-cli",
+        status=status,
+        started_at="2026-07-03T00:00:00+00:00",
+        finished_at="2026-07-03T00:00:01+00:00",
+        exit={"code": 1, "reason": reason},
+        native_logs={"stdout": "", "stderr": reason},
+        diff_refs=[],
+        artifacts=[],
+        workspace={},
+        outcome_metrics={"total_tokens": total_tokens},
+        extraction={"status": extraction_status, "warnings": []},
+        result_proposal=result,
+    )
+
+
 def _empty_ledger() -> Ledger:
     return Ledger.from_dict(
         {
@@ -422,6 +519,215 @@ def _mutation_proposed_event() -> dict:
     }
 
 
+def _multi_version_replay_history() -> tuple[Workflow, Ledger, dict[str, str]]:
+    initial = Workflow.from_dict(
+        {
+            "workflow_id": "test-workflow",
+            "mission_id": "demo",
+            "mode": "small_dag",
+            "roles": {
+                "worker": {
+                    "can_emit": ["ready", "done"],
+                    "can_consume": ["ready", "done"],
+                },
+            },
+            "events": {
+                "ready": {"producer_roles": ["worker"]},
+                "done": {"producer_roles": ["worker"]},
+            },
+            "nodes": [
+                {
+                    "id": "start",
+                    "role": "worker",
+                    "waits_for": [],
+                    "emits": ["ready"],
+                },
+                {
+                    "id": "finish",
+                    "role": "worker",
+                    "waits_for": [],
+                    "emits": ["done"],
+                },
+            ],
+            "gates": [],
+            "terminal_events": ["done"],
+        }
+    )
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    cursors: dict[str, str] = {}
+
+    finish_assignment = export_assignment(
+        initial, ledger, "finish", assignment_id="assign-finish-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            initial,
+            finish_assignment,
+            "session-finish-001",
+            "codex-cli",
+        ),
+        initial,
+    )
+    cursors["finish_assignment"] = ledger.event_log[-1]["event_id"]
+
+    first_changes = {
+        "add_nodes": [
+            {
+                "id": "verify",
+                "role": "worker",
+                "waits_for": [],
+                "emits": ["ready"],
+            }
+        ],
+        "add_edges": [{"from_node": "verify", "to_node": "finish", "event": "ready"}],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    first_proposal = {
+        **_mutation_proposed_event(),
+        "mutation_proposal": _mutation_proposal(
+            {
+                "proposed_changes": first_changes,
+                "evidence_refs": ["artifact-verify-gap"],
+            }
+        ),
+    }
+    ledger = append_ledger_event(ledger, first_proposal, initial)
+    cursors["proposal_one"] = ledger.event_log[-1]["event_id"]
+    first_acceptance = {
+        "event_id": "event-mutation-accepted-001",
+        "event_type": "workflow_mutation_accepted",
+        "mission_id": initial.mission_id,
+        "workflow_id": initial.workflow_id,
+        "source_event_id": first_proposal["event_id"],
+        "actor": "orchestrator",
+        "applied_changes": first_changes,
+    }
+    ledger = append_ledger_event(ledger, first_acceptance, initial)
+    cursors["acceptance_one"] = ledger.event_log[-1]["event_id"]
+
+    first_workflow = materialize_current_workflow(initial, ledger)
+    first_impacts = evaluate_assignment_impacts(
+        initial, first_workflow, ledger, first_changes
+    )
+    for event in build_mutation_supersession_events(
+        first_workflow, first_acceptance, first_impacts
+    ):
+        ledger = append_ledger_event(ledger, event, first_workflow)
+    cursors["first_supersession"] = ledger.event_log[-1]["event_id"]
+
+    rejected_changes = {
+        "add_nodes": [
+            {
+                "id": "shadow",
+                "role": "worker",
+                "waits_for": [],
+                "emits": ["ready"],
+            }
+        ],
+        "add_edges": [{"from_node": "shadow", "to_node": "finish", "event": "ready"}],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    rejected_proposal = {
+        **_mutation_proposed_event(),
+        "event_id": "event-mutation-002",
+        "mutation_proposal": _mutation_proposal(
+            {
+                "proposal_id": "mutation-002",
+                "proposed_changes": rejected_changes,
+                "evidence_refs": ["artifact-shadow-rejected"],
+            }
+        ),
+    }
+    ledger = append_ledger_event(ledger, rejected_proposal, initial)
+    cursors["proposal_two"] = ledger.event_log[-1]["event_id"]
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-rejected-002",
+            "event_type": "workflow_mutation_rejected",
+            "mission_id": initial.mission_id,
+            "workflow_id": initial.workflow_id,
+            "source_event_id": rejected_proposal["event_id"],
+            "actor": "human",
+            "reason": "No second structural change is needed.",
+        },
+        initial,
+    )
+    cursors["rejection_two"] = ledger.event_log[-1]["event_id"]
+
+    verify_assignment = export_assignment(
+        initial, ledger, "verify", assignment_id="assign-verify-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            first_workflow,
+            verify_assignment,
+            "session-verify-001",
+            "codex-cli",
+        ),
+        first_workflow,
+    )
+    cursors["verify_assignment"] = ledger.event_log[-1]["event_id"]
+
+    second_changes = {
+        "add_nodes": [
+            {
+                "id": "audit",
+                "role": "worker",
+                "waits_for": [],
+                "emits": ["ready"],
+            }
+        ],
+        "add_edges": [{"from_node": "audit", "to_node": "verify", "event": "ready"}],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    second_proposal = {
+        **_mutation_proposed_event(),
+        "event_id": "event-mutation-003",
+        "mutation_proposal": _mutation_proposal(
+            {
+                "proposal_id": "mutation-003",
+                "source": {
+                    "assignment_id": "assign-verify-001",
+                    "session_id": "session-verify-001",
+                    "actor": "worker",
+                },
+                "proposed_changes": second_changes,
+                "evidence_refs": ["artifact-audit-gap"],
+            }
+        ),
+    }
+    ledger = append_ledger_event(ledger, second_proposal, initial)
+    cursors["proposal_three"] = ledger.event_log[-1]["event_id"]
+    second_acceptance = {
+        "event_id": "event-mutation-accepted-003",
+        "event_type": "workflow_mutation_accepted",
+        "mission_id": initial.mission_id,
+        "workflow_id": initial.workflow_id,
+        "source_event_id": second_proposal["event_id"],
+        "actor": "orchestrator",
+        "applied_changes": second_changes,
+    }
+    ledger = append_ledger_event(ledger, second_acceptance, initial)
+    cursors["acceptance_three"] = ledger.event_log[-1]["event_id"]
+
+    second_workflow = materialize_current_workflow(initial, ledger)
+    second_impacts = evaluate_assignment_impacts(
+        first_workflow, second_workflow, ledger, second_changes
+    )
+    for event in build_mutation_supersession_events(
+        second_workflow, second_acceptance, second_impacts
+    ):
+        ledger = append_ledger_event(ledger, event, second_workflow)
+    cursors["second_supersession"] = ledger.event_log[-1]["event_id"]
+    return initial, ledger, cursors
+
+
 def test_validates_inert_workflow_mutation_proposal() -> None:
     workflow = _workflow()
     original_nodes = list(workflow.nodes)
@@ -438,6 +744,121 @@ def test_validates_inert_workflow_mutation_proposal() -> None:
         "waits_for"
     ] == ["implement.patch_ready"]
     assert list(workflow.nodes) == original_nodes
+
+
+def test_validates_minimal_worker_mutation_intent() -> None:
+    result = validate_workflow_mutation_intent(_mutation_intent())
+
+    assert result.ok
+    assert result.intent is not None
+    assert result.intent.intent_type == "workflow_mutation"
+    assert result.intent.proposed_changes.add_edges[0].event_ref == (
+        "verify.review_approved"
+    )
+
+
+def test_rejects_worker_spoofing_trusted_mutation_fields() -> None:
+    intent = _mutation_intent(
+        {
+            "proposal_id": "proposal-worker-chosen",
+            "workflow_id": "workflow-worker-chosen",
+            "base_workflow_version_id": "workflow:v9999",
+            "requires_approval": "worker",
+            "source": {"agent_id": "forged-agent"},
+        }
+    )
+
+    result = validate_workflow_mutation_intent(intent)
+
+    assert not result.ok
+    assert result.intent is None
+    assert {error.path for error in result.errors} == {
+        "intent.base_workflow_version_id",
+        "intent.proposal_id",
+        "intent.requires_approval",
+        "intent.source",
+        "intent.workflow_id",
+    }
+
+
+def test_rejects_semantically_invalid_mutation_intent_with_structured_errors() -> None:
+    intent = _mutation_intent(
+        {
+            "reason": "worker_chosen_reason",
+            "proposed_changes": {
+                "add_nodes": [],
+                "add_edges": [],
+                "remove_edges": [],
+                "supersede_assignments": [],
+            },
+        }
+    )
+
+    result = validate_workflow_mutation_intent(intent)
+
+    assert not result.ok
+    assert {(error.code, error.path) for error in result.errors} == {
+        ("empty_mutation", "proposed_changes"),
+        ("invalid_mutation_reason", "reason"),
+    }
+
+
+def test_builds_deterministic_runtime_owned_mutation_envelope() -> None:
+    kwargs = {
+        "workflow_id": "test-workflow",
+        "assignment_id": "assign-001",
+        "session_id": "session-001",
+        "agent_id": "codex-cli",
+        "source_result_event_id": "event-result-001",
+        "assignment_workflow_version_id": "test-workflow:v0002-abc123",
+        "current_workflow_version_id": "test-workflow:v0002-abc123",
+        "requires_approval": "orchestrator",
+    }
+
+    first = build_trusted_workflow_mutation_proposal(_mutation_intent(), **kwargs)
+    second = build_trusted_workflow_mutation_proposal(_mutation_intent(), **kwargs)
+
+    assert first.ok
+    assert first.proposal == second.proposal
+    assert first.proposal is not None
+    assert first.proposal.proposal_id.startswith("proposal-")
+    assert first.proposal.base_workflow_version_id == (
+        "test-workflow:v0002-abc123"
+    )
+    assert first.proposal.source.to_dict() == {
+        "assignment_id": "assign-001",
+        "session_id": "session-001",
+        "agent_id": "codex-cli",
+        "actor": "worker",
+    }
+    changed_source = build_trusted_workflow_mutation_proposal(
+        _mutation_intent(),
+        **{**kwargs, "source_result_event_id": "event-result-002"},
+    )
+    assert changed_source.proposal is not None
+    assert changed_source.proposal.proposal_id != first.proposal.proposal_id
+
+
+def test_rejects_stale_mutation_envelope_without_ledger_side_effects() -> None:
+    ledger = _empty_ledger()
+    original_events = list(ledger.event_log)
+
+    result = build_trusted_workflow_mutation_proposal(
+        _mutation_intent(),
+        workflow_id="test-workflow",
+        assignment_id="assign-001",
+        session_id="session-001",
+        agent_id="codex-cli",
+        source_result_event_id="event-result-001",
+        assignment_workflow_version_id="test-workflow:v0001-old",
+        current_workflow_version_id="test-workflow:v0002-current",
+        requires_approval="orchestrator",
+    )
+
+    assert result.status == "stale"
+    assert result.proposal is None
+    assert [error.code for error in result.errors] == ["stale_workflow_version"]
+    assert ledger.event_log == original_events
 
 
 def test_prepares_isolated_mutation_e2e_demo(tmp_path) -> None:
@@ -673,6 +1094,288 @@ def test_imports_completed_result_with_mutation_proposal_ref_without_applying_it
     assert workflow.nodes.keys() == _workflow().nodes.keys()
 
 
+@pytest.mark.parametrize("status", ["completed", "blocked"])
+def test_imports_result_with_independent_mutation_control_intent(status: str) -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    result = load_result_proposal(
+        {
+            "result_id": f"result-{status}",
+            "assignment_id": "assign-001",
+            "agent_id": "worker-001",
+            "status": status,
+            "emitted_events": [],
+            "artifacts": [],
+            "control_intents": [_mutation_intent()],
+            "outcome_metrics": {
+                "wall_time_ms": 10,
+                "changed_files_count": 0,
+            },
+        }
+    )
+
+    updated = import_result_proposal(workflow, ledger, assignment, result)
+
+    assert updated.event_log[0]["event_type"] == "result_submitted"
+    assert updated.event_log[0]["result"]["status"] == status
+    assert updated.event_log[0]["result"]["control_intents"] == [
+        _mutation_intent()
+    ]
+    assert "mutation_proposal_refs" in updated.event_log[0]["result"]
+
+
+def test_preserves_valid_execution_result_with_malformed_control_intent() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    malformed_intent = {"intent_type": "workflow_mutation", "proposal_id": "forged"}
+    result = load_result_proposal(
+        {
+            "result_id": "result-malformed-intent",
+            "assignment_id": "assign-001",
+            "agent_id": "worker-001",
+            "status": "completed",
+            "emitted_events": [],
+            "control_intents": [malformed_intent],
+            "outcome_metrics": {
+                "wall_time_ms": 10,
+                "changed_files_count": 0,
+            },
+        }
+    )
+
+    updated = import_result_proposal(workflow, ledger, assignment, result)
+    intent_result = validate_workflow_mutation_intent(result.control_intents[0])
+
+    assert updated.event_log[0]["result"]["control_intents"] == [malformed_intent]
+    assert not intent_result.ok
+    assert not any(
+        event["event_type"] == "workflow_mutation_proposed"
+        for event in updated.event_log
+    )
+
+
+def test_rejects_multiple_or_mixed_result_control_intents() -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    multiple = load_result_proposal(
+        {
+            "result_id": "result-multiple-intents",
+            "assignment_id": "assign-001",
+            "agent_id": "worker-001",
+            "status": "completed",
+            "control_intents": [_mutation_intent(), _mutation_intent()],
+            "outcome_metrics": {
+                "wall_time_ms": 10,
+                "changed_files_count": 0,
+            },
+        }
+    )
+    mixed = replace(
+        multiple,
+        result_id="result-mixed-intents",
+        status="completed_with_proposal",
+        control_intents=[_mutation_intent()],
+        mutation_proposal_refs=["artifact-mutation-001"],
+    )
+
+    with pytest.raises(ProtocolError, match="at most one control intent"):
+        import_result_proposal(workflow, ledger, assignment, multiple)
+    with pytest.raises(ProtocolError, match="completed or blocked"):
+        import_result_proposal(workflow, ledger, assignment, mixed)
+
+
+def test_registers_idempotent_session_mutation_intake_and_recovers_orphan(
+    tmp_path,
+) -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow, assignment, "session-001", "shell-dummy"
+        ),
+        workflow,
+    )
+    record = _mutation_session_record(tmp_path, assignment, _mutation_intent())
+
+    staged = stage_session_record(
+        workflow, ledger, assignment, record, artifact_root=tmp_path
+    )
+
+    assert [event["event_type"] for event in staged.ledger.event_log] == [
+        "assignment_created",
+        "result_submitted",
+        "workflow_mutation_proposed",
+    ]
+    assert staged.mutation_intake_disposition is not None
+    assert staged.mutation_intake_disposition["status"] == "registered"
+    proposal_event = staged.ledger.event_log[-1]
+    assert proposal_event["source_event_id"] == staged.result_event_id
+    canonical_intent = validate_workflow_mutation_intent(_mutation_intent()).intent
+    assert canonical_intent is not None
+    assert proposal_event["mutation_proposal"]["intent"] == canonical_intent.to_dict()
+    proposal_path = tmp_path / proposal_event["proposal_artifact"]["path"]
+    assert sha256_file(proposal_path) == proposal_event["proposal_artifact"]["sha256"]
+    assert replay_workflow(workflow, staged.ledger).mutation_proposals[
+        proposal_event["event_id"]
+    ].state == "pending"
+    assert materialize_current_workflow(workflow, staged.ledger) == workflow
+
+    accepted = append_ledger_event(
+        staged.ledger,
+        {
+            "event_id": "event-accept-runtime-proposal",
+            "event_type": "workflow_mutation_accepted",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "source_event_id": proposal_event["event_id"],
+            "actor": "orchestrator",
+            "applied_changes": canonical_intent.proposed_changes.to_dict(),
+        },
+        workflow,
+    )
+    assert "verify" in materialize_current_workflow(workflow, accepted).nodes
+
+    duplicate = intake_result_mutation_intent(
+        workflow,
+        staged.ledger,
+        assignment,
+        staged.result,
+        session_id=record.session_id,
+        artifact_root=tmp_path,
+    )
+    assert duplicate is not None
+    assert duplicate.disposition["status"] == "duplicate"
+    assert duplicate.ledger.event_log == staged.ledger.event_log
+
+    orphaned = replace(staged.ledger, event_log=staged.ledger.event_log[:-1])
+    recovered = intake_result_mutation_intent(
+        workflow,
+        orphaned,
+        assignment,
+        staged.result,
+        session_id=record.session_id,
+        artifact_root=tmp_path,
+    )
+    assert recovered is not None
+    assert recovered.disposition["status"] == "registered"
+    assert recovered.ledger.event_log[-1]["event_id"] == proposal_event["event_id"]
+
+    proposal_path.unlink()
+    with pytest.raises(ProtocolError, match="artifact is missing"):
+        intake_result_mutation_intent(
+            workflow,
+            staged.ledger,
+            assignment,
+            staged.result,
+            session_id=record.session_id,
+            artifact_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("intent", "expected_status"),
+    [
+        ({"intent_type": "workflow_mutation", "proposal_id": "forged"}, "invalid"),
+        (
+            _mutation_intent(
+                {
+                    "proposed_changes": {
+                        "remove_nodes": ["review"],
+                    }
+                }
+            ),
+            "unsupported",
+        ),
+    ],
+)
+def test_records_failed_mutation_intake_without_proposal_event(
+    tmp_path, intent, expected_status
+) -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow, assignment, "session-001", "shell-dummy"
+        ),
+        workflow,
+    )
+    record = _mutation_session_record(tmp_path, assignment, intent)
+
+    staged = stage_session_record(
+        workflow, ledger, assignment, record, artifact_root=tmp_path
+    )
+
+    assert [event["event_type"] for event in staged.ledger.event_log] == [
+        "assignment_created",
+        "result_submitted"
+    ]
+    assert staged.mutation_intake_disposition is not None
+    assert staged.mutation_intake_disposition["status"] == expected_status
+    disposition_path = tmp_path / staged.mutation_intake_disposition["artifact_path"]
+    assert disposition_path.is_file()
+
+
+def test_records_stale_mutation_intake_without_proposal_event(tmp_path) -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow, assignment, "session-001", "shell-dummy"
+        ),
+        workflow,
+    )
+    proposed = append_ledger_event(ledger, _mutation_proposed_event(), workflow)
+    changed = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "applied_changes": {
+                "supersede_assignments": ["assign-review-001"]
+            },
+        },
+        workflow,
+    )
+    record = _mutation_session_record(tmp_path, assignment, _mutation_intent())
+
+    staged = stage_session_record(
+        workflow, changed, assignment, record, artifact_root=tmp_path
+    )
+
+    assert staged.mutation_intake_disposition is not None
+    assert staged.mutation_intake_disposition["status"] == "stale"
+    assert staged.ledger.event_log[-1]["event_type"] == "result_submitted"
+    assert sum(
+        event["event_type"] == "workflow_mutation_proposed"
+        for event in staged.ledger.event_log
+    ) == 1
+
+
 def test_rejects_invalid_result_mutation_proposal_ref_contract() -> None:
     workflow = _workflow()
     ledger = _empty_ledger()
@@ -848,6 +1551,214 @@ def test_materializes_current_workflow_from_accepted_mutation() -> None:
     assert current == current_again
     assert list(replay.nodes) == ["start", "finish", "verify"]
     assert replay.nodes["finish"].state == "blocked"
+
+
+def test_projects_deterministic_workflow_versions_across_ledger_events() -> None:
+    initial = _mutation_workflow()
+    changes = {
+        "add_nodes": [
+            {
+                "id": "verify",
+                "role": "producer",
+                "waits_for": [],
+                "emits": ["ready"],
+            }
+        ],
+        "add_edges": [],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    proposal = _mutation_proposal({"proposed_changes": changes})
+    proposal_event = _mutation_proposed_event()
+    proposal_event["mutation_proposal"] = proposal
+    ledger = append_ledger_event(
+        replace(_empty_ledger(), ledger_version=3), proposal_event, initial
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "source_event_id": proposal_event["event_id"],
+            "actor": "orchestrator",
+            "applied_changes": changes,
+        },
+        initial,
+    )
+    rejected_proposal = _mutation_proposed_event()
+    rejected_proposal["event_id"] = "event-mutation-002"
+    rejected_proposal["mutation_proposal"] = {
+        **proposal,
+        "proposal_id": "mutation-002",
+    }
+    ledger = append_ledger_event(ledger, rejected_proposal, initial)
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-rejected-002",
+            "event_type": "workflow_mutation_rejected",
+            "source_event_id": rejected_proposal["event_id"],
+            "actor": "human",
+            "reason": "No second structural change is needed.",
+        },
+        initial,
+    )
+
+    projection = project_workflow_versions(initial, ledger)
+    repeated = project_workflow_versions(initial, ledger)
+    accepted_event = ledger.event_log[1]
+
+    assert projection == repeated
+    assert len(projection.versions) == 2
+    assert projection.initial_version_id.endswith(
+        projection.versions[0].content_hash[:12]
+    )
+    assert accepted_event["workflow_version_before"] == projection.initial_version_id
+    assert accepted_event["workflow_version_after"] == projection.current_version_id
+    assert accepted_event["parent_workflow_version_id"] == projection.initial_version_id
+    assert accepted_event["workflow_hash_before"] == projection.versions[0].content_hash
+    assert accepted_event["workflow_hash_after"] == projection.versions[1].content_hash
+    assert [event.workflow_version_id for event in projection.events] == [
+        projection.initial_version_id,
+        projection.current_version_id,
+        projection.current_version_id,
+        projection.current_version_id,
+    ]
+    assert projection.events[1].workflow_version_before == projection.initial_version_id
+    assert projection.events[1].workflow_version_after == projection.current_version_id
+
+
+def test_rejects_forged_native_v3_workflow_version_transition() -> None:
+    initial = _mutation_workflow()
+    changes = {
+        "add_nodes": [
+            {
+                "id": "verify",
+                "role": "producer",
+                "waits_for": [],
+                "emits": ["ready"],
+            }
+        ],
+        "add_edges": [],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    proposal_event = _mutation_proposed_event()
+    proposal_event["mutation_proposal"] = _mutation_proposal(
+        {"proposed_changes": changes}
+    )
+    ledger = append_ledger_event(
+        replace(_empty_ledger(), ledger_version=3), proposal_event, initial
+    )
+
+    with pytest.raises(ProtocolError, match="does not match derived transition"):
+        append_ledger_event(
+            ledger,
+            {
+                "event_id": "event-mutation-accepted-forged",
+                "event_type": "workflow_mutation_accepted",
+                "source_event_id": proposal_event["event_id"],
+                "actor": "orchestrator",
+                "applied_changes": changes,
+                "workflow_version_before": "test-workflow:v9999:forged",
+            },
+            initial,
+        )
+
+
+def test_replays_inclusive_event_prefix_without_future_state_leakage() -> None:
+    initial = _mutation_workflow()
+    changes = {
+        "add_nodes": [
+            {
+                "id": "verify",
+                "role": "producer",
+                "waits_for": [],
+                "emits": ["ready"],
+            }
+        ],
+        "add_edges": [],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    proposal_event = _mutation_proposed_event()
+    proposal_event["mutation_proposal"] = _mutation_proposal(
+        {"proposed_changes": changes}
+    )
+    ledger = append_ledger_event(
+        replace(_empty_ledger(), ledger_version=3), proposal_event, initial
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "source_event_id": proposal_event["event_id"],
+            "actor": "orchestrator",
+            "applied_changes": changes,
+        },
+        initial,
+    )
+    current_workflow = materialize_current_workflow(initial, ledger)
+    assignment = export_assignment(
+        initial, ledger, "verify", assignment_id="assign-verify-history"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            current_workflow,
+            assignment,
+            "session-verify-history",
+            "codex-cli",
+        ),
+        current_workflow,
+    )
+
+    at_proposal = replay_workflow(
+        initial, ledger, through_event_id=proposal_event["event_id"]
+    )
+    at_acceptance = replay_workflow(
+        initial, ledger, through_event_id="event-mutation-accepted-001"
+    )
+    at_acceptance_by_ordinal = replay_workflow(
+        initial, ledger, through_event_ordinal=1
+    )
+    current = replay_workflow(initial, ledger)
+    at_final = replay_workflow(
+        initial, ledger, through_event_id=ledger.event_log[-1]["event_id"]
+    )
+    gatekeeper_at_acceptance = evaluate_gatekeeper(
+        initial, ledger, through_event_ordinal=1
+    )
+
+    assert "verify" not in at_proposal.nodes
+    assert at_proposal.mutation_proposals[proposal_event["event_id"]].state == "pending"
+    assert at_acceptance == at_acceptance_by_ordinal
+    assert at_acceptance.workflow_version_id != at_proposal.workflow_version_id
+    assert at_acceptance.nodes["verify"].state == "runnable"
+    assert at_acceptance.nodes["verify"].assignment_attempts == []
+    assert gatekeeper_at_acceptance.decisions["verify"].state == "runnable"
+    assert current.nodes["verify"].state == "blocked"
+    assert current.nodes["verify"].assignment_attempts[0].state == "in_flight"
+    assert at_final == current
+
+
+def test_rejects_unknown_or_ambiguous_historical_cursor() -> None:
+    ledger = append_ledger_event(
+        _empty_ledger(), _mutation_proposed_event(), _workflow()
+    )
+
+    with pytest.raises(ProtocolError, match="Unknown through_event_id"):
+        replay_workflow(_workflow(), ledger, through_event_id="event-missing")
+    with pytest.raises(ProtocolError, match="Unknown through_event_ordinal"):
+        replay_workflow(_workflow(), ledger, through_event_ordinal=4)
+    with pytest.raises(ProtocolError, match="either through_event_id"):
+        replay_workflow(
+            _workflow(),
+            ledger,
+            through_event_id="event-mutation-001",
+            through_event_ordinal=0,
+        )
 
 
 def test_rejected_mutation_does_not_change_current_workflow() -> None:
@@ -1065,6 +1976,16 @@ def test_mutation_supersession_preserves_history_but_revokes_old_success() -> No
     ledger = append_ledger_event(
         ledger,
         {
+            "event_id": "event-assign-X",
+            "event_type": "assignment_created",
+            "assignment_id": "assign-X",
+            "node_id": "X",
+        },
+        before,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
             "event_id": "event-D-done",
             "event_type": "d_done",
             "assignment_id": "assign-D",
@@ -1114,11 +2035,32 @@ def test_mutation_supersession_preserves_history_but_revokes_old_success() -> No
     supersession_events = build_mutation_supersession_events(
         current, accepted_event, impacts
     )
+    before_mutation = replay_workflow(
+        before, ledger, through_event_id="event-D-done"
+    )
+    at_acceptance = replay_workflow(
+        before, ledger, through_event_id="event-mutation-accepted-001"
+    )
+    gatekeeper_at_acceptance = evaluate_gatekeeper(
+        before, ledger, through_event_id="event-mutation-accepted-001"
+    )
 
     assert len(supersession_events) == 1
     assert supersession_events[0]["assignment_id"] == "assign-D"
     assert supersession_events[0]["mutation_event_id"] == (
         "event-mutation-accepted-001"
+    )
+    assert before_mutation.assignment_validity["assign-D"].status == "unaffected"
+    assert at_acceptance.assignment_validity["assign-D"].status == "affected"
+    assert at_acceptance.assignment_validity["assign-D"].transition_event_id == (
+        "event-mutation-accepted-001"
+    )
+    assert at_acceptance.assignment_validity["assign-X"].status == "unaffected"
+    assert gatekeeper_at_acceptance.decisions["D"].blocked_reasons[0].code == (
+        "superseded"
+    )
+    assert gatekeeper_at_acceptance.decisions["D"].blocked_reasons[0].assignment_id == (
+        "assign-D"
     )
     ledger = append_ledger_event(ledger, supersession_events[0], current)
     replay = replay_workflow(before, ledger)
@@ -2698,6 +3640,38 @@ def test_load_ledger_rebuilds_projection_when_cursor_missing(tmp_path) -> None:
     assert loaded.projection["accepted_workspace_ref"] == "workspace:abc123"
 
 
+def test_loads_writable_runtime_m4_ledger_v3(tmp_path) -> None:
+    ledger_path = tmp_path / "ledger.yaml"
+    write_ledger(ledger_path, replace(_empty_ledger(), ledger_version=3))
+
+    loaded = load_ledger(ledger_path)
+
+    assert loaded.ledger_version == 3
+
+
+def test_runs_maintained_mutation_and_retry_demo(tmp_path) -> None:
+    report = run_mutation_retry_demo(tmp_path / "rm4-demo")
+    ledger = load_ledger(Path(report["artifacts"]["ledger_path"]))
+
+    assert report["status"] == "passed"
+    assert report["mode"] == "deterministic-fixture"
+    assert all(check["passed"] for check in report["checks"].values())
+    assert report["checks"]["deterministic_circuit"]["agent_turns_spent"] == 0
+    assert any(
+        event.get("event_type") == "workflow_mutation_accepted"
+        for event in ledger.event_log
+    )
+    assert any(
+        event.get("event_type") == "assignment_circuit_opened"
+        for event in ledger.event_log
+    )
+
+
+def test_real_agent_mutation_demo_requires_explicit_binding(tmp_path) -> None:
+    with pytest.raises(ProtocolError, match="requires --target-model"):
+        run_mutation_retry_demo(tmp_path / "rm4-real-demo", real_agent=True)
+
+
 def test_appends_valid_workflow_event() -> None:
     workflow = _workflow()
     ledger = Ledger.from_dict(
@@ -2964,6 +3938,182 @@ def test_replay_is_deterministic_and_explains_expired_gate() -> None:
             "gate_id": "commit_gate",
         }
     ]
+
+
+def test_replay_tracks_multi_version_history_across_accept_reject_and_supersession() -> None:
+    initial, ledger, cursors = _multi_version_replay_history()
+
+    at_first_proposal = replay_workflow(
+        initial, ledger, through_event_id=cursors["proposal_one"]
+    )
+    at_first_acceptance = replay_workflow(
+        initial, ledger, through_event_id=cursors["acceptance_one"]
+    )
+    at_second_rejection = replay_workflow(
+        initial, ledger, through_event_id=cursors["rejection_two"]
+    )
+    at_second_acceptance = replay_workflow(
+        initial, ledger, through_event_id=cursors["acceptance_three"]
+    )
+    current = replay_workflow(initial, ledger)
+    current_again = replay_workflow(initial, ledger)
+    at_final = replay_workflow(
+        initial, ledger, through_event_id=ledger.event_log[-1]["event_id"]
+    )
+
+    assert at_first_proposal.workflow_version_id == at_first_proposal.assignment_validity[
+        "assign-finish-001"
+    ].active_version_id
+    assert "verify" not in at_first_proposal.nodes
+    assert at_first_proposal.mutation_proposals[cursors["proposal_one"]].state == "pending"
+
+    assert set(at_first_acceptance.nodes) == {"start", "finish", "verify"}
+    assert at_first_acceptance.nodes["verify"].state == "runnable"
+    assert at_first_acceptance.assignment_validity["assign-finish-001"].status == (
+        "affected"
+    )
+
+    assert at_second_rejection.workflow_version_id == at_first_acceptance.workflow_version_id
+    assert at_second_rejection.mutation_proposals[cursors["proposal_two"]].state == (
+        "rejected"
+    )
+    assert set(at_second_rejection.nodes) == {"start", "finish", "verify"}
+
+    assert set(at_second_acceptance.nodes) == {"start", "finish", "verify", "audit"}
+    assert at_second_acceptance.workflow_version_id != at_second_rejection.workflow_version_id
+    assert at_second_acceptance.assignment_validity["assign-verify-001"].status == (
+        "affected"
+    )
+    assert at_second_acceptance.assignment_validity["assign-verify-001"].transition_event_id == (
+        cursors["acceptance_three"]
+    )
+    assert at_second_acceptance.nodes["audit"].state == "runnable"
+
+    assert current == current_again
+    assert at_final == current
+    assert current.nodes["verify"].assignment_attempts[0].state == "superseded"
+    assert current.nodes["finish"].blocked_reasons[0].code == "superseded"
+
+
+def test_stale_mutation_intake_preserves_workflow_version_projection(tmp_path) -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow, assignment, "session-001", "shell-dummy"
+        ),
+        workflow,
+    )
+    proposed = append_ledger_event(ledger, _mutation_proposed_event(), workflow)
+    changed = append_ledger_event(
+        proposed,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "mission_id": workflow.mission_id,
+            "workflow_id": workflow.workflow_id,
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "applied_changes": {
+                "supersede_assignments": ["assign-review-001"]
+            },
+        },
+        workflow,
+    )
+    record = _mutation_session_record(tmp_path, assignment, _mutation_intent())
+
+    before = replay_workflow(workflow, changed)
+    before_projection = project_workflow_versions(workflow, changed)
+    staged = stage_session_record(
+        workflow, changed, assignment, record, artifact_root=tmp_path
+    )
+    after = replay_workflow(workflow, staged.ledger)
+    after_projection = project_workflow_versions(workflow, staged.ledger)
+    at_result_submission = replay_workflow(
+        workflow,
+        staged.ledger,
+        through_event_id=staged.ledger.event_log[-1]["event_id"],
+    )
+
+    assert staged.mutation_intake_disposition is not None
+    assert staged.mutation_intake_disposition["status"] == "stale"
+    assert staged.ledger.event_log[-1]["event_type"] == "result_submitted"
+    assert sum(
+        event["event_type"] == "workflow_mutation_proposed"
+        for event in staged.ledger.event_log
+    ) == 1
+    assert before.workflow_version_id == after.workflow_version_id
+    assert before_projection.versions == after_projection.versions
+    assert before_projection.current_version_id == after_projection.current_version_id
+    assert [event.workflow_version_id for event in after_projection.events[:-1]] == [
+        event.workflow_version_id for event in before_projection.events
+    ]
+    assert after_projection.events[-1].workflow_version_id == (
+        before_projection.current_version_id
+    )
+    assert after == at_result_submission
+
+
+def test_prefix_replay_synthetic_ledger_baseline_is_deterministic() -> None:
+    initial, ledger, _ = _multi_version_replay_history()
+    current_workflow = materialize_current_workflow(initial, ledger)
+    for index in range(24):
+        assignment_id = f"assign-audit-{index:03d}"
+        assignment = export_assignment(
+            initial,
+            ledger,
+            "audit",
+            assignment_id=assignment_id,
+            force=True,
+        )
+        ledger = append_ledger_event(
+            ledger,
+            build_assignment_created_event(
+                current_workflow,
+                assignment,
+                f"session-audit-{index:03d}",
+                "codex-cli",
+            ),
+            current_workflow,
+        )
+        ledger = append_ledger_event(
+            ledger,
+                {
+                    "event_id": f"event-audit-timeout-{index:03d}",
+                    "event_type": "worker_timeout",
+                    "assignment_id": assignment_id,
+                    "node_id": "audit",
+                    "role": "worker",
+                },
+                current_workflow,
+            )
+
+    sample_ordinals = list(range(0, len(ledger.event_log), 5))
+    started = time.perf_counter()
+    first_pass = [
+        replay_workflow(initial, ledger, through_event_ordinal=ordinal).to_dict()
+        for ordinal in sample_ordinals
+    ]
+    second_pass = [
+        replay_workflow(initial, ledger, through_event_ordinal=ordinal).to_dict()
+        for ordinal in sample_ordinals
+    ]
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    current = replay_workflow(initial, ledger).to_dict()
+    at_final = replay_workflow(
+        initial,
+        ledger,
+        through_event_id=ledger.event_log[-1]["event_id"],
+    ).to_dict()
+
+    assert len(ledger.event_log) == 59
+    assert first_pass == second_pass
+    assert current == at_final
+    assert elapsed_ms < 250.0
 
 
 def test_gatekeeper_supports_any_of_waits() -> None:
@@ -3266,7 +4416,24 @@ def test_exports_assignment_only_for_runnable_node() -> None:
     assert assignment.assignment_id == "assign-001"
     assert assignment.expected_events == ["patch_ready"]
     assert "update_canonical_ledger" in assignment.forbidden_actions
-    assert "patch_ready" in render_assignment_prompt(assignment)
+    assert assignment.visible_context["workflow_version_id"].startswith(
+        "test-workflow:v0000:"
+    )
+    structure = assignment.visible_context["workflow_structure"]
+    assert structure["events"] == [
+        "commit_created",
+        "patch_ready",
+        "review_approved",
+    ]
+    assert structure["active_assignments"] == [
+        {"assignment_id": "assign-001", "node_id": "implement"}
+    ]
+    prompt = render_assignment_prompt(assignment)
+    assert "patch_ready" in prompt
+    assert "## Structural Escape Hatch" in prompt
+    assert "intent_type: workflow_mutation" in prompt
+    assert "Do not choose proposal IDs" in prompt
+    assert "mutation_proposal_refs" not in prompt
     assert load_assignment(assignment.to_dict()) == assignment
 
     try:
@@ -6117,6 +7284,9 @@ def test_shell_dummy_extracts_structured_native_output(tmp_path) -> None:
             "patch": "--- a/src/app.py\n+++ b/src/app.py\n",
             "verification": {"status": "passed"},
             "native_log_refs": [{"kind": "stdout", "path": "logs/stdout.txt"}],
+            "control_intents": [
+                {"intent_type": "workflow_mutation", "proposal_id": "forged"}
+            ],
             "artifacts": [
                 {
                     "artifact_id": "artifact-001",
@@ -6155,6 +7325,9 @@ def test_shell_dummy_extracts_structured_native_output(tmp_path) -> None:
     assert record.result_proposal["effective_provider"] == "openai"
     assert record.result_proposal["review_status"] == "not_required"
     assert record.result_proposal["emitted_events"] == ["patch_ready"]
+    assert record.result_proposal["control_intents"] == [
+        {"intent_type": "workflow_mutation", "proposal_id": "forged"}
+    ]
     assert record.outcome_metrics["input_tokens"] == 120
     assert record.outcome_metrics["output_tokens"] == 80
     assert record.outcome_metrics["total_tokens"] == 200
@@ -6641,6 +7814,491 @@ def test_codex_session_extracts_usage_from_jsonl(tmp_path, monkeypatch) -> None:
     assert not Path(record.workspace["session_root"]).joinpath("codex-home").exists()
 
 
+def test_provider_usage_capture_round_trips_and_writes_immutable_artifact(tmp_path) -> None:
+    capture = ProviderUsageCapture(
+        assignment_id="assign-001",
+        session_id="session-001",
+        result_id="result-001",
+        agent_id="codex-cli",
+        provider="openai-compatible",
+        model="gpt-5.4",
+        collected_at="2026-07-10T00:00:00Z",
+        source_ref="responses/resp_123",
+        usage={
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "cached_input_tokens": 10,
+            "reasoning_output_tokens": 4,
+            "cost_usd": 0.012,
+            "cost_source": "provider_attributed",
+            "cost_confidence": "high",
+            "usage_confidence": "high",
+        },
+    )
+
+    artifact_path = tmp_path / "artifacts" / "usage" / "provider-usage.yaml"
+    artifact = write_provider_usage_capture_artifact(
+        artifact_path,
+        capture,
+        source_event="event-result-001",
+    )
+
+    stored = yaml.safe_load(artifact_path.read_text(encoding="utf-8"))
+    loaded = load_provider_usage_capture(stored)
+
+    assert loaded.usage["total_tokens"] == 150
+    assert loaded.usage["cached_input_tokens"] == 10
+    assert artifact["artifact_type"] == "provider_usage_capture"
+    assert artifact["source_event"] == "event-result-001"
+    assert artifact["sha256"] == sha256_file(artifact_path)
+
+
+def test_provider_usage_capture_rejects_unknown_or_inconsistent_usage_fields() -> None:
+    with pytest.raises(ProtocolError, match="unknown fields"):
+        load_provider_usage_capture(
+            {
+                "artifact_type": "provider_usage_capture",
+                "assignment_id": "assign-001",
+                "session_id": "session-001",
+                "agent_id": "codex-cli",
+                "provider": "openai-compatible",
+                "model": "gpt-5.4",
+                "collected_at": "2026-07-10T00:00:00Z",
+                "source": "provider_usage_capture_v1",
+                "usage": {"prompt_tokens": 120},
+            }
+        )
+    with pytest.raises(ProtocolError, match="total_tokens must equal"):
+        load_provider_usage_capture(
+            {
+                "artifact_type": "provider_usage_capture",
+                "assignment_id": "assign-001",
+                "session_id": "session-001",
+                "agent_id": "codex-cli",
+                "provider": "openai-compatible",
+                "model": "gpt-5.4",
+                "collected_at": "2026-07-10T00:00:00Z",
+                "source": "provider_usage_capture_v1",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 999,
+                },
+            }
+        )
+
+
+def test_codex_openai_compatible_session_captures_provider_usage_artifact(
+    tmp_path, monkeypatch
+) -> None:
+    class _ProviderHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            payload = {
+                "id": "resp_test_123",
+                "model": "gpt-5.4",
+                "usage": {
+                    "input_tokens": 120,
+                    "output_tokens": 30,
+                    "input_tokens_details": {"cached_tokens": 20},
+                    "output_tokens_details": {"reasoning_tokens": 5},
+                },
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args) -> None:
+            return
+
+    provider_server = ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
+    provider_thread = threading.Thread(target=provider_server.serve_forever, daemon=True)
+    provider_thread.start()
+    try:
+        source_root = tmp_path / "repo"
+        source_root.mkdir()
+        assignment = export_assignment(
+            _workflow(), _empty_ledger(), "implement", assignment_id="assign-001"
+        )
+        monkeypatch.setenv("TEST_OPENAI_COMPAT_KEY", "test-key")
+        spec = create_session_spec(
+            assignment=assignment,
+            agent_id="codex-cli",
+            workdir=source_root,
+            target_model="gpt-5.4",
+            target_provider="openai-compatible",
+            provider_base_url=f"http://127.0.0.1:{provider_server.server_port}",
+            provider_api_key_env="TEST_OPENAI_COMPAT_KEY",
+            session_id="session-001",
+        )
+        assistant_text = yaml.safe_dump(
+            {
+                "status": "completed",
+                "emitted_events": ["patch_ready"],
+                "verification": {"status": "passed"},
+            },
+            sort_keys=False,
+        ).strip()
+
+        def fake_runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+            proxy_base_url = None
+            for index, value in enumerate(command):
+                if value == "-c" and index + 1 < len(command):
+                    override = command[index + 1]
+                    prefix = "model_providers.bureauless.base_url="
+                    if override.startswith(prefix):
+                        proxy_base_url = override[len(prefix) :].strip('"')
+                        break
+            assert proxy_base_url is not None
+            request = urllib_request.Request(
+                f"{proxy_base_url}/responses",
+                data=json.dumps({"input": "ping"}).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer test-key",
+                },
+                method="POST",
+            )
+            with urllib_request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            assert payload["usage"]["input_tokens"] == 120
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": assistant_text},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1},
+                        }
+                    ),
+                ]
+            )
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        record = run_session(spec, assignment, command_runner=fake_runner)
+        packaged = package_session_result(record, assignment, artifact_root=tmp_path)
+
+        provider_capture = load_provider_usage_capture(record.extraction["provider_usage_capture"])
+        provider_artifact = next(
+            artifact
+            for artifact in packaged.artifacts
+            if artifact.get("artifact_type") == "provider_usage_capture"
+        )
+        stored = yaml.safe_load((tmp_path / provider_artifact["path"]).read_text(encoding="utf-8"))
+
+        assert provider_capture.provider == "openai-compatible"
+        assert provider_capture.model == "gpt-5.4"
+        assert provider_capture.usage["input_tokens"] == 120
+        assert provider_capture.usage["output_tokens"] == 30
+        assert provider_capture.usage["cached_input_tokens"] == 20
+        assert provider_capture.usage["reasoning_output_tokens"] == 5
+        assert provider_capture.usage["usage_confidence"] == "high"
+        assert provider_capture.source_ref == "resp_test_123"
+        assert record.outcome_metrics["input_tokens"] == 120
+        assert record.outcome_metrics["output_tokens"] == 30
+        assert record.outcome_metrics["total_tokens"] == 150
+        assert record.outcome_metrics["cached_input_tokens"] == 20
+        assert record.outcome_metrics["reasoning_output_tokens"] == 5
+        assert record.outcome_metrics["usage_source"] == "provider_attributed"
+        assert provider_artifact["created_by"] == "harness"
+        assert provider_artifact["path"].startswith("artifacts/provider-usage/")
+        assert stored["usage"]["total_tokens"] == 150
+    finally:
+        provider_server.shutdown()
+        provider_server.server_close()
+        provider_thread.join(timeout=1.0)
+
+
+def test_package_session_result_merges_provider_usage_capture_into_result_metrics(tmp_path) -> None:
+    assignment = export_assignment(
+        _workflow(), _empty_ledger(), "implement", assignment_id="assign-001"
+    )
+    record = load_session_record(
+        {
+            "session_id": "session-001",
+            "assignment_id": "assign-001",
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:00:01Z",
+            "exit": {"code": 0, "reason": "completed"},
+            "native_logs": {"stdout": "", "stderr": ""},
+            "diff_refs": [],
+            "artifacts": [],
+            "workspace": {
+                "path": str(tmp_path),
+                "source_root": str(tmp_path),
+                "session_root": str(tmp_path),
+            },
+            "outcome_metrics": {
+                "wall_time_ms": 1000,
+                "changed_files_count": 0,
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_tokens": 3,
+                "usage_confidence": "low",
+            },
+            "extraction": {
+                "status": "native_stream_captured",
+                "provider_usage_capture": {
+                    "artifact_type": "provider_usage_capture",
+                    "assignment_id": "assign-001",
+                    "session_id": "session-001",
+                    "result_id": "result-session-001",
+                    "agent_id": "codex-cli",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4",
+                    "collected_at": "2026-01-01T00:00:01Z",
+                    "source": "provider_usage_capture_v1",
+                    "usage": {
+                        "input_tokens": 120,
+                        "output_tokens": 30,
+                        "cached_input_tokens": 20,
+                        "reasoning_output_tokens": 5,
+                        "usage_confidence": "high",
+                    },
+                },
+            },
+            "result_proposal": {
+                "result_id": "result-session-001",
+                "assignment_id": "assign-001",
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "effective_model": "gpt-5.4",
+                "effective_provider": "openai-compatible",
+                "emitted_events": ["patch_ready"],
+                "artifacts": [],
+                "outcome_metrics": {
+                    "wall_time_ms": 1000,
+                    "changed_files_count": 0,
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3,
+                    "usage_confidence": "low",
+                },
+                "verification": {"status": "passed"},
+                "native_log_refs": [],
+                "mutation_proposal_refs": [],
+            },
+        }
+    )
+
+    packaged = package_session_result(record, assignment, artifact_root=tmp_path)
+
+    assert packaged.outcome_metrics["input_tokens"] == 120
+    assert packaged.outcome_metrics["output_tokens"] == 30
+    assert packaged.outcome_metrics["total_tokens"] == 150
+    assert packaged.outcome_metrics["cached_input_tokens"] == 20
+    assert packaged.outcome_metrics["reasoning_output_tokens"] == 5
+    assert packaged.outcome_metrics["usage_source"] == "provider_attributed"
+    assert packaged.outcome_metrics["usage_confidence"] == "high"
+
+
+def test_metrics_summarize_preserves_provider_attribution_after_result_import(tmp_path) -> None:
+    workflow = _workflow()
+    ledger = _empty_ledger()
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    record = load_session_record(
+        {
+            "session_id": "session-001",
+            "assignment_id": "assign-001",
+            "agent_id": "codex-cli",
+            "status": "completed",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:00:01Z",
+            "exit": {"code": 0, "reason": "completed"},
+            "native_logs": {"stdout": "", "stderr": ""},
+            "diff_refs": [],
+            "artifacts": [],
+            "workspace": {
+                "path": str(tmp_path),
+                "source_root": str(tmp_path),
+                "session_root": str(tmp_path),
+            },
+            "outcome_metrics": {
+                "wall_time_ms": 1000,
+                "changed_files_count": 0,
+                "usage_source": "provider_attributed",
+                "usage_confidence": "high",
+            },
+            "extraction": {
+                "status": "native_stream_captured",
+                "provider_usage_capture": {
+                    "artifact_type": "provider_usage_capture",
+                    "assignment_id": "assign-001",
+                    "session_id": "session-001",
+                    "result_id": "result-session-001",
+                    "agent_id": "codex-cli",
+                    "provider": "openai-compatible",
+                    "model": "gpt-5.4",
+                    "collected_at": "2026-01-01T00:00:01Z",
+                    "source": "provider_usage_capture_v1",
+                    "source_ref": "resp_test_123",
+                    "usage": {
+                        "input_tokens": 120,
+                        "output_tokens": 30,
+                        "cached_input_tokens": 20,
+                        "reasoning_output_tokens": 5,
+                        "cost_usd": 0.012,
+                        "usage_confidence": "high",
+                    },
+                },
+            },
+            "result_proposal": {
+                "result_id": "result-session-001",
+                "assignment_id": "assign-001",
+                "agent_id": "codex-cli",
+                "status": "completed",
+                "effective_model": "gpt-5.4",
+                "effective_provider": "openai-compatible",
+                "emitted_events": ["patch_ready"],
+                "artifacts": [],
+                "outcome_metrics": {
+                    "wall_time_ms": 1000,
+                    "changed_files_count": 0,
+                },
+                "verification": {"status": "passed"},
+                "native_log_refs": [],
+                "mutation_proposal_refs": [],
+            },
+        }
+    )
+
+    packaged = package_session_result(record, assignment, artifact_root=tmp_path)
+    updated = import_result_proposal(workflow, ledger, assignment, packaged)
+    ledger_path = tmp_path / "ledger.yaml"
+    write_ledger(ledger_path, updated)
+
+    summary = summarize_metrics(ledger_path)
+    entry = summary["entries"][0]
+
+    assert entry["usage_source"] == "provider_attributed"
+    assert entry["input_tokens"] == 120
+    assert entry["output_tokens"] == 30
+    assert entry["total_tokens"] == 150
+    assert entry["cached_input_tokens"] == 20
+    assert entry["reasoning_output_tokens"] == 5
+    assert entry["cost_usd"] == 0.012
+    assert entry["provider"] == "openai-compatible"
+
+
+def test_metrics_summarize_distinguishes_provider_agent_and_missing_usage_sources(
+    tmp_path,
+) -> None:
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    fixtures = [
+        (
+            "provider.yaml",
+            {
+                "session_id": "session-provider",
+                "assignment_id": "assign-provider",
+                "agent_id": "codex-cli",
+                "effective_model": "gpt-5.4",
+                "effective_provider": "openai-compatible",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+                "exit": {"code": 0, "reason": "completed"},
+                "native_logs": {"stdout": "", "stderr": ""},
+                "diff_refs": [],
+                "artifacts": [],
+                "outcome_metrics": {
+                    "wall_time_ms": 1000,
+                    "input_tokens": 120,
+                    "output_tokens": 30,
+                    "total_tokens": 150,
+                    "cached_input_tokens": 20,
+                    "reasoning_output_tokens": 5,
+                    "cost_usd": 0.012,
+                    "usage_source": "provider_attributed",
+                    "usage_confidence": "high",
+                    "cost_source": "provider_attributed",
+                    "cost_confidence": "high",
+                    "changed_files_count": 0,
+                },
+                "result_proposal": {},
+            },
+        ),
+        (
+            "agent.yaml",
+            {
+                "session_id": "session-agent",
+                "assignment_id": "assign-agent",
+                "agent_id": "codex-cli",
+                "effective_model": "gpt-5.4",
+                "effective_provider": "openai",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+                "exit": {"code": 0, "reason": "completed"},
+                "native_logs": {"stdout": "", "stderr": ""},
+                "diff_refs": [],
+                "artifacts": [],
+                "outcome_metrics": {
+                    "wall_time_ms": 1000,
+                    "input_tokens": 40,
+                    "output_tokens": 10,
+                    "total_tokens": 50,
+                    "usage_source": "agent_reported",
+                    "usage_confidence": "high",
+                    "changed_files_count": 0,
+                },
+                "result_proposal": {},
+            },
+        ),
+        (
+            "missing.yaml",
+            {
+                "session_id": "session-missing",
+                "assignment_id": "assign-missing",
+                "agent_id": "shell-dummy",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+                "exit": {"code": 0, "reason": "completed"},
+                "native_logs": {"stdout": "", "stderr": ""},
+                "diff_refs": [],
+                "artifacts": [],
+                "outcome_metrics": {
+                    "wall_time_ms": 1000,
+                    "changed_files_count": 0,
+                    "usage_source": "unavailable",
+                    "usage_confidence": "none",
+                },
+                "result_proposal": {},
+            },
+        ),
+    ]
+    for filename, payload in fixtures:
+        (sessions_dir / filename).write_text(
+            yaml.safe_dump(payload, sort_keys=False),
+            encoding="utf-8",
+        )
+
+    summary = summarize_metrics(sessions_dir)
+    by_assignment = {entry["assignment_id"]: entry for entry in summary["entries"]}
+
+    assert by_assignment["assign-provider"]["usage_source"] == "provider_attributed"
+    assert by_assignment["assign-agent"]["usage_source"] == "agent_reported"
+    assert by_assignment["assign-missing"]["usage_source"] == "unavailable"
+    assert summary["observed_budget"]["total_tokens_used"] == 200
+    assert summary["observed_budget"]["missing_usage_count"] == 1
+    assert summary["observed_budget"]["known_cost_usd_total"] == 0.012
+
+
 def test_codex_session_extracts_structured_result_from_assistant_text(
     tmp_path, monkeypatch
 ) -> None:
@@ -6693,6 +8351,8 @@ def test_codex_session_extracts_structured_result_from_assistant_text(
 
     def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         assert "Output Contract" in kwargs["input"]
+        assert "control_intents" in kwargs["input"]
+        assert "mutation_proposal_refs" not in kwargs["input"]
         return subprocess.CompletedProcess(
             args=command,
             returncode=0,
@@ -6706,6 +8366,7 @@ def test_codex_session_extracts_structured_result_from_assistant_text(
     assert record.result_proposal["status"] == "completed"
     assert record.result_proposal["emitted_events"] == ["patch_ready"]
     assert record.result_proposal["verification"] == {"status": "passed"}
+    assert "control_intents" not in record.result_proposal
     assert record.extraction["emitted_events"] == ["patch_ready"]
     assert record.extraction["verification"] == {"status": "passed"}
     assert record.outcome_metrics["input_tokens"] == 100
@@ -6776,6 +8437,61 @@ def test_codex_session_tolerates_backticks_in_structured_assistant_text(
     assert record.result_proposal is not None
     assert record.result_proposal["emitted_events"] == ["patch_ready"]
     assert record.result_proposal["verification"]["status"] == "passed"
+
+
+def test_codex_session_extracts_blocked_mutation_control_intent(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    assignment = export_assignment(
+        _workflow(), _empty_ledger(), "implement", assignment_id="assign-001"
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="codex-cli",
+        workdir=source_root,
+        target_model="gpt-5",
+        target_provider="openai",
+        session_id="session-001",
+    )
+    assistant_text = yaml.safe_dump(
+        {
+            "status": "blocked",
+            "emitted_events": [],
+            "verification": {"status": "workflow_structure"},
+            "control_intents": [_mutation_intent()],
+        },
+        sort_keys=False,
+    ).strip()
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": assistant_text},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"input_tokens": 100, "output_tokens": 20},
+                }
+            ),
+        ]
+    )
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    record = run_session(spec, assignment, command_runner=fake_runner)
+    packaged = package_session_result(record, assignment)
+
+    assert record.extraction["control_intents"] == [_mutation_intent()]
+    assert record.result_proposal is not None
+    assert record.result_proposal["status"] == "blocked"
+    assert packaged.control_intents == [_mutation_intent()]
 
 
 def test_package_session_result_normalizes_artifacts_and_native_logs(tmp_path) -> None:
@@ -7265,6 +8981,198 @@ def test_replay_tracks_superseded_assignment_without_marking_completed() -> None
     assert replay.nodes["implement"].emitted_events == []
 
 
+def test_retry_policy_bounds_transient_recovery_and_opens_circuit() -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow, assignment, "session-001", "codex-cli"
+        ),
+        workflow,
+    )
+
+    first = apply_retry_policy(
+        workflow,
+        ledger,
+        assignment,
+        _retry_record("assign-001", status="timed_out", reason="timeout"),
+    )
+    second_assignment = replace(
+        assignment, assignment_id=first.event["attempt_id"]
+    )
+    second = apply_retry_policy(
+        workflow,
+        first.ledger,
+        second_assignment,
+        _retry_record(second_assignment.assignment_id, status="timed_out", reason="timeout"),
+    )
+    third_assignment = replace(
+        assignment, assignment_id=second.event["attempt_id"]
+    )
+    third = apply_retry_policy(
+        workflow,
+        second.ledger,
+        third_assignment,
+        _retry_record(third_assignment.assignment_id, status="timed_out", reason="timeout"),
+    )
+
+    assert first.action == second.action == "retry_scheduled"
+    assert first.event["attempt_id"] == "assign-001:attempt-002"
+    assert second.event["budget_snapshot"]["tokens_used"] == 2000
+    first_attempts = replay_workflow(workflow, first.ledger).nodes[
+        "implement"
+    ].assignment_attempts
+    assert [attempt.state for attempt in first_attempts] == [
+        "rejected",
+        "retry_scheduled",
+    ]
+    assert not any(
+        reason.code == "assignment_in_flight"
+        for reason in replay_workflow(workflow, first.ledger).nodes[
+            "implement"
+        ].blocked_reasons
+    )
+    assert third.action == "circuit_opened"
+    assert third.event["reason"] == "attempt_budget_exhausted"
+    assert third.event["terminal_state"] == "needs_review"
+    assert evaluate_gatekeeper(workflow, third.ledger).ready == []
+
+
+def test_retry_policy_opens_repeated_deterministic_fingerprint() -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow, assignment, "session-001", "codex-cli"
+        ),
+        workflow,
+    )
+    first = apply_retry_policy(
+        workflow,
+        ledger,
+        assignment,
+        _retry_record("assign-001"),
+        changed_evidence_refs=["artifact-failure"],
+        repair_strategy="repair-v1",
+    )
+    retry_assignment = replace(
+        assignment, assignment_id=first.event["attempt_id"]
+    )
+
+    repeated = apply_retry_policy(
+        workflow,
+        first.ledger,
+        retry_assignment,
+        _retry_record(retry_assignment.assignment_id),
+        changed_evidence_refs=["artifact-failure"],
+        repair_strategy="repair-v1",
+    )
+
+    assert repeated.action == "circuit_opened"
+    assert repeated.event["reason"] == "repeated_deterministic_fingerprint"
+    assert repeated.event["failure_fingerprint"] == first.event["failure_fingerprint"]
+    reasons = replay_workflow(workflow, repeated.ledger).nodes["implement"].blocked_reasons
+    assert any(reason.code == "needs_review" for reason in reasons)
+
+
+def test_retry_policy_requires_repair_or_reroute_evidence() -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow, assignment, "session-001", "codex-cli"
+        ),
+        workflow,
+    )
+
+    denied = apply_retry_policy(
+        workflow,
+        ledger,
+        assignment,
+        _retry_record("assign-001", status="completed", verification_status="failed"),
+    )
+    rerouted = apply_retry_policy(
+        workflow,
+        ledger,
+        assignment,
+        _retry_record("assign-001", reason="capability_model_mismatch"),
+        error_code="capability_model_mismatch",
+        routing_decision_id="routing-002",
+        strategy_id="larger-model",
+    )
+
+    assert denied.event["reason"] == "repair_evidence_or_strategy_missing"
+    assert rerouted.action == "retry_scheduled"
+    assert rerouted.failure_class == "capability_mismatch"
+
+
+def test_retry_policy_stops_structural_failure_and_token_exhaustion() -> None:
+    workflow = _workflow()
+    ledger = replace(_empty_ledger(), ledger_version=3)
+    assignment = export_assignment(
+        workflow, ledger, "implement", assignment_id="assign-001"
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow, assignment, "session-001", "codex-cli"
+        ),
+        workflow,
+    )
+
+    structural = apply_retry_policy(
+        workflow,
+        ledger,
+        assignment,
+        _retry_record(
+            "assign-001",
+            status="completed",
+            verification_status="workflow_structure",
+            control_intents=[_mutation_intent()],
+        ),
+    )
+    exhausted = apply_retry_policy(
+        workflow,
+        ledger,
+        assignment,
+        _retry_record(
+            "assign-001", status="timed_out", reason="timeout", total_tokens=20_000
+        ),
+    )
+
+    assert structural.failure_class == "workflow_structure"
+    assert structural.event["terminal_state"] == "needs_replan"
+    assert exhausted.event["reason"] == "token_budget_exhausted"
+    assert classify_session_failure(
+        _retry_record("assign-001", status="completed", extraction_status="wrapper_failed_to_extract")
+    ) == "malformed_output_contract"
+
+    revised_assignment = replace(assignment, assignment_id="assign-002")
+    revised_ledger = append_ledger_event(
+        structural.ledger,
+        build_assignment_created_event(
+            workflow, revised_assignment, "session-002", "codex-cli"
+        ),
+        workflow,
+    )
+    revised_reasons = replay_workflow(workflow, revised_ledger).nodes[
+        "implement"
+    ].blocked_reasons
+    assert not any(reason.code == "needs_replan" for reason in revised_reasons)
+
+
 def test_cli_session_run_and_cancel(tmp_path, capsys) -> None:
     session_path = tmp_path / "session.yaml"
     mission_path = Path("examples/missions/demo/mission.yaml")
@@ -7675,6 +9583,7 @@ def test_metrics_summarize_session_and_allow_missing_usage(tmp_path) -> None:
 
     assert summary["entries"][0]["agent_id"] == "fake"
     assert summary["entries"][0]["total_tokens"] is None
+    assert summary["entries"][0]["usage_source"] == "unavailable"
     assert summary["entries"][0]["usage_confidence"] == "none"
     assert summary["entries"][0]["cost_source"] == "unknown"
     assert summary["summary"][0]["missing_usage_count"] == 1
@@ -7747,6 +9656,51 @@ def test_metrics_summarize_includes_observed_budget_snapshot(tmp_path) -> None:
     assert summary["observed_budget"]["total_tokens_used"] == 360
     assert summary["observed_budget"]["known_cost_usd_total"] == 0.03
     assert summary["observed_budget"]["observed_coordination_ratio"] == 0.666667
+    assert summary["summary"][0]["cached_input_tokens_total"] == 0
+    assert summary["summary"][0]["reasoning_output_tokens_total"] == 0
+
+
+def test_metrics_summarize_includes_cache_related_provider_usage_fields(tmp_path) -> None:
+    session_path = tmp_path / "session.yaml"
+    session_path.write_text(
+        yaml.safe_dump(
+            {
+                "session_id": "session-001",
+                "assignment_id": "assign-001",
+                "agent_id": "codex-cli",
+                "effective_model": "gpt-5.4",
+                "effective_provider": "openai-compatible",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+                "exit": {"code": 0, "reason": "completed"},
+                "native_logs": {"stdout": "", "stderr": ""},
+                "diff_refs": [],
+                "artifacts": [],
+                "outcome_metrics": {
+                    "wall_time_ms": 1000,
+                    "input_tokens": 120,
+                    "output_tokens": 30,
+                    "total_tokens": 150,
+                    "cached_input_tokens": 20,
+                    "reasoning_output_tokens": 5,
+                    "usage_confidence": "high",
+                    "changed_files_count": 0,
+                },
+                "result_proposal": {},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_metrics(session_path)
+
+    assert summary["entries"][0]["cached_input_tokens"] == 20
+    assert summary["entries"][0]["reasoning_output_tokens"] == 5
+    assert summary["entries"][0]["usage_source"] == "unavailable"
+    assert summary["summary"][0]["cached_input_tokens_total"] == 20
+    assert summary["summary"][0]["reasoning_output_tokens_total"] == 5
 
 
 def test_metrics_summarize_ledger_results(tmp_path) -> None:
@@ -7779,6 +9733,7 @@ def test_metrics_summarize_ledger_results(tmp_path) -> None:
                                 "total_tokens": 42,
                                 "cost_usd": 0.01,
                                 "changed_files_count": 0,
+                                "usage_source": "agent_reported",
                                 "usage_confidence": "high",
                                 "cost_source": "adapter_reported",
                                 "cost_confidence": "high",
@@ -7798,6 +9753,7 @@ def test_metrics_summarize_ledger_results(tmp_path) -> None:
     assert summary["entries"][0]["status"] == "completed"
     assert summary["summary"][0]["completed"] == 1
     assert summary["summary"][0]["total_tokens_total"] == 42
+    assert summary["entries"][0]["usage_source"] == "agent_reported"
     assert summary["entries"][0]["cost_source"] == "adapter_reported"
 
 
@@ -7829,6 +9785,7 @@ def test_cli_metrics_summarize(tmp_path, capsys) -> None:
 
     assert exit_code == 0
     assert payload["entries"][0]["assignment_id"] == "assign-001"
+    assert payload["entries"][0]["usage_source"] == "unavailable"
 
 
 def test_budget_snapshot_estimates_token_cost_and_preserves_unknowns(tmp_path) -> None:

@@ -1,6 +1,7 @@
 from pathlib import Path
 import subprocess
 
+from fastapi.testclient import TestClient
 import yaml
 
 from bureauless.core import ProtocolError, create_run_record, load_dag, write_run_record
@@ -8,6 +9,9 @@ from bureauless.cli.main import run_execution_spine_acceptance, run_live_demo
 from bureauless.application.demo import prepare_demo_workspace
 from bureauless.application.run_bundles import write_run_bundle
 from bureauless.protocol import export_assignment, load_ledger, load_workflow
+from bureauless.protocol.harness import Ledger
+from bureauless.protocol.ledger import append_ledger_event, write_ledger
+from bureauless.protocol.mutations import materialize_current_workflow
 from bureauless.api.server import (
     CreateNodeRequest,
     ContextResolveRequest,
@@ -26,6 +30,8 @@ from bureauless.api.server import (
     state_payload,
     update_review_status,
 )
+from bureauless.runtime import build_mutation_supersession_events, evaluate_assignment_impacts
+from bureauless.runtime.sessions import build_assignment_created_event
 
 
 def _api_endpoints() -> dict[str, object]:
@@ -35,6 +41,387 @@ def _api_endpoints() -> dict[str, object]:
         for route in app.routes
         if getattr(route, "path", "").startswith("/api/")
     }
+
+
+def _write_replay_history_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    workflow_path = tmp_path / "workflow-history.yaml"
+    ledger_path = tmp_path / "ledger-history.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow_id": "workflow-history-test",
+                "mission_id": "demo",
+                "mode": "small_dag",
+                "roles": {
+                    "producer": {"can_emit": ["ready"], "can_consume": []},
+                    "consumer": {"can_emit": ["done"], "can_consume": ["ready"]},
+                },
+                "events": {
+                    "ready": {"producer_roles": ["producer"]},
+                    "done": {"producer_roles": ["consumer"]},
+                },
+                "nodes": [
+                    {"id": "start", "role": "producer", "waits_for": [], "emits": ["ready"]},
+                    {"id": "finish", "role": "consumer", "waits_for": [], "emits": ["done"]},
+                ],
+                "gates": [],
+                "terminal_events": ["done"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    workflow = load_workflow(workflow_path)
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 3,
+            "current_goal": "Trace historical replay",
+            "current_plan_ref": str(workflow_path),
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [],
+        }
+    )
+    before_assignment = export_assignment(
+        workflow,
+        ledger,
+        "finish",
+        assignment_id="assign-finish-001",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            before_assignment,
+            "session-finish-001",
+            "codex-cli",
+        ),
+        workflow,
+    )
+    proposal_changes = {
+        "add_nodes": [
+            {"id": "verify", "role": "producer", "waits_for": [], "emits": ["ready"]}
+        ],
+        "add_edges": [{"from_node": "verify", "to_node": "finish", "event": "ready"}],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-001",
+            "event_type": "workflow_mutation_proposed",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "mutation_proposal": {
+                "proposal_id": "mutation-001",
+                "proposal_type": "workflow_mutation",
+                "workflow_id": workflow.workflow_id,
+                "source": {
+                    "assignment_id": "assign-finish-001",
+                    "session_id": "session-finish-001",
+                    "actor": "worker",
+                },
+                "reason": "discovered_missing_dependency",
+                "rationale": "Finish should wait for verification before completing.",
+                "proposed_changes": proposal_changes,
+                "evidence_refs": ["artifact-verification-gap"],
+                "requires_approval": "orchestrator",
+            },
+        },
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "source_event_id": "event-mutation-001",
+            "actor": "orchestrator",
+            "applied_changes": proposal_changes,
+        },
+        workflow,
+    )
+    current_workflow = materialize_current_workflow(workflow, ledger)
+    impacts = evaluate_assignment_impacts(
+        workflow,
+        current_workflow,
+        ledger,
+        proposal_changes,
+    )
+    for event in build_mutation_supersession_events(
+        current_workflow,
+        ledger.event_log[-1],
+        impacts,
+    ):
+        ledger = append_ledger_event(ledger, event, current_workflow)
+    verify_assignment = export_assignment(
+        workflow,
+        ledger,
+        "verify",
+        assignment_id="assign-verify-001",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            current_workflow,
+            verify_assignment,
+            "session-verify-001",
+            "codex-cli",
+        ),
+        current_workflow,
+    )
+    write_ledger(ledger_path, ledger)
+    return workflow_path, ledger_path
+
+
+def _write_multi_version_replay_history_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    workflow_path = tmp_path / "workflow-history-multiversion.yaml"
+    ledger_path = tmp_path / "ledger-history-multiversion.yaml"
+    workflow_path.write_text(
+        yaml.safe_dump(
+            {
+                "workflow_id": "workflow-history-multiversion-test",
+                "mission_id": "demo",
+                "mode": "small_dag",
+                "roles": {
+                    "worker": {
+                        "can_emit": ["ready", "done"],
+                        "can_consume": ["ready", "done"],
+                    },
+                },
+                "events": {
+                    "ready": {"producer_roles": ["worker"]},
+                    "done": {"producer_roles": ["worker"]},
+                },
+                "nodes": [
+                    {"id": "start", "role": "worker", "waits_for": [], "emits": ["ready"]},
+                    {"id": "finish", "role": "worker", "waits_for": [], "emits": ["done"]},
+                ],
+                "gates": [],
+                "terminal_events": ["done"],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    workflow = load_workflow(workflow_path)
+    ledger = Ledger.from_dict(
+        {
+            "mission_id": "demo",
+            "ledger_version": 3,
+            "current_goal": "Trace multi-version historical replay",
+            "current_plan_ref": str(workflow_path),
+            "public_findings": [],
+            "decisions": [],
+            "risks": [],
+            "artifacts": [],
+            "broadcasts": [],
+            "open_questions": [],
+            "event_log": [],
+        }
+    )
+
+    finish_assignment = export_assignment(
+        workflow,
+        ledger,
+        "finish",
+        assignment_id="assign-finish-001",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            workflow,
+            finish_assignment,
+            "session-finish-001",
+            "codex-cli",
+        ),
+        workflow,
+    )
+
+    first_changes = {
+        "add_nodes": [
+            {"id": "verify", "role": "worker", "waits_for": [], "emits": ["ready"]}
+        ],
+        "add_edges": [{"from_node": "verify", "to_node": "finish", "event": "ready"}],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-001",
+            "event_type": "workflow_mutation_proposed",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "mutation_proposal": {
+                "proposal_id": "mutation-001",
+                "proposal_type": "workflow_mutation",
+                "workflow_id": workflow.workflow_id,
+                "source": {
+                    "assignment_id": "assign-finish-001",
+                    "session_id": "session-finish-001",
+                    "actor": "worker",
+                },
+                "reason": "discovered_missing_dependency",
+                "rationale": "Finish should wait for verification before completing.",
+                "proposed_changes": first_changes,
+                "evidence_refs": ["artifact-verification-gap"],
+                "requires_approval": "orchestrator",
+            },
+        },
+        workflow,
+    )
+    first_accepted = {
+        "event_id": "event-mutation-accepted-001",
+        "event_type": "workflow_mutation_accepted",
+        "mission_id": "demo",
+        "workflow_id": workflow.workflow_id,
+        "source_event_id": "event-mutation-001",
+        "actor": "orchestrator",
+        "applied_changes": first_changes,
+    }
+    ledger = append_ledger_event(ledger, first_accepted, workflow)
+    first_workflow = materialize_current_workflow(workflow, ledger)
+    first_impacts = evaluate_assignment_impacts(
+        workflow,
+        first_workflow,
+        ledger,
+        first_changes,
+    )
+    for event in build_mutation_supersession_events(
+        first_workflow,
+        first_accepted,
+        first_impacts,
+    ):
+        ledger = append_ledger_event(ledger, event, first_workflow)
+
+    verify_assignment = export_assignment(
+        workflow,
+        ledger,
+        "verify",
+        assignment_id="assign-verify-001",
+    )
+    ledger = append_ledger_event(
+        ledger,
+        build_assignment_created_event(
+            first_workflow,
+            verify_assignment,
+            "session-verify-001",
+            "codex-cli",
+        ),
+        first_workflow,
+    )
+
+    rejected_changes = {
+        "add_nodes": [
+            {"id": "shadow", "role": "worker", "waits_for": [], "emits": ["ready"]}
+        ],
+        "add_edges": [{"from_node": "shadow", "to_node": "finish", "event": "ready"}],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-002",
+            "event_type": "workflow_mutation_proposed",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "mutation_proposal": {
+                "proposal_id": "mutation-002",
+                "proposal_type": "workflow_mutation",
+                "workflow_id": workflow.workflow_id,
+                "source": {
+                    "assignment_id": "assign-verify-001",
+                    "session_id": "session-verify-001",
+                    "actor": "worker",
+                },
+                "reason": "discovered_missing_dependency",
+                "rationale": "Rejected shadow step should not create a new version.",
+                "proposed_changes": rejected_changes,
+                "evidence_refs": ["artifact-shadow-rejected"],
+                "requires_approval": "orchestrator",
+            },
+        },
+        workflow,
+    )
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-rejected-002",
+            "event_type": "workflow_mutation_rejected",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "source_event_id": "event-mutation-002",
+            "actor": "human",
+            "reason": "No second structural change is needed.",
+        },
+        workflow,
+    )
+
+    current_workflow = materialize_current_workflow(workflow, ledger)
+    second_changes = {
+        "add_nodes": [
+            {"id": "audit", "role": "worker", "waits_for": [], "emits": ["ready"]}
+        ],
+        "add_edges": [{"from_node": "audit", "to_node": "verify", "event": "ready"}],
+        "remove_edges": [],
+        "supersede_assignments": [],
+    }
+    ledger = append_ledger_event(
+        ledger,
+        {
+            "event_id": "event-mutation-003",
+            "event_type": "workflow_mutation_proposed",
+            "mission_id": "demo",
+            "workflow_id": workflow.workflow_id,
+            "mutation_proposal": {
+                "proposal_id": "mutation-003",
+                "proposal_type": "workflow_mutation",
+                "workflow_id": workflow.workflow_id,
+                "source": {
+                    "assignment_id": "assign-verify-001",
+                    "session_id": "session-verify-001",
+                    "actor": "worker",
+                },
+                "reason": "discovered_missing_dependency",
+                "rationale": "Verification should wait for an audit step.",
+                "proposed_changes": second_changes,
+                "evidence_refs": ["artifact-audit-gap"],
+                "requires_approval": "orchestrator",
+            },
+        },
+        workflow,
+    )
+    accepted = {
+        "event_id": "event-mutation-accepted-003",
+        "event_type": "workflow_mutation_accepted",
+        "mission_id": "demo",
+        "workflow_id": workflow.workflow_id,
+        "source_event_id": "event-mutation-003",
+        "actor": "orchestrator",
+        "applied_changes": second_changes,
+    }
+    ledger = append_ledger_event(ledger, accepted, workflow)
+    updated_workflow = materialize_current_workflow(workflow, ledger)
+    impacts = evaluate_assignment_impacts(
+        current_workflow,
+        updated_workflow,
+        ledger,
+        second_changes,
+    )
+    for event in build_mutation_supersession_events(updated_workflow, accepted, impacts):
+        ledger = append_ledger_event(ledger, event, updated_workflow)
+    write_ledger(ledger_path, ledger)
+    return workflow_path, ledger_path
 
 
 def test_api_dag_reads_yaml_dag() -> None:
@@ -97,6 +484,172 @@ def test_runtime_api_endpoints() -> None:
     assert gatekeeper["ready"] == ["implement"]
     assert any(agent["agent_id"] == "codex-cli" for agent in agents["agents"])
     assert doctor["agent_id"] == "codex-cli"
+
+
+def test_replay_history_api_endpoints(tmp_path: Path) -> None:
+    endpoints = _api_endpoints()
+    workflow_path, ledger_path = _write_replay_history_fixture(tmp_path)
+
+    timeline = endpoints["/api/replay/timeline"](
+        workflow_path=str(workflow_path),
+        ledger_path=str(ledger_path),
+    )
+    snapshot = endpoints["/api/replay/snapshot"](
+        workflow_path=str(workflow_path),
+        ledger_path=str(ledger_path),
+        through_event_id="event-mutation-accepted-001",
+    )
+    diff = endpoints["/api/replay/diff"](
+        workflow_path=str(workflow_path),
+        ledger_path=str(ledger_path),
+        from_event_id="event-mutation-001",
+        to_event_id="event-mutation-accepted-001",
+    )
+
+    accepted_timeline_event = next(
+        event for event in timeline["events"] if event["event_id"] == "event-mutation-accepted-001"
+    )
+    assert accepted_timeline_event["event_ordinal"] == 2
+    assert accepted_timeline_event["version_transition"]["changed"] is True
+    assert (
+        accepted_timeline_event["version_transition"]["workflow_version_before"]
+        != accepted_timeline_event["version_transition"]["workflow_version_after"]
+    )
+
+    assert snapshot["cursor"]["through_event_id"] == "event-mutation-accepted-001"
+    assert snapshot["selected_event"]["event_type"] == "workflow_mutation_accepted"
+    assert [node["id"] for node in snapshot["workflow"]["nodes"]] == [
+        "start",
+        "finish",
+        "verify",
+    ]
+    assert snapshot["replay"]["nodes"]["verify"]["state"] == "runnable"
+    assert snapshot["replay"]["assignment_validity"]["assign-finish-001"]["status"] == (
+        "affected"
+    )
+
+    assert diff["events_between"] == [
+        {
+            "event_ordinal": 2,
+            "event_id": "event-mutation-accepted-001",
+            "event_type": "workflow_mutation_accepted",
+        }
+    ]
+    assert diff["workflow_diff"]["changed"] is True
+    assert [node["id"] for node in diff["workflow_diff"]["nodes_added"]] == ["verify"]
+    assert any(
+        change["assignment_id"] == "assign-finish-001"
+        and change["after"]["status"] == "affected"
+        for change in diff["state_diff"]["assignment_validity_changes"]
+    )
+    assert any(
+        change["node_id"] == "verify"
+        and change["before"] is None
+        and change["after"]["state"] == "runnable"
+        for change in diff["state_diff"]["node_changes"]
+    )
+
+
+def test_replay_history_api_returns_structured_cursor_errors(tmp_path: Path) -> None:
+    workflow_path, ledger_path = _write_replay_history_fixture(tmp_path)
+    client = TestClient(create_app())
+
+    unknown = client.get(
+        "/api/replay/snapshot",
+        params={
+            "workflow_path": str(workflow_path),
+            "ledger_path": str(ledger_path),
+            "through_event_id": "event-missing",
+        },
+    )
+    ambiguous = client.get(
+        "/api/replay/diff",
+        params={
+            "workflow_path": str(workflow_path),
+            "ledger_path": str(ledger_path),
+            "from_event_id": "event-mutation-001",
+            "from_event_ordinal": 1,
+        },
+    )
+    rollback = client.get(
+        "/api/replay/diff",
+        params={
+            "workflow_path": str(workflow_path),
+            "ledger_path": str(ledger_path),
+            "from_event_id": "event-mutation-accepted-001",
+            "to_event_id": "event-mutation-001",
+        },
+    )
+
+    assert unknown.status_code == 400
+    assert unknown.json()["code"] == "unknown_cursor"
+    assert ambiguous.status_code == 400
+    assert ambiguous.json()["code"] == "ambiguous_cursor"
+    assert rollback.status_code == 400
+    assert rollback.json()["code"] == "unsupported_temporal_request"
+
+
+def test_replay_history_api_tracks_multiple_versions_and_rejections(tmp_path: Path) -> None:
+    endpoints = _api_endpoints()
+    workflow_path, ledger_path = _write_multi_version_replay_history_fixture(tmp_path)
+
+    timeline = endpoints["/api/replay/timeline"](
+        workflow_path=str(workflow_path),
+        ledger_path=str(ledger_path),
+    )
+    at_rejection = endpoints["/api/replay/snapshot"](
+        workflow_path=str(workflow_path),
+        ledger_path=str(ledger_path),
+        through_event_id="event-mutation-rejected-002",
+    )
+    at_second_acceptance = endpoints["/api/replay/snapshot"](
+        workflow_path=str(workflow_path),
+        ledger_path=str(ledger_path),
+        through_event_id="event-mutation-accepted-003",
+    )
+    diff = endpoints["/api/replay/diff"](
+        workflow_path=str(workflow_path),
+        ledger_path=str(ledger_path),
+        from_event_id="event-mutation-rejected-002",
+        to_event_id="event-mutation-accepted-003",
+    )
+
+    assert timeline["current_workflow_version_id"] == at_second_acceptance["cursor"][
+        "workflow_version_id"
+    ]
+    assert len(timeline["versions"]) == 3
+    assert [
+        event["event_id"]
+        for event in timeline["events"]
+        if event["version_transition"]["changed"]
+    ] == ["event-mutation-accepted-001", "event-mutation-accepted-003"]
+
+    assert [node["id"] for node in at_rejection["workflow"]["nodes"]] == [
+        "start",
+        "finish",
+        "verify",
+    ]
+    assert at_rejection["replay"]["mutation_proposals"]["event-mutation-002"]["state"] == (
+        "rejected"
+    )
+
+    assert [node["id"] for node in at_second_acceptance["workflow"]["nodes"]] == [
+        "start",
+        "finish",
+        "verify",
+        "audit",
+    ]
+    assert at_second_acceptance["replay"]["assignment_validity"]["assign-verify-001"][
+        "status"
+    ] == "affected"
+
+    assert diff["workflow_diff"]["changed"] is True
+    assert [node["id"] for node in diff["workflow_diff"]["nodes_added"]] == ["audit"]
+    assert any(
+        change["proposal_event_id"] == "event-mutation-003"
+        and change["after"]["state"] == "accepted"
+        for change in diff["state_diff"]["mutation_changes"]
+    )
 
 
 def test_mutation_inspection_and_acceptance_api(tmp_path: Path) -> None:
@@ -226,6 +779,11 @@ diff_refs: []
 artifacts: []
 outcome_metrics:
   wall_time_ms: 1000
+  input_tokens: 12
+  output_tokens: 3
+  total_tokens: 15
+  usage_source: agent_reported
+  usage_confidence: high
   changed_files_count: 0
 result_proposal: {}
 """.strip()
@@ -236,6 +794,7 @@ result_proposal: {}
     response = endpoints["/api/metrics"](path=str(session_path))
 
     assert response["entries"][0]["assignment_id"] == "assign-001"
+    assert response["entries"][0]["usage_source"] == "agent_reported"
 
 
 def test_runtime_demo_api_creates_reviewable_workspace(tmp_path: Path) -> None:
@@ -274,6 +833,7 @@ def test_runtime_demo_api_creates_reviewable_workspace(tmp_path: Path) -> None:
     assert replay["nodes"]["review"]["state"] == "runnable"
     assert gatekeeper["ready"] == ["review"]
     assert metrics["entries"][0]["assignment_id"] == "assign-implement-demo"
+    assert metrics["entries"][0]["usage_source"] == "unavailable"
 
 
 def test_acceptance_api_stages_reviews_and_decides_v2_result(tmp_path: Path) -> None:

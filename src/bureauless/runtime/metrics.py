@@ -26,6 +26,9 @@ class MetricsEntry:
     input_tokens: int | None
     output_tokens: int | None
     total_tokens: int | None
+    cached_input_tokens: int | None
+    reasoning_output_tokens: int | None
+    usage_source: str
     cost_usd: float | None
     cost_source: str
     cost_confidence: str
@@ -58,6 +61,9 @@ class MetricsEntry:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "reasoning_output_tokens": self.reasoning_output_tokens,
+            "usage_source": self.usage_source,
             "cost_usd": self.cost_usd,
             "cost_source": self.cost_source,
             "cost_confidence": self.cost_confidence,
@@ -261,6 +267,11 @@ def _entries_from_ledger_mapping(data: dict[str, Any]) -> list[MetricsEntry]:
                 input_tokens=_int_or_none(outcome_metrics.get("input_tokens")),
                 output_tokens=_int_or_none(outcome_metrics.get("output_tokens")),
                 total_tokens=_int_or_none(outcome_metrics.get("total_tokens")),
+                cached_input_tokens=_int_or_none(outcome_metrics.get("cached_input_tokens")),
+                reasoning_output_tokens=_int_or_none(
+                    outcome_metrics.get("reasoning_output_tokens")
+                ),
+                usage_source=_string_or_unknown(outcome_metrics.get("usage_source"), "unavailable"),
                 cost_usd=_float_or_none(outcome_metrics.get("cost_usd")),
                 cost_source=_string_or_unknown(outcome_metrics.get("cost_source"), "unknown"),
                 cost_confidence=_string_or_unknown(outcome_metrics.get("cost_confidence"), "none"),
@@ -332,6 +343,9 @@ def _entry_from_session_mapping(data: dict[str, Any]) -> MetricsEntry:
         input_tokens=_int_or_none(outcome_metrics.get("input_tokens")),
         output_tokens=_int_or_none(outcome_metrics.get("output_tokens")),
         total_tokens=_int_or_none(outcome_metrics.get("total_tokens")),
+        cached_input_tokens=_int_or_none(outcome_metrics.get("cached_input_tokens")),
+        reasoning_output_tokens=_int_or_none(outcome_metrics.get("reasoning_output_tokens")),
+        usage_source=_string_or_unknown(outcome_metrics.get("usage_source"), "unavailable"),
         cost_usd=_float_or_none(outcome_metrics.get("cost_usd")),
         cost_source=_string_or_unknown(outcome_metrics.get("cost_source"), "unknown"),
         cost_confidence=_string_or_unknown(outcome_metrics.get("cost_confidence"), "none"),
@@ -378,6 +392,8 @@ def _group_entries(entries: list[MetricsEntry]) -> list[dict[str, Any]]:
                 "completed": 0,
                 "wall_time_ms_total": 0,
                 "total_tokens_total": 0,
+                "cached_input_tokens_total": 0,
+                "reasoning_output_tokens_total": 0,
                 "cost_usd_total": 0.0,
                 "missing_usage_count": 0,
                 "context_request_count": 0,
@@ -396,6 +412,10 @@ def _group_entries(entries: list[MetricsEntry]) -> list[dict[str, Any]]:
             bucket["total_tokens_total"] += entry.total_tokens
         else:
             bucket["missing_usage_count"] += 1
+        if entry.cached_input_tokens is not None:
+            bucket["cached_input_tokens_total"] += entry.cached_input_tokens
+        if entry.reasoning_output_tokens is not None:
+            bucket["reasoning_output_tokens_total"] += entry.reasoning_output_tokens
         if entry.cost_usd is not None:
             bucket["cost_usd_total"] += entry.cost_usd
         bucket["context_request_count"] += len(entry.context_requests)
@@ -469,6 +489,9 @@ def _apply_price_snapshot(entry: MetricsEntry, snapshot: dict[str, Any]) -> Metr
         input_tokens=entry.input_tokens,
         output_tokens=entry.output_tokens,
         total_tokens=entry.total_tokens,
+        cached_input_tokens=entry.cached_input_tokens,
+        reasoning_output_tokens=entry.reasoning_output_tokens,
+        usage_source=entry.usage_source,
         cost_usd=estimate.cost_usd,
         cost_source=estimate.source,
         cost_confidence=estimate.confidence,
