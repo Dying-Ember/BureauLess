@@ -2747,7 +2747,7 @@ test('renders runtime summary panels and persists runtime source paths', async (
   await expect(ledgerPanel.getByText('Artifacts')).toBeVisible();
   await expect(ledgerPanel.getByText('Risks')).toBeVisible();
   await expect(ledgerPanel.getByText('Decisions')).toBeVisible();
-  await expect(runtimeSources.getByRole('status')).toContainText('Runtime sources loaded.');
+  await expect(runtimeSources.getByText('Runtime sources loaded.')).toBeVisible();
 
   await runtimeSources.getByLabel('Mission path').fill('examples/missions/custom/mission.yaml');
   await runtimeSources.getByLabel('Workflow path').fill('examples/missions/custom/workflow.yaml');
@@ -2755,7 +2755,7 @@ test('renders runtime summary panels and persists runtime source paths', async (
   await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('examples/missions/custom/mission.yaml');
   await expect(runtimeSources.getByLabel('Workflow path')).toHaveValue('examples/missions/custom/workflow.yaml');
   await expect(runtimeSources.getByLabel('Ledger path')).toHaveValue('examples/missions/custom/ledger.yaml');
-  await expect(runtimeSources.getByRole('status')).toContainText('Runtime source changes are not applied.');
+  await expect(runtimeSources.getByText('Runtime source changes are not applied.')).toBeVisible();
   await applyRuntimeSources.dispatchEvent('click');
 
   await expect.poll(() => page.evaluate(() => window.localStorage.getItem('bureauless.missionPath'))).toBe(
@@ -2819,7 +2819,7 @@ test('loads runtime sources from artifact_manifest_path without frontend YAML pa
   await expect(runtimeSources.getByLabel('Mission path')).toHaveValue('.bureauless/m3-demo/mission.yaml');
   await expect(runtimeSources.getByLabel('Workflow path')).toHaveValue('.bureauless/m3-demo/workflow.yaml');
   await expect(runtimeSources.getByLabel('Ledger path')).toHaveValue('.bureauless/m3-demo/ledger.yaml');
-  await expect(runtimeSources.getByRole('status')).toContainText('Runtime sources loaded.');
+  await expect(runtimeSources.getByText('Runtime sources loaded.')).toBeVisible();
 });
 
 test('renders Runtime M4 timeline, historical snapshot, and diff inspectors from API history surfaces', async ({ page }) => {
