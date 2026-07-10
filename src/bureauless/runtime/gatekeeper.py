@@ -38,8 +38,19 @@ class GatekeeperResult:
         }
 
 
-def evaluate_gatekeeper(workflow: Workflow, ledger: Ledger) -> GatekeeperResult:
-    replay_state = replay_workflow(workflow, ledger)
+def evaluate_gatekeeper(
+    workflow: Workflow,
+    ledger: Ledger,
+    *,
+    through_event_id: str | None = None,
+    through_event_ordinal: int | None = None,
+) -> GatekeeperResult:
+    replay_state = replay_workflow(
+        workflow,
+        ledger,
+        through_event_id=through_event_id,
+        through_event_ordinal=through_event_ordinal,
+    )
     decisions = {
         node_id: GatekeeperNodeDecision(
             node_id=node_id,

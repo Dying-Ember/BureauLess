@@ -48,7 +48,9 @@ turn-report telemetry closes REX-006; reusable ordinary-session run bundles and
 Workbench inspection close REX-007; deterministic skip/invoke policy,
 recommendation-only calls, observed cost linkage, and scored outcomes close
 REX-008. The maintained execution-spine command closes end-to-end acceptance.
-REX-001 remains explicitly deferred to Runtime M4 and is not implemented.
+REX-001 was closed in Runtime M4. The next runtime gap is provider-side
+telemetry attribution for model/provider/token/cost/cache evidence on the
+maintained OpenAI-compatible path.
 
 The project has one UI surface:
 
@@ -149,6 +151,7 @@ capability can span several milestones.
 | Runtime Harness M3 | Extended A1 with node outcomes, added A4/A5 artifacts, and proved the initial demo-scoped `codex-cli` A5.5 path | completed artifact/demo scope |
 | Runtime Harness M3.5 | Acceptance, dispatch, context continuation, lifecycle control, truthful turn reports, reusable run bundles, advisor invocation, and execution-spine E2E acceptance | completed |
 | Runtime Harness M4 | Close the A6 real-agent mutation intake loop and add A7 retry control plus linear temporal replay | completed |
+| Runtime Harness M5 | Add provider-side telemetry capture, usage attribution, and backtest-ready metrics on the maintained OpenAI-compatible path | completed |
 | Workbench M1 | B1 through B5 planning-DAG inspection, editing, and dispatch preparation | completed |
 | Workbench M2 | B6 runtime console for mission, workflow, ledger, gatekeeper, replay, and mutation state | completed |
 | Workbench M3 | B7 runtime-source trust and planning/runtime action clarity | completed |
@@ -222,6 +225,23 @@ closure. Runtime M4 is complete.
 The required M3.5 foundations are closed.
 The existing RFC-001 remains implemented M2.5 design history rather than
 being silently expanded.
+
+Runtime Harness Milestone 5 is complete. Its task
+list is
+[`../tasks/runtime_harness_milestone_5_tasklist.md`](../tasks/runtime_harness_milestone_5_tasklist.md).
+It added a backend/debug-first provider-side telemetry boundary for the
+maintained OpenAI-compatible path so model, provider, token, cost, and
+cache-related usage can be attributed to assignment/session/result boundaries
+without pretending the harness can infer billing data on its own. Workbench
+compatibility remains deferred until the backend evidence shape is worth a
+dedicated UI surface.
+
+The selected source of truth for Runtime M5 is trusted provider-side usage on
+the maintained `codex-cli + openai-compatible` path. That evidence is captured
+by the local proxy, merged into `outcome_metrics`, exposed through the existing
+metrics readers, and proven by packaging/import/summarize fixtures. Still out
+of scope after M5: generic multi-agent telemetry, provider-wide proxy meshes,
+token guessing heuristics, and any replay semantics derived from billing data.
 
 No additional engineering-cleanup milestone is planned. Documentation indexes,
 task status, and API boundaries remain part of each delivery milestone's
@@ -833,12 +853,15 @@ Acceptance boundary:
 
 ## Current Priority Order
 
-1. Use the completed Workbench M7 surface to run maintained `codex-cli`
-   end-to-end trials and collect operator-friction findings before proposing a
-   new frontend milestone.
-2. Preserve the completed Runtime M3.5, Runtime M4, and Workbench M4-M7
+1. Implement Runtime Harness Milestone 5 as a backend/debug-first
+   OpenAI-compatible telemetry boundary before proposing any workbench
+   compatibility surface.
+2. Use the completed Workbench M7 surface to run maintained `codex-cli`
+   end-to-end trials and collect operator-friction findings while the new
+   telemetry path lands behind CLI/API debugging surfaces.
+3. Preserve the completed Runtime M3.5, Runtime M4, and Workbench M4-M7
    boundaries while validating real workflow runs.
-3. Keep provider expansion, replay branches, rollback, and frontend-owned
+4. Keep provider expansion, replay branches, rollback, and frontend-owned
    write authority outside the completed milestones unless a later milestone
    explicitly accepts them.
 

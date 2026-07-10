@@ -10,7 +10,11 @@ from ..protocol.harness import STRICT_ACCEPTANCE_LEDGER_VERSION, Ledger, Workflo
 from ..protocol.ledger import append_ledger_event
 from ..protocol.outcomes import NodeOutcome, build_node_outcome_decision_event
 from ..protocol.outcomes import node_outcome_from_session, reconcile_node_outcome_state
-from ..protocol.results import ResultProposal, import_result_proposal
+from ..protocol.results import (
+    ResultProposal,
+    import_result_proposal,
+    intake_result_mutation_intent,
+)
 from ..runtime.sessions import SessionRecord, package_session_result
 
 
@@ -35,6 +39,7 @@ class StagedSessionResult:
     result_event_id: str
     result: ResultProposal
     outcome: NodeOutcome
+    mutation_intake_disposition: dict[str, object] | None
 
 
 def stage_session_record(
@@ -70,11 +75,32 @@ def stage_session_record(
     for event in context_events:
         updated = append_ledger_event(updated, event, workflow)
     staged = stage_result(workflow, updated, assignment, result, outcome)
+    intake = None
+    if result.control_intents:
+        root = artifact_root
+        if root is None:
+            workspace_path = record.workspace.get("path")
+            if not isinstance(workspace_path, str) or not workspace_path:
+                raise ProtocolError(
+                    "Mutation intent staging requires artifact_root or session workspace"
+                )
+            root = Path(workspace_path)
+        intake = intake_result_mutation_intent(
+            workflow,
+            staged.ledger,
+            assignment,
+            result,
+            session_id=record.session_id,
+            artifact_root=root,
+        )
     return StagedSessionResult(
-        ledger=staged.ledger,
+        ledger=intake.ledger if intake is not None else staged.ledger,
         result_event_id=staged.result_event_id,
         result=result,
         outcome=outcome,
+        mutation_intake_disposition=(
+            intake.disposition if intake is not None else None
+        ),
     )
 
 

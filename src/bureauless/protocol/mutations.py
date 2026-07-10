@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
+import json
 from typing import Any
 
 from ..errors import ProtocolError
@@ -43,6 +45,81 @@ _FORBIDDEN_CHANGE_FIELDS = {
     "create_assignments",
     "assignments",
 }
+_INTENT_FIELDS = {
+    "intent_type",
+    "reason",
+    "rationale",
+    "proposed_changes",
+    "evidence_refs",
+}
+_TRUSTED_PROPOSAL_FIELDS = {
+    "proposal_id",
+    "proposal_type",
+    "workflow_id",
+    "base_workflow_version_id",
+    "source",
+    "requires_approval",
+    "intent",
+}
+_TRUSTED_SOURCE_FIELDS = {"assignment_id", "session_id", "agent_id", "actor"}
+
+
+def canonical_workflow_payload(workflow: Workflow) -> dict[str, Any]:
+    return {
+        "workflow_id": workflow.workflow_id,
+        "mission_id": workflow.mission_id,
+        "mode": workflow.mode,
+        "status": workflow.status,
+        "reason": workflow.reason,
+        "proposed_by": workflow.proposed_by,
+        "roles": {
+            name: {"can_emit": role.can_emit, "can_consume": role.can_consume}
+            for name, role in workflow.roles.items()
+        },
+        "events": {
+            name: {"producer_roles": event.producer_roles}
+            for name, event in workflow.events.items()
+        },
+        "nodes": [
+            {
+                "id": node.id,
+                "role": node.role,
+                "waits_for": _event_branches(node.waits_for_all, node.waits_for_any),
+                "emits": node.emits,
+            }
+            for node in workflow.nodes.values()
+        ],
+        "gates": [
+            {
+                "id": gate.id,
+                "node_id": gate.node_id,
+                "requires": _event_branches(gate.requires_all, gate.requires_any),
+            }
+            for gate in workflow.gates
+        ],
+        "terminal_events": workflow.terminal_events,
+        "broadcast_policy": workflow.broadcast_policy,
+        "budget_policy": workflow.budget_policy,
+    }
+
+
+def workflow_content_hash(workflow: Workflow) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            canonical_workflow_payload(workflow),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def workflow_version_identity(workflow: Workflow, sequence: int) -> str:
+    if sequence < 0:
+        raise ProtocolError("Workflow version sequence cannot be negative")
+    return (
+        f"{workflow.workflow_id}:v{sequence:04d}:"
+        f"{workflow_content_hash(workflow)[:12]}"
+    )
 
 
 @dataclass(frozen=True)
@@ -122,6 +199,62 @@ class WorkflowMutationProposal:
 
 
 @dataclass(frozen=True)
+class WorkflowMutationIntent:
+    reason: str
+    rationale: str
+    proposed_changes: MutationChanges
+    evidence_refs: list[str]
+    intent_type: str = "workflow_mutation"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "intent_type": self.intent_type,
+            "reason": self.reason,
+            "rationale": self.rationale,
+            "proposed_changes": self.proposed_changes.to_dict(),
+            "evidence_refs": self.evidence_refs,
+        }
+
+
+@dataclass(frozen=True)
+class TrustedMutationSource:
+    assignment_id: str
+    session_id: str
+    agent_id: str
+    actor: str = "worker"
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "assignment_id": self.assignment_id,
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
+            "actor": self.actor,
+        }
+
+
+@dataclass(frozen=True)
+class TrustedWorkflowMutationProposal:
+    proposal_id: str
+    workflow_id: str
+    base_workflow_version_id: str
+    source: TrustedMutationSource
+    requires_approval: str
+    intent: WorkflowMutationIntent
+    proposal_type: str = "workflow_mutation"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "proposal_id": self.proposal_id,
+            "proposal_type": self.proposal_type,
+            "workflow_id": self.workflow_id,
+            "base_workflow_version_id": self.base_workflow_version_id,
+            "source": self.source.to_dict(),
+            "requires_approval": self.requires_approval,
+            "intent": self.intent.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class MutationValidationError:
     code: str
     message: str
@@ -149,6 +282,154 @@ class MutationValidationResult:
             "status": self.status,
             "errors": [error.to_dict() for error in self.errors],
         }
+
+
+@dataclass(frozen=True)
+class MutationIntentValidationResult:
+    status: str
+    errors: list[MutationValidationError]
+    intent: WorkflowMutationIntent | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "valid"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "errors": [error.to_dict() for error in self.errors],
+        }
+
+
+@dataclass(frozen=True)
+class TrustedProposalBuildResult:
+    status: str
+    errors: list[MutationValidationError]
+    proposal: TrustedWorkflowMutationProposal | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "valid"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "errors": [error.to_dict() for error in self.errors],
+        }
+
+
+def validate_workflow_mutation_intent(
+    data: dict[str, Any],
+) -> MutationIntentValidationResult:
+    if not isinstance(data, dict):
+        return MutationIntentValidationResult(
+            status="rejected",
+            errors=[
+                MutationValidationError(
+                    "invalid_intent_type",
+                    "Workflow mutation intent must be an object",
+                )
+            ],
+        )
+
+    errors = _unknown_fields(data, _INTENT_FIELDS, "intent")
+    proposal_data = {
+        "proposal_id": "untrusted-intent-validation",
+        "proposal_type": data.get("intent_type"),
+        "workflow_id": "untrusted-intent-validation",
+        "source": {
+            "assignment_id": "untrusted-intent-validation",
+            "actor": "worker",
+        },
+        "reason": data.get("reason"),
+        "rationale": data.get("rationale"),
+        "proposed_changes": data.get("proposed_changes"),
+        "evidence_refs": data.get("evidence_refs"),
+        "requires_approval": "orchestrator",
+    }
+    proposal_result = validate_workflow_mutation_proposal(proposal_data)
+    errors.extend(proposal_result.errors)
+    if errors or proposal_result.proposal is None:
+        return MutationIntentValidationResult(status="rejected", errors=errors)
+
+    proposal = proposal_result.proposal
+    return MutationIntentValidationResult(
+        status="valid",
+        errors=[],
+        intent=WorkflowMutationIntent(
+            intent_type=proposal.proposal_type,
+            reason=proposal.reason,
+            rationale=proposal.rationale,
+            proposed_changes=proposal.proposed_changes,
+            evidence_refs=proposal.evidence_refs,
+        ),
+    )
+
+
+def build_trusted_workflow_mutation_proposal(
+    data: dict[str, Any],
+    *,
+    workflow_id: str,
+    assignment_id: str,
+    session_id: str,
+    agent_id: str,
+    source_result_event_id: str,
+    assignment_workflow_version_id: str,
+    current_workflow_version_id: str,
+    requires_approval: str,
+) -> TrustedProposalBuildResult:
+    intent_result = validate_workflow_mutation_intent(data)
+    if not intent_result.ok or intent_result.intent is None:
+        return TrustedProposalBuildResult(
+            status="rejected",
+            errors=intent_result.errors,
+        )
+    if assignment_workflow_version_id != current_workflow_version_id:
+        return TrustedProposalBuildResult(
+            status="stale",
+            errors=[
+                MutationValidationError(
+                    "stale_workflow_version",
+                    "Assignment workflow version is no longer current",
+                    "base_workflow_version_id",
+                )
+            ],
+        )
+    if requires_approval not in APPROVAL_ACTORS:
+        return TrustedProposalBuildResult(
+            status="rejected",
+            errors=[
+                MutationValidationError(
+                    "invalid_approval_actor",
+                    f"requires_approval must be one of: {', '.join(sorted(APPROVAL_ACTORS))}",
+                    "requires_approval",
+                )
+            ],
+        )
+
+    intent = intent_result.intent
+    identity_payload = {
+        "source_result_event_id": source_result_event_id,
+        "intent_ordinal": 0,
+        "base_workflow_version_id": assignment_workflow_version_id,
+        "intent": intent.to_dict(),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+    proposal = TrustedWorkflowMutationProposal(
+        proposal_id=f"proposal-{digest}",
+        workflow_id=workflow_id,
+        base_workflow_version_id=assignment_workflow_version_id,
+        source=TrustedMutationSource(
+            assignment_id=assignment_id,
+            session_id=session_id,
+            agent_id=agent_id,
+        ),
+        requires_approval=requires_approval,
+        intent=intent,
+    )
+    return TrustedProposalBuildResult(status="valid", errors=[], proposal=proposal)
 
 
 def validate_workflow_mutation_proposal(
@@ -196,7 +477,55 @@ def validate_workflow_mutation_proposal(
     )
 
 
-def load_workflow_mutation_proposal(data: dict[str, Any]) -> WorkflowMutationProposal:
+def load_trusted_workflow_mutation_proposal(
+    data: dict[str, Any],
+) -> TrustedWorkflowMutationProposal:
+    unknown = _unknown_fields(data, _TRUSTED_PROPOSAL_FIELDS, "proposal")
+    source = _mapping(data, "source")
+    unknown.extend(_unknown_fields(source, _TRUSTED_SOURCE_FIELDS, "source"))
+    if unknown:
+        details = "; ".join(error.message for error in unknown)
+        raise ProtocolError(f"Invalid trusted workflow mutation proposal: {details}")
+    intent_result = validate_workflow_mutation_intent(_mapping(data, "intent"))
+    if not intent_result.ok or intent_result.intent is None:
+        details = "; ".join(
+            f"{error.code}: {error.message}" for error in intent_result.errors
+        )
+        raise ProtocolError(f"Invalid trusted workflow mutation proposal: {details}")
+    proposal_type = _non_empty_string(data, "proposal_type")
+    actor = _non_empty_string(source, "actor")
+    approval = _non_empty_string(data, "requires_approval")
+    if proposal_type != "workflow_mutation":
+        raise ProtocolError("Trusted proposal_type must be 'workflow_mutation'")
+    if actor != "worker":
+        raise ProtocolError("Trusted worker proposal source actor must be 'worker'")
+    if approval not in APPROVAL_ACTORS:
+        raise ProtocolError(
+            f"Trusted requires_approval must be one of: {', '.join(sorted(APPROVAL_ACTORS))}"
+        )
+    return TrustedWorkflowMutationProposal(
+        proposal_id=_non_empty_string(data, "proposal_id"),
+        proposal_type=proposal_type,
+        workflow_id=_non_empty_string(data, "workflow_id"),
+        base_workflow_version_id=_non_empty_string(
+            data, "base_workflow_version_id"
+        ),
+        source=TrustedMutationSource(
+            assignment_id=_non_empty_string(source, "assignment_id"),
+            session_id=_non_empty_string(source, "session_id"),
+            agent_id=_non_empty_string(source, "agent_id"),
+            actor=actor,
+        ),
+        requires_approval=approval,
+        intent=intent_result.intent,
+    )
+
+
+def load_workflow_mutation_proposal(
+    data: dict[str, Any],
+) -> WorkflowMutationProposal | TrustedWorkflowMutationProposal:
+    if "intent" in data:
+        return load_trusted_workflow_mutation_proposal(data)
     result = validate_workflow_mutation_proposal(data)
     if not result.ok or result.proposal is None:
         details = "; ".join(
@@ -204,6 +533,13 @@ def load_workflow_mutation_proposal(data: dict[str, Any]) -> WorkflowMutationPro
         )
         raise ProtocolError(f"Invalid workflow mutation proposal: {details}")
     return result.proposal
+
+
+def mutation_proposed_changes(data: dict[str, Any]) -> dict[str, Any] | None:
+    intent = data.get("intent")
+    container = intent if isinstance(intent, dict) else data
+    changes = container.get("proposed_changes")
+    return changes if isinstance(changes, dict) else None
 
 
 def materialize_current_workflow(
@@ -315,6 +651,14 @@ def _apply_changes(
             "Accepted mutation supersede_assignments must be a list of strings"
         )
     return current
+
+
+def _event_branches(
+    all_of: list[str], any_of: list[str]
+) -> list[str] | dict[str, list[str]]:
+    if any_of:
+        return {"all_of": all_of, "any_of": any_of}
+    return all_of
 
 
 def _add_edge(workflow: Workflow, edge: MutationEdge) -> Workflow:

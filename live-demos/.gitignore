@@ -1,0 +1,4 @@
+# Keep the directory and docs, ignore per-run local output by default.
+*
+!.gitignore
+!README.md

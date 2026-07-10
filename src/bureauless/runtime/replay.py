@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from ..errors import ProtocolError
 from ..protocol.harness import (
     STRICT_ACCEPTANCE_LEDGER_VERSION,
     Ledger,
@@ -10,12 +11,19 @@ from ..protocol.harness import (
     WorkflowGate,
     WorkflowNode,
 )
-from ..protocol.mutations import materialize_current_workflow
+from ..protocol.ledger import rebuild_ledger_projection
+from ..protocol.mutations import (
+    materialize_current_workflow,
+    mutation_proposed_changes,
+    workflow_content_hash,
+    workflow_version_identity,
+)
 
 
 NodeRuntimeState = Literal["runnable", "blocked", "completed"]
 AssignmentAttemptStatus = Literal[
     "in_flight",
+    "retry_scheduled",
     "awaiting_context",
     "context_blocked",
     "awaiting_acceptance",
@@ -142,6 +150,32 @@ class MutationReplayState:
 
 
 @dataclass(frozen=True)
+class AssignmentVersionValidity:
+    assignment_id: str
+    node_id: str | None
+    creation_version_id: str | None
+    active_version_id: str
+    status: AssignmentImpactClassification
+    reasons: list[str]
+    transition_event_id: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "assignment_id": self.assignment_id,
+            "active_version_id": self.active_version_id,
+            "status": self.status,
+            "reasons": self.reasons,
+        }
+        if self.node_id is not None:
+            payload["node_id"] = self.node_id
+        if self.creation_version_id is not None:
+            payload["creation_version_id"] = self.creation_version_id
+        if self.transition_event_id is not None:
+            payload["transition_event_id"] = self.transition_event_id
+        return payload
+
+
+@dataclass(frozen=True)
 class _AcceptedWorkflowEvent:
     event_type: str
     node_id: str | None
@@ -152,30 +186,203 @@ class _AcceptedWorkflowEvent:
 @dataclass(frozen=True)
 class ReplayState:
     workflow_id: str
+    workflow_version_id: str
+    through_event_id: str | None
+    through_event_ordinal: int | None
     terminal_complete: bool
     nodes: dict[str, NodeReplayState]
     mutation_proposals: dict[str, MutationReplayState]
+    assignment_validity: dict[str, AssignmentVersionValidity]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "workflow_id": self.workflow_id,
+            "workflow_version_id": self.workflow_version_id,
+            "through_event_id": self.through_event_id,
+            "through_event_ordinal": self.through_event_ordinal,
             "terminal_complete": self.terminal_complete,
             "nodes": {node_id: state.to_dict() for node_id, state in self.nodes.items()},
             "mutation_proposals": {
                 event_id: state.to_dict()
                 for event_id, state in self.mutation_proposals.items()
             },
+            "assignment_validity": {
+                assignment_id: validity.to_dict()
+                for assignment_id, validity in self.assignment_validity.items()
+            },
         }
 
 
-def replay_workflow(initial_workflow: Workflow, ledger: Ledger) -> ReplayState:
+@dataclass(frozen=True)
+class WorkflowVersionState:
+    version_id: str
+    sequence: int
+    content_hash: str
+    parent_version_id: str | None
+    accepted_event_id: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "version_id": self.version_id,
+            "sequence": self.sequence,
+            "content_hash": self.content_hash,
+        }
+        if self.parent_version_id is not None:
+            payload["parent_version_id"] = self.parent_version_id
+        if self.accepted_event_id is not None:
+            payload["accepted_event_id"] = self.accepted_event_id
+        return payload
+
+
+@dataclass(frozen=True)
+class EventWorkflowVersion:
+    event_id: str
+    event_ordinal: int
+    workflow_version_id: str
+    workflow_version_before: str
+    workflow_version_after: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "event_ordinal": self.event_ordinal,
+            "workflow_version_id": self.workflow_version_id,
+            "workflow_version_before": self.workflow_version_before,
+            "workflow_version_after": self.workflow_version_after,
+        }
+
+
+@dataclass(frozen=True)
+class WorkflowVersionProjection:
+    initial_version_id: str
+    current_version_id: str
+    versions: list[WorkflowVersionState]
+    events: list[EventWorkflowVersion]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "initial_version_id": self.initial_version_id,
+            "current_version_id": self.current_version_id,
+            "versions": [version.to_dict() for version in self.versions],
+            "events": [event.to_dict() for event in self.events],
+        }
+
+
+def project_workflow_versions(
+    initial_workflow: Workflow,
+    ledger: Ledger,
+) -> WorkflowVersionProjection:
+    initial_hash = workflow_content_hash(initial_workflow)
+    initial_id = workflow_version_identity(initial_workflow, 0)
+    versions = [
+        WorkflowVersionState(
+            version_id=initial_id,
+            sequence=0,
+            content_hash=initial_hash,
+            parent_version_id=None,
+            accepted_event_id=None,
+        )
+    ]
+    events: list[EventWorkflowVersion] = []
+    current_workflow = initial_workflow
+    current_version = initial_id
+    sequence = 0
+
+    for index, event in enumerate(ledger.event_log):
+        event_id = event.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            raise ProtocolError("Workflow version projection requires event_id")
+        before_version = current_version
+        after_version = before_version
+        if event.get("event_type") == "workflow_mutation_accepted":
+            prefix = replace(ledger, event_log=ledger.event_log[: index + 1])
+            next_workflow = materialize_current_workflow(initial_workflow, prefix)
+            next_sequence = sequence + 1
+            after_version = workflow_version_identity(next_workflow, next_sequence)
+            _validate_recorded_workflow_transition(
+                event,
+                before_workflow=current_workflow,
+                after_workflow=next_workflow,
+                before_version=before_version,
+                after_version=after_version,
+            )
+            versions.append(
+                WorkflowVersionState(
+                    version_id=after_version,
+                    sequence=next_sequence,
+                    content_hash=workflow_content_hash(next_workflow),
+                    parent_version_id=before_version,
+                    accepted_event_id=event_id,
+                )
+            )
+            current_workflow = next_workflow
+            current_version = after_version
+            sequence = next_sequence
+        events.append(
+            EventWorkflowVersion(
+                event_id=event_id,
+                event_ordinal=index,
+                workflow_version_id=after_version,
+                workflow_version_before=before_version,
+                workflow_version_after=after_version,
+            )
+        )
+
+    return WorkflowVersionProjection(
+        initial_version_id=initial_id,
+        current_version_id=current_version,
+        versions=versions,
+        events=events,
+    )
+
+
+def _validate_recorded_workflow_transition(
+    event: dict[str, Any],
+    *,
+    before_workflow: Workflow,
+    after_workflow: Workflow,
+    before_version: str,
+    after_version: str,
+) -> None:
+    expected = {
+        "workflow_version_before": before_version,
+        "workflow_version_after": after_version,
+        "workflow_hash_before": workflow_content_hash(before_workflow),
+        "workflow_hash_after": workflow_content_hash(after_workflow),
+        "parent_workflow_version_id": before_version,
+    }
+    for field, value in expected.items():
+        recorded = event.get(field)
+        if recorded is not None and recorded != value:
+            raise ProtocolError(
+                f"Recorded workflow transition {field} does not match replay"
+            )
+
+
+def replay_workflow(
+    initial_workflow: Workflow,
+    ledger: Ledger,
+    *,
+    through_event_id: str | None = None,
+    through_event_ordinal: int | None = None,
+) -> ReplayState:
+    ledger = select_ledger_prefix(
+        ledger,
+        through_event_id=through_event_id,
+        through_event_ordinal=through_event_ordinal,
+    )
     workflow = materialize_current_workflow(initial_workflow, ledger)
+    version_projection = project_workflow_versions(initial_workflow, ledger)
+    assignment_validity = _derive_assignment_version_validity(
+        initial_workflow, ledger, version_projection
+    )
     assignment_attempts = _assignment_attempts_by_node(workflow, ledger)
     mutation_proposals = _derive_mutation_proposals(workflow, ledger)
     pending_mutations_by_node = _pending_mutations_by_node(mutation_proposals)
     review_blocks_by_node = _mutation_review_blocks_by_node(
         initial_workflow, ledger
     )
+    circuit_blocks_by_node = _retry_circuit_blocks_by_node(ledger)
     nodes = {
         node_id: _replay_node(
             workflow,
@@ -183,16 +390,68 @@ def replay_workflow(initial_workflow: Workflow, ledger: Ledger) -> ReplayState:
             node,
             assignment_attempts.get(node_id, []),
             pending_mutations_by_node.get(node_id, []),
-            review_blocks_by_node.get(node_id, []),
+            [
+                *review_blocks_by_node.get(node_id, []),
+                *circuit_blocks_by_node.get(node_id, []),
+            ],
         )
         for node_id, node in workflow.nodes.items()
     }
     terminal_complete = _refs_satisfied(workflow.terminal_events, [], ledger)[0]
     return ReplayState(
         workflow_id=workflow.workflow_id,
+        workflow_version_id=version_projection.current_version_id,
+        through_event_id=(
+            ledger.event_log[-1].get("event_id") if ledger.event_log else None
+        ),
+        through_event_ordinal=(len(ledger.event_log) - 1 if ledger.event_log else None),
         terminal_complete=terminal_complete,
         nodes=nodes,
         mutation_proposals=mutation_proposals,
+        assignment_validity=assignment_validity,
+    )
+
+
+def select_ledger_prefix(
+    ledger: Ledger,
+    *,
+    through_event_id: str | None = None,
+    through_event_ordinal: int | None = None,
+) -> Ledger:
+    if through_event_id is not None and through_event_ordinal is not None:
+        raise ProtocolError(
+            "Specify either through_event_id or through_event_ordinal, not both"
+        )
+    if through_event_id is None and through_event_ordinal is None:
+        return ledger
+
+    if through_event_id is not None:
+        if not through_event_id:
+            raise ProtocolError("through_event_id must be a non-empty string")
+        index = next(
+            (
+                position
+                for position, event in enumerate(ledger.event_log)
+                if event.get("event_id") == through_event_id
+            ),
+            None,
+        )
+        if index is None:
+            raise ProtocolError(f"Unknown through_event_id: {through_event_id}")
+    else:
+        if (
+            isinstance(through_event_ordinal, bool)
+            or not isinstance(through_event_ordinal, int)
+            or through_event_ordinal < 0
+            or through_event_ordinal >= len(ledger.event_log)
+        ):
+            raise ProtocolError(
+                f"Unknown through_event_ordinal: {through_event_ordinal}"
+            )
+        index = through_event_ordinal
+
+    return rebuild_ledger_projection(
+        replace(ledger, event_log=ledger.event_log[: index + 1])
     )
 
 
@@ -388,8 +647,27 @@ def _replay_node(
         )
         for attempt in context_blocked
     )
+    retry_scheduled = [
+        attempt for attempt in assignment_attempts if attempt.state == "retry_scheduled"
+    ]
+    blocked_reasons.extend(
+        BlockedReason(
+            code="retry_scheduled",
+            message=f"Retry attempt {attempt.assignment_id} is scheduled",
+            assignment_id=attempt.assignment_id,
+        )
+        for attempt in retry_scheduled
+    )
+    retried_attempt_ids = {
+        attempt.retry_of
+        for attempt in assignment_attempts
+        if attempt.retry_of is not None
+    }
     rejected_attempts = [
-        attempt for attempt in assignment_attempts if attempt.state == "rejected"
+        attempt
+        for attempt in assignment_attempts
+        if attempt.state == "rejected"
+        and attempt.assignment_id not in retried_attempt_ids
     ]
     blocked_reasons.extend(
         BlockedReason(
@@ -477,14 +755,12 @@ def _derive_mutation_proposals(
             state = "rejected"
         else:
             state = "pending"
-        impact_proposal = proposal
+        changes = mutation_proposed_changes(proposal)
+        impact_proposal = {"proposed_changes": changes} if changes is not None else {}
         if state == "accepted" and decision is not None:
             applied_changes = decision.get("applied_changes")
             if isinstance(applied_changes, dict):
-                impact_proposal = {
-                    **proposal,
-                    "proposed_changes": applied_changes,
-                }
+                impact_proposal = {"proposed_changes": applied_changes}
         result[event_id] = MutationReplayState(
             proposal_id=proposal_id,
             proposal_event_id=event_id,
@@ -535,22 +811,129 @@ def _mutation_review_blocks_by_node(
         )
         mutation_event_id = _string_or_none(event.get("event_id"))
         for impact in impacts.values():
-            if impact.classification != "needs_review" or impact.node_id is None:
+            if impact.classification not in {"affected", "needs_review"} or impact.node_id is None:
                 continue
             if impact.node_id not in after.nodes:
                 continue
             result.setdefault(impact.node_id, []).append(
                 BlockedReason(
-                    code="needs_review",
+                    code=(
+                        "superseded"
+                        if impact.classification == "affected"
+                        else "needs_review"
+                    ),
                     message=(
-                        f"Assignment {impact.assignment_id} requires review after "
-                        "workflow mutation"
+                        f"Assignment {impact.assignment_id} is "
+                        f"{impact.classification} after workflow mutation"
                     ),
                     assignment_id=impact.assignment_id,
                     mutation_event_id=mutation_event_id,
                 )
             )
         before = after
+    return result
+
+
+def _derive_assignment_version_validity(
+    initial_workflow: Workflow,
+    ledger: Ledger,
+    projection: WorkflowVersionProjection,
+) -> dict[str, AssignmentVersionValidity]:
+    event_versions = {
+        event.event_id: event.workflow_version_id for event in projection.events
+    }
+    validity: dict[str, AssignmentVersionValidity] = {}
+    for event in ledger.event_log:
+        if event.get("event_type") != "assignment_created":
+            continue
+        assignment_id = _string_or_none(event.get("assignment_id"))
+        event_id = _string_or_none(event.get("event_id"))
+        if assignment_id is None:
+            continue
+        recorded_version = _string_or_none(event.get("workflow_version_id"))
+        validity[assignment_id] = AssignmentVersionValidity(
+            assignment_id=assignment_id,
+            node_id=_string_or_none(event.get("node_id")),
+            creation_version_id=recorded_version or event_versions.get(event_id or ""),
+            active_version_id=projection.current_version_id,
+            status="unaffected",
+            reasons=["valid_in_active_workflow_version"],
+            transition_event_id=None,
+        )
+
+    before = initial_workflow
+    for index, event in enumerate(ledger.event_log):
+        if event.get("event_type") != "workflow_mutation_accepted":
+            continue
+        prefix = replace(ledger, event_log=ledger.event_log[: index + 1])
+        after = materialize_current_workflow(initial_workflow, prefix)
+        changes = event.get("applied_changes")
+        impacts = evaluate_assignment_impacts(
+            before,
+            after,
+            prefix,
+            changes if isinstance(changes, dict) else None,
+        )
+        transition_id = _string_or_none(event.get("event_id"))
+        for assignment_id, impact in impacts.items():
+            current = validity.get(assignment_id)
+            if current is None or impact.classification == "unaffected":
+                continue
+            validity[assignment_id] = replace(
+                current,
+                status=impact.classification,
+                reasons=impact.reasons,
+                transition_event_id=transition_id,
+            )
+        before = after
+
+    for event in ledger.event_log:
+        if event.get("event_type") != "assignment_superseded":
+            continue
+        assignment_id = _string_or_none(event.get("assignment_id"))
+        current = validity.get(assignment_id or "")
+        if current is not None:
+            validity[current.assignment_id] = replace(
+                current,
+                status="affected",
+                reasons=["explicitly_superseded"],
+                transition_event_id=(
+                    _string_or_none(event.get("mutation_event_id"))
+                    or _string_or_none(event.get("event_id"))
+                ),
+            )
+    return validity
+
+
+def _retry_circuit_blocks_by_node(
+    ledger: Ledger,
+) -> dict[str, list[BlockedReason]]:
+    result: dict[str, list[BlockedReason]] = {}
+    for index, event in enumerate(ledger.event_log):
+        if event.get("event_type") != "assignment_circuit_opened":
+            continue
+        node_id = _string_or_none(event.get("node_id"))
+        terminal_state = _string_or_none(event.get("terminal_state"))
+        assignment_id = _string_or_none(event.get("assignment_id"))
+        if node_id is None or terminal_state not in {"needs_review", "needs_replan"}:
+            continue
+        if any(
+            later.get("event_type") == "assignment_created"
+            and later.get("node_id") == node_id
+            and later.get("assignment_id") != assignment_id
+            for later in ledger.event_log[index + 1 :]
+        ):
+            continue
+        result.setdefault(node_id, []).append(
+            BlockedReason(
+                code=terminal_state,
+                message=(
+                    f"Assignment {assignment_id or 'unknown'} retry circuit is open: "
+                    f"{event.get('reason', 'retry stopped')}"
+                ),
+                assignment_id=assignment_id,
+            )
+        )
     return result
 
 
@@ -723,6 +1106,11 @@ def _derive_assignment_attempts(
                 for accepted_event in accepted_events_by_index.get(index, []):
                     _mark_assignment_completed(workflow, raw_attempts, accepted_event)
                 continue
+            existing_retry_of = (
+                raw_attempts[assignment_id].get("retry_of")
+                if assignment_id in raw_attempts
+                else None
+            )
             raw_attempts[assignment_id] = {
                 "assignment_id": assignment_id,
                 "node_id": node_id,
@@ -730,12 +1118,42 @@ def _derive_assignment_attempts(
                 "created_event_id": _string_or_none(event.get("event_id")),
                 "terminal_event_id": None,
                 "terminal_event_type": None,
-                "retry_of": None,
+                "retry_of": existing_retry_of,
                 "superseded_by": None,
             }
             order.append(assignment_id)
             for accepted_event in accepted_events_by_index.get(index, []):
                 _mark_assignment_completed(workflow, raw_attempts, accepted_event)
+            continue
+
+        if event_type == "assignment_retry_scheduled":
+            node_id = _string_or_none(event.get("node_id"))
+            retry_of = _string_or_none(event.get("retry_of"))
+            prior = raw_attempts.get(retry_of) if retry_of is not None else None
+            if prior is not None:
+                prior["state"] = "rejected"
+                prior["terminal_event_id"] = _string_or_none(event.get("event_id"))
+                prior["terminal_event_type"] = event_type
+            if node_id is not None:
+                raw_attempts[assignment_id] = {
+                    "assignment_id": assignment_id,
+                    "node_id": node_id,
+                    "state": "retry_scheduled",
+                    "created_event_id": _string_or_none(event.get("event_id")),
+                    "terminal_event_id": None,
+                    "terminal_event_type": None,
+                    "retry_of": retry_of,
+                    "superseded_by": None,
+                }
+                order.append(assignment_id)
+            continue
+
+        if event_type == "assignment_circuit_opened":
+            attempt = raw_attempts.get(assignment_id)
+            if attempt is not None:
+                attempt["state"] = "rejected"
+                attempt["terminal_event_id"] = _string_or_none(event.get("event_id"))
+                attempt["terminal_event_type"] = event_type
             continue
 
         if event_type == "assignment_retry_requested":

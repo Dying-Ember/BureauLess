@@ -28,9 +28,13 @@ internal implementation grouping inside that milestone.
   executable dispatch, live context continuation and cancellation, truthful
   telemetry, generic run bundles, and advisor invocation evidence.
 - [`runtime_harness_milestone_4_tasklist.md`](runtime_harness_milestone_4_tasklist.md):
-  the active milestone for validated real-agent mutation intake, deterministic
+  the completed milestone for validated real-agent mutation intake, deterministic
   retry/circuit-break control, workflow versions, and linear temporal replay
   through ledger event cursors.
+- [`runtime_harness_milestone_5_tasklist.md`](runtime_harness_milestone_5_tasklist.md):
+  the completed runtime milestone for provider-side telemetry capture, usage
+  attribution, and backtest-ready metrics on the maintained OpenAI-compatible
+  path, while generic multi-agent telemetry remains out of scope.
 
 Runtime Milestone 3.5 is complete. Runtime Milestone 4 is complete. RM4-00 accepted
 [`RFC-004`](../rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
@@ -63,5 +67,7 @@ compatibility is implemented under accepted
    [`runtime execution gap analysis`](../audits/2026-07-02-runtime-execution-gap-analysis.md)
    and Milestone 3.5 for the required execution-spine remediation.
 9. Read Milestone 4 and RFC-004 for the selected agent mutation intake,
-   retry-control, and temporal replay scope. Runtime M4 is complete; use
-   Workbench Milestone 5 for the next read-only history-inspection UI work.
+   retry-control, and temporal replay scope.
+10. Read Milestone 5 for the selected provider-side telemetry boundary on the
+    maintained OpenAI-compatible path and the explicit non-goals that remain
+    after that delivery.

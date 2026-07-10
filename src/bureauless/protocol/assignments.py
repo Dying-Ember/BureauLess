@@ -10,7 +10,7 @@ from ..errors import ProtocolError
 from ..runtime.gatekeeper import evaluate_gatekeeper
 from .harness import Ledger, Mission, Workflow
 from .ledger import rebuild_ledger_projection
-from .mutations import materialize_current_workflow
+from .mutations import materialize_current_workflow, workflow_version_identity
 
 
 DEFAULT_FORBIDDEN_ACTIONS = [
@@ -137,6 +137,13 @@ def export_assignment(
             "mission_id": current_workflow.mission_id,
             "mission_goal": ledger.current_goal,
             "workflow_reason": current_workflow.reason,
+            "workflow_version_id": workflow_version_id(current_workflow, ledger),
+            "workflow_structure": _workflow_structure(
+                current_workflow,
+                ledger,
+                assignment_id=resolved_assignment_id,
+                node_id=node.id,
+            ),
             "context_capsule": capsule.to_dict(),
         },
         artifact_refs=capsule.artifact_refs,
@@ -178,8 +185,90 @@ def render_assignment_prompt(assignment: AssignmentPacket) -> str:
             yaml.safe_dump(assignment.artifact_refs, sort_keys=False).strip()
             if assignment.artifact_refs
             else "- None",
+            "",
+            "## Structural Escape Hatch",
+            "If the assignment is blocked by workflow structure, return status blocked,",
+            "verification.status workflow_structure, and optionally one control_intents item:",
+            "intent_type: workflow_mutation",
+            "reason: discovered_missing_dependency | node_needs_split | stale_result | other",
+            "rationale: <why the current structure blocks correct execution>",
+            "proposed_changes: {add_nodes: [], add_edges: [], remove_edges: [], supersede_assignments: []}",
+            "evidence_refs: [<artifact-id>]",
+            "Omit control_intents when no structural change is needed.",
+            "Do not choose proposal IDs, provenance, workflow versions, approval policy, or edit the ledger.",
         ]
     )
+
+
+def workflow_version_id(workflow: Workflow, ledger: Ledger) -> str:
+    sequence = sum(
+        event.get("event_type") == "workflow_mutation_accepted"
+        and event.get("workflow_id") == workflow.workflow_id
+        for event in ledger.event_log
+    )
+    return workflow_version_identity(workflow, sequence)
+
+
+def _workflow_structure(
+    workflow: Workflow,
+    ledger: Ledger,
+    *,
+    assignment_id: str,
+    node_id: str,
+) -> dict[str, Any]:
+    assignments = {
+        event["assignment_id"]: {
+            "assignment_id": event["assignment_id"],
+            "node_id": event.get("node_id"),
+        }
+        for event in ledger.event_log
+        if event.get("event_type") == "assignment_created"
+        and event.get("workflow_id") == workflow.workflow_id
+        and isinstance(event.get("assignment_id"), str)
+    }
+    assignments[assignment_id] = {
+        "assignment_id": assignment_id,
+        "node_id": node_id,
+    }
+    superseded = {
+        event.get("assignment_id")
+        for event in ledger.event_log
+        if event.get("event_type") == "assignment_superseded"
+        and event.get("workflow_id") == workflow.workflow_id
+    }
+    return {
+        "roles": sorted(workflow.roles),
+        "events": sorted(workflow.events),
+        "nodes": [
+            {
+                "id": node.id,
+                "role": node.role,
+                "waits_for": _event_branches(node.waits_for_all, node.waits_for_any),
+                "emits": node.emits,
+            }
+            for node in workflow.nodes.values()
+        ],
+        "gates": [
+            {
+                "id": gate.id,
+                "node_id": gate.node_id,
+                "requires": _event_branches(gate.requires_all, gate.requires_any),
+            }
+            for gate in workflow.gates
+        ],
+        "terminal_events": workflow.terminal_events,
+        "active_assignments": [
+            assignments[key]
+            for key in sorted(assignments)
+            if key not in superseded
+        ],
+    }
+
+
+def _event_branches(all_of: list[str], any_of: list[str]) -> list[str] | dict[str, list[str]]:
+    if any_of:
+        return {"all_of": all_of, "any_of": any_of}
+    return all_of
 
 
 def compile_context_capsule(

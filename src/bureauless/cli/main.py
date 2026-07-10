@@ -16,6 +16,7 @@ import yaml
 
 from ..application.acceptance import decide_staged_result, stage_result, stage_session_record
 from ..application.demo import prepare_demo_workspace
+from ..application.mutation_retry_demo import run_mutation_retry_demo
 from ..application.run_bundles import load_run_bundle, write_run_bundle, write_session_run_bundle
 from ..errors import ProtocolError
 from ..protocol.advisors import (
@@ -81,6 +82,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Prepare an isolated controlled-mutation workbench demo",
     )
     mission_mutation_demo_parser.add_argument("workspace")
+    mission_mutation_retry_parser = mission_subparsers.add_parser(
+        "mutation-retry-demo",
+        help="Run the maintained Runtime M4 mutation and retry acceptance path",
+    )
+    mission_mutation_retry_parser.add_argument("workspace")
+    mission_mutation_retry_parser.add_argument("--real-agent", action="store_true")
+    mission_mutation_retry_parser.add_argument("--target-model")
+    mission_mutation_retry_parser.add_argument("--target-provider")
+    mission_mutation_retry_parser.add_argument("--provider-base-url")
+    mission_mutation_retry_parser.add_argument(
+        "--provider-api-key-env",
+        default="BUREAULESS_TEST_OPENAI_API_KEY",
+    )
+    mission_mutation_retry_parser.add_argument("--provider-wire-api")
+    mission_mutation_retry_parser.add_argument(
+        "--timeout-seconds", type=float, default=120.0
+    )
     mission_live_demo_parser = mission_subparsers.add_parser(
         "live-demo",
         help="Run the demo mission end-to-end through real session wrappers",
@@ -149,6 +167,20 @@ def main(argv: list[str] | None = None) -> int:
                     sort_keys=False,
                 )
             )
+            return 0
+
+        if args.command == "mission" and args.mission_command == "mutation-retry-demo":
+            report = run_mutation_retry_demo(
+                Path(args.workspace),
+                real_agent=args.real_agent,
+                target_model=args.target_model,
+                target_provider=args.target_provider,
+                provider_base_url=args.provider_base_url,
+                provider_api_key_env=args.provider_api_key_env,
+                provider_wire_api=args.provider_wire_api,
+                timeout_seconds=args.timeout_seconds,
+            )
+            print(yaml.safe_dump(report, sort_keys=False))
             return 0
 
         if args.command == "mission" and args.mission_command == "live-demo":

@@ -1025,6 +1025,39 @@ outcome_metrics:
 If token or cost data is unavailable, the runtime should record the missing data
 explicitly with `usage_confidence: none` rather than inventing a precise value.
 
+Provider-side usage evidence may also be preserved as a non-canonical artifact
+when the maintained execution path can observe billing data outside the agent's
+own output contract. This artifact is for attribution and backtesting, not for
+replay truth:
+
+```yaml
+artifact_type: provider_usage_capture
+assignment_id: assign-001
+session_id: session-001
+result_id: result-001
+agent_id: codex-cli
+provider: openai-compatible
+model: gpt-5.4
+collected_at: 2026-07-10T00:00:00Z
+source: provider_usage_capture_v1
+source_ref: responses/resp_123
+usage:
+  input_tokens: 123456
+  output_tokens: 7890
+  total_tokens: 131346
+  cached_input_tokens: 12000
+  reasoning_output_tokens: 640
+  cost_usd: 0.42
+  cost_source: provider_attributed
+  cost_confidence: high
+  usage_confidence: high
+```
+
+The usage object is closed to known accounting fields. If both input and output
+tokens are present, `total_tokens` must equal their sum. Unsupported fields stay
+absent rather than defaulting to zero. This artifact may later be merged into
+session/result metrics, but it does not create ledger facts by itself.
+
 Context-delivery telemetry is also session-level data. It records the context
 policy version, capsule size, included references, later context requests,
 first-pass outcome, review outcome, and rework. High-volume telemetry does not

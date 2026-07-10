@@ -1,14 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from .assignments import AssignmentPacket
+import yaml
+
+from .artifacts import sha256_file
+from .assignments import AssignmentPacket, workflow_version_id
 from ..errors import ProtocolError
 from .harness import STRICT_ACCEPTANCE_LEDGER_VERSION, Ledger, Workflow
 from .ledger import append_ledger_event
-from .mutations import materialize_current_workflow
+from .mutations import (
+    build_trusted_workflow_mutation_proposal,
+    materialize_current_workflow,
+)
 
 
 RESULT_STATUSES = {"completed", "blocked", "completed_with_proposal"}
@@ -29,6 +38,7 @@ class ResultProposal:
     native_log_refs: list[dict[str, Any]]
     mutation_proposal_refs: list[str]
     review_status: str | None
+    control_intents: list[Any] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -49,7 +59,15 @@ class ResultProposal:
             payload["effective_provider"] = self.effective_provider
         if self.review_status is not None:
             payload["review_status"] = self.review_status
+        if self.control_intents:
+            payload["control_intents"] = self.control_intents
         return payload
+
+
+@dataclass(frozen=True)
+class MutationIntakeResult:
+    ledger: Ledger
+    disposition: dict[str, Any]
 
 
 def load_result_proposal(data: dict[str, Any]) -> ResultProposal:
@@ -69,6 +87,7 @@ def load_result_proposal(data: dict[str, Any]) -> ResultProposal:
             data, "mutation_proposal_refs", default=[]
         ),
         review_status=_as_optional_string(data.get("review_status")),
+        control_intents=_as_list(data, "control_intents", default=[]),
     )
 
 
@@ -92,6 +111,9 @@ def import_result_proposal(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "result": result.to_dict(),
     }
+    observed_version = assignment.visible_context.get("workflow_version_id")
+    if isinstance(observed_version, str) and observed_version:
+        result_event["workflow_version_id"] = observed_version
     updated = append_ledger_event(ledger, result_event, current_workflow)
     if ledger.ledger_version >= STRICT_ACCEPTANCE_LEDGER_VERSION:
         return updated
@@ -114,6 +136,194 @@ def import_result_proposal(
             current_workflow,
         )
     return updated
+
+
+def intake_result_mutation_intent(
+    workflow: Workflow,
+    ledger: Ledger,
+    assignment: AssignmentPacket,
+    result: ResultProposal,
+    *,
+    session_id: str,
+    artifact_root: Path,
+) -> MutationIntakeResult | None:
+    if not result.control_intents:
+        return None
+
+    root = artifact_root.resolve()
+    result_event_id = f"event-{result.result_id}"
+    result_event = next(
+        (event for event in ledger.event_log if event.get("event_id") == result_event_id),
+        None,
+    )
+    if result_event is None or result_event.get("event_type") != "result_submitted":
+        raise ProtocolError("Mutation intake requires a staged result_submitted event")
+
+    base_version = assignment.visible_context.get("workflow_version_id")
+    current_workflow = materialize_current_workflow(workflow, ledger)
+    current_version = workflow_version_id(current_workflow, ledger)
+    errors: list[dict[str, str]] = []
+    proposal = None
+    status = "invalid"
+    if ledger.ledger_version < 3:
+        status = "unsupported"
+        errors = [
+            {
+                "code": "ledger_version_not_writable",
+                "message": "Mutation intake requires ledger_version 3",
+            }
+        ]
+    elif not isinstance(base_version, str) or not base_version:
+        errors = [
+            {
+                "code": "missing_assignment_workflow_version",
+                "message": "Assignment is missing workflow_version_id",
+            }
+        ]
+    else:
+        assignment_event = next(
+            (
+                event
+                for event in ledger.event_log
+                if event.get("event_type") == "assignment_created"
+                and event.get("assignment_id") == assignment.assignment_id
+            ),
+            None,
+        )
+        if assignment_event is None or (
+            assignment_event.get("session_id") != session_id
+            or assignment_event.get("agent_id") != result.agent_id
+        ):
+            errors = [
+                {
+                    "code": "invalid_assignment_provenance",
+                    "message": "Mutation intake requires matching assignment creation provenance",
+                }
+            ]
+        else:
+            built = build_trusted_workflow_mutation_proposal(
+                result.control_intents[0],
+                workflow_id=workflow.workflow_id,
+                assignment_id=assignment.assignment_id,
+                session_id=session_id,
+                agent_id=result.agent_id,
+                source_result_event_id=result_event_id,
+                assignment_workflow_version_id=base_version,
+                current_workflow_version_id=current_version,
+                requires_approval="orchestrator",
+            )
+            status = built.status
+            errors = [error.to_dict() for error in built.errors]
+            proposal = built.proposal
+            if status == "rejected":
+                status = (
+                    "unsupported"
+                    if any(
+                        error["code"] == "forbidden_mutation_operation"
+                        for error in errors
+                    )
+                    else "invalid"
+                )
+
+    disposition_path = root / "artifacts" / "mutations" / f"intake-{result.result_id}.yaml"
+    disposition: dict[str, Any] = {
+        "artifact_type": "mutation_intake_disposition",
+        "status": status,
+        "source_result_event_id": result_event_id,
+        "assignment_id": assignment.assignment_id,
+        "session_id": session_id,
+        "agent_id": result.agent_id,
+        "errors": errors,
+    }
+    updated = ledger
+    if proposal is not None:
+        proposal_path = root / "artifacts" / "mutations" / f"{proposal.proposal_id}.yaml"
+        proposal_event_id = f"event-{proposal.proposal_id}"
+        existing = next(
+            (
+                event
+                for event in ledger.event_log
+                if event.get("event_id") == proposal_event_id
+            ),
+            None,
+        )
+        if existing is not None and not proposal_path.is_file():
+            raise ProtocolError(
+                f"Mutation proposal event artifact is missing: {proposal_path}"
+            )
+        proposal_hash = _write_immutable_yaml(proposal_path, proposal.to_dict())
+        proposal_artifact = {
+            "artifact_id": f"artifact-{proposal.proposal_id}",
+            "path": proposal_path.relative_to(root).as_posix(),
+            "sha256": proposal_hash,
+            "created_by": "harness",
+            "source_event": result_event_id,
+            "mutable": False,
+        }
+        if existing is None:
+            event = {
+                "event_id": proposal_event_id,
+                "event_type": "workflow_mutation_proposed",
+                "mission_id": current_workflow.mission_id,
+                "workflow_id": current_workflow.workflow_id,
+                "assignment_id": assignment.assignment_id,
+                "session_id": session_id,
+                "agent_id": result.agent_id,
+                "source_event_id": result_event_id,
+                "created_at": result_event.get("created_at"),
+                "proposal_artifact": proposal_artifact,
+                "mutation_proposal": proposal.to_dict(),
+            }
+            updated = append_ledger_event(ledger, event, current_workflow)
+            status = "registered"
+        elif (
+            existing.get("mutation_proposal") == proposal.to_dict()
+            and existing.get("proposal_artifact") == proposal_artifact
+        ):
+            status = "duplicate"
+        else:
+            raise ProtocolError(
+                f"Mutation proposal event identity collision: {proposal_event_id}"
+            )
+        disposition.update(
+            {
+                "status": status,
+                "proposal_id": proposal.proposal_id,
+                "proposal_event_id": proposal_event_id,
+                "proposal_artifact": proposal_artifact,
+            }
+        )
+
+    disposition["artifact_path"] = disposition_path.relative_to(root).as_posix()
+    _write_yaml(disposition_path, disposition)
+    return MutationIntakeResult(ledger=updated, disposition=disposition)
+
+
+def _write_immutable_yaml(path: Path, payload: dict[str, Any]) -> str:
+    content = yaml.safe_dump(payload, sort_keys=False).encode("utf-8")
+    if path.exists():
+        if path.read_bytes() != content:
+            raise ProtocolError(f"Immutable mutation artifact differs: {path}")
+    else:
+        _write_bytes(path, content)
+    digest = sha256_file(path)
+    if digest != sha256(content).hexdigest():
+        raise ProtocolError(f"Mutation artifact hash verification failed: {path}")
+    return digest
+
+
+def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    _write_bytes(path, yaml.safe_dump(payload, sort_keys=False).encode("utf-8"))
+
+
+def _write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def validate_result_proposal(
@@ -168,6 +378,16 @@ def _validate_result_status(result: ResultProposal) -> None:
         )
     if result.status == "blocked" and result.emitted_events:
         raise ProtocolError("Blocked result cannot emit workflow completion events")
+    if len(result.control_intents) > 1:
+        raise ProtocolError("Result may contain at most one control intent")
+    if result.control_intents and result.status not in {"completed", "blocked"}:
+        raise ProtocolError(
+            "control_intents require status completed or blocked"
+        )
+    if result.control_intents and result.mutation_proposal_refs:
+        raise ProtocolError(
+            "Result cannot mix control_intents with legacy mutation_proposal_refs"
+        )
 
 
 def _validate_mutation_proposal_refs(result: ResultProposal) -> None:
@@ -248,6 +468,17 @@ def _as_mapping_list(
     value = data.get(key, default)
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         raise ProtocolError(f"Result field {key!r} must be a list of objects")
+    return value
+
+
+def _as_list(
+    data: dict[str, Any],
+    key: str,
+    default: list[Any] | None = None,
+) -> list[Any]:
+    value = data.get(key, default)
+    if not isinstance(value, list):
+        raise ProtocolError(f"Result field {key!r} must be a list")
     return value
 
 
