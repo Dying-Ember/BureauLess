@@ -19,6 +19,15 @@ internal implementation grouping inside that milestone.
 - [`workbench_milestone_4_tasklist.md`](workbench_milestone_4_tasklist.md):
   the completed milestone for inspecting the decision, outcome, context, and
   dispatch artifacts delivered by Runtime Harness Milestone 3.
+- [`workbench_milestone_5_tasklist.md`](workbench_milestone_5_tasklist.md):
+  the completed milestone for read-only Runtime M4 timeline, historical
+  snapshot, version-selection, and diff inspection.
+- [`workbench_milestone_6_tasklist.md`](workbench_milestone_6_tasklist.md):
+  the completed milestone for validated runtime operator actions, including
+  context resolution, dispatch/launch controls, and acceptance-spine actions.
+- [`workbench_milestone_7_tasklist.md`](workbench_milestone_7_tasklist.md):
+  the completed milestone for guided runtime bootstrap, manifest/run-bundle
+  source navigation, and artifact-readiness visibility.
 
 ## Reading Order
 
@@ -30,4 +39,11 @@ internal implementation grouping inside that milestone.
 5. Read Workbench Milestone 3 when changing URL-provided runtime sources,
    persisted runtime source state, or planning/runtime action copy.
 6. Read Workbench Milestone 4 for the completed M3 inspection baseline and its
-  acceptance criteria for M3 artifact inspection.
+   acceptance criteria for M3 artifact inspection.
+7. Read Workbench Milestone 5 when changing Runtime M4 timeline, historical
+   snapshot, version selection, or diff inspection surfaces.
+8. Read Workbench Milestone 6 when changing validated runtime action controls
+   such as context resolution, dispatch, launch, result staging, review
+   import, or outcome decisions.
+9. Read Workbench Milestone 7 when changing runtime bootstrap, manifest-root
+   navigation, run-bundle entry, or artifact-readiness guidance.

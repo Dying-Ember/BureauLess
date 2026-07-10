@@ -41,8 +41,9 @@ acceptance criteria.
   planned remediation milestone that makes M2/M3 artifacts authoritative in the
   real-agent execution path.
 - [`tasks/runtime_harness_milestone_4_tasklist.md`](tasks/runtime_harness_milestone_4_tasklist.md):
-  planned runtime milestone for universal inert mutation intents, trusted
-  proposal intake, retry control, workflow versions, and linear temporal replay.
+  completed runtime milestone for universal inert mutation intents, trusted
+  proposal intake, retry control, workflow versions, linear temporal replay,
+  and history APIs.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
@@ -55,6 +56,15 @@ acceptance criteria.
 - [`tasks/workbench_milestone_4_tasklist.md`](tasks/workbench_milestone_4_tasklist.md):
   completed milestone for visual inspection of Runtime Harness Milestone 3
   decisions, outcomes, context delivery, telemetry, and dispatch artifacts.
+- [`tasks/workbench_milestone_5_tasklist.md`](tasks/workbench_milestone_5_tasklist.md):
+  completed milestone for read-only Runtime Harness Milestone 4 timeline,
+  historical snapshot, version-selection, and diff inspection.
+- [`tasks/workbench_milestone_6_tasklist.md`](tasks/workbench_milestone_6_tasklist.md):
+  completed milestone for validated runtime operator actions including context
+  resolution, dispatch/launch controls, and acceptance-spine actions.
+- [`tasks/workbench_milestone_7_tasklist.md`](tasks/workbench_milestone_7_tasklist.md):
+  completed milestone for guided runtime bootstrap, manifest/run-bundle
+  navigation, and artifact-readiness visibility.
 - [`tasks/engineering_boundary_refactor_tasklist.md`](tasks/engineering_boundary_refactor_tasklist.md):
   RFC-003 implementation task list for shared errors, CLI split, application
   services, and protocol exports.

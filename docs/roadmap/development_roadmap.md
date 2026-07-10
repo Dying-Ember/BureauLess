@@ -122,6 +122,11 @@ without reconstructing it from commits.
   context delivery, telemetry, and bounded handoff artifacts from Runtime
   Harness Milestone 3.
   Source: [`../tasks/workbench_milestone_4_tasklist.md`](../tasks/workbench_milestone_4_tasklist.md)
+- Workbench Milestone 5:
+  planned read-only Runtime M4 timeline, historical snapshot, version
+  selection, and workflow/state diff inspection backed by the runtime history
+  APIs.
+  Source: [`../tasks/workbench_milestone_5_tasklist.md`](../tasks/workbench_milestone_5_tasklist.md)
 
 ### Implemented Engineering Cleanup
 
@@ -143,21 +148,46 @@ capability can span several milestones.
 | Runtime Harness M2.5 | A6 controlled workflow mutation and current-state replay | completed |
 | Runtime Harness M3 | Extended A1 with node outcomes, added A4/A5 artifacts, and proved the initial demo-scoped `codex-cli` A5.5 path | completed artifact/demo scope |
 | Runtime Harness M3.5 | Acceptance, dispatch, context continuation, lifecycle control, truthful turn reports, reusable run bundles, advisor invocation, and execution-spine E2E acceptance | completed |
-| Runtime Harness M4 | Close the A6 real-agent mutation intake loop and add A7 retry control plus linear temporal replay | in progress; RM4-00 complete, RM4-01 next |
+| Runtime Harness M4 | Close the A6 real-agent mutation intake loop and add A7 retry control plus linear temporal replay | completed |
 | Workbench M1 | B1 through B5 planning-DAG inspection, editing, and dispatch preparation | completed |
 | Workbench M2 | B6 runtime console for mission, workflow, ledger, gatekeeper, replay, and mutation state | completed |
 | Workbench M3 | B7 runtime-source trust and planning/runtime action clarity | completed |
 | Workbench M4 | B8 visual inspection for Runtime Harness M3 artifacts | completed |
+| Workbench M5 | Read-only Runtime M4 temporal inspection for timeline, snapshot, version selection, and diff explanation | completed |
+| Workbench M6 | Validated runtime operator actions for context resolution, dispatch/launch, acceptance-spine controls, doctoring visibility, and smoke-backed error surfaces | completed |
+| Workbench M7 | Guided runtime bootstrap, manifest/run-bundle navigation, and artifact-readiness visibility on top of the completed runtime surfaces | completed |
 
 ## Planned Next Milestones
 
-There is no active Workbench Milestone 5 yet. The most recent completed
-workbench delivery is Workbench Milestone 4. Its task list is
+The most recent completed workbench deliveries are Workbench Milestones 4, 5,
+and 6. Workbench Milestone 4 task list is
 [`../tasks/workbench_milestone_4_tasklist.md`](../tasks/workbench_milestone_4_tasklist.md).
 It adds read-only inspection for the structured M3 runtime artifacts already
 exposed by the backend: routing and advisor decisions, node outcomes and
 evidence, context capsules and requests, assignments and results, turn reports,
 and dispatch packets.
+
+Workbench Milestone 5 task list is
+[`../tasks/workbench_milestone_5_tasklist.md`](../tasks/workbench_milestone_5_tasklist.md).
+It completes the read-only Runtime M4 history surface for timeline, version
+selection, historical snapshot explanation, temporal diff inspection, and
+smoke coverage without moving replay rules into the frontend.
+
+Workbench Milestone 6 task list is
+[`../tasks/workbench_milestone_6_tasklist.md`](../tasks/workbench_milestone_6_tasklist.md).
+It is complete and turns selected validated runtime APIs into operator-facing
+actions for context resolution, dispatch packet compile, bounded session
+launch, result staging, review import, outcome decisions, launch doctoring,
+and structured backend failure visibility while preserving Python runtime
+ownership of every write and post-action refresh.
+
+Workbench Milestone 7 is now complete as the follow-on UI milestone. Its task list is
+[`../tasks/workbench_milestone_7_tasklist.md`](../tasks/workbench_milestone_7_tasklist.md).
+WB7-01 through WB7-05 are complete: the Workbench now has a typed runtime-demo
+bootstrap boundary, a guided runtime entry block that commits backend-owned
+runtime paths into the existing runtime view, a source navigator that shows
+provenance plus bounded switching between returned roots, an artifact-readiness
+summary, and smoke coverage that locks the whole guided entry flow in place.
 
 Runtime Harness Milestone 3.5 is complete. Its task list is
 [`../tasks/runtime_harness_milestone_3_5_tasklist.md`](../tasks/runtime_harness_milestone_3_5_tasklist.md).
@@ -169,7 +199,7 @@ RM35-01 produced
 for acceptance compatibility is implemented under accepted
 [`ADR-005`](../adrs/005-authoritative-result-acceptance-spine/001-accepted-design.md).
 
-Runtime Harness Milestone 4 is the active runtime delivery. Its task list is
+Runtime Harness Milestone 4 is complete. Its task list is
 [`../tasks/runtime_harness_milestone_4_tasklist.md`](../tasks/runtime_harness_milestone_4_tasklist.md).
 It closes the existing real-agent mutation intake gap, then adds bounded
 retry/circuit-break semantics, deterministic workflow versions, and linear
@@ -181,7 +211,14 @@ RM4-00 accepted
 through
 [`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md).
 Worker-intent, retry, inclusive cursor, version transition, stale proposal,
-historical assignment, and compatibility semantics are settled. RM4-01 is next.
+historical assignment, and compatibility semantics are settled. RM4-01 through
+RM4-11 implemented the worker intent, trusted envelope,
+universal assignment escape hatch, structured result transport, deterministic
+proposal registration, bounded retry/circuit control, the maintained two-turn
+mutation/retry acceptance path, workflow version projection, inclusive
+event-prefix replay, assignment validity across versions, historical
+inspection APIs, determinism/scale guardrails, and protocol/workbench handoff
+closure. Runtime M4 is complete.
 The required M3.5 foundations are closed.
 The existing RFC-001 remains implemented M2.5 design history rather than
 being silently expanded.
@@ -462,8 +499,7 @@ Acceptance:
 
 ### A7: Agent Mutation Intake, Retry Control, And Temporal History
 
-Status: in progress for Runtime Harness Milestone 4. RM4-00 design is accepted;
-runtime implementation begins with RM4-01.
+Status: completed for Runtime Harness Milestone 4.
 
 Goal: turn controlled mutation from a current-state protocol into a complete
 real-agent proposal path with deterministic, read-only historical replay.
@@ -480,14 +516,11 @@ Accepted design:
 
 Current gap:
 
-- `codex-cli` can return `mutation_proposal_refs`, but the assignment contract
-  does not provide a typed mutation-intent channel and couples proposal presence
-  to `completed_with_proposal` execution status.
-- Session/result packaging preserves the referenced artifact but does not
-  validate its YAML as a mutation proposal or register a
-  `workflow_mutation_proposed` event.
-- Existing mutation APIs inspect and decide proposal events that already exist;
-  they do not complete agent proposal intake.
+- Assignment prompts and Codex structured output now expose the typed mutation
+  intent independently of completed/blocked execution status.
+- Valid ledger-v3 session intake registers trusted proposals, and retry-v1 now
+  appends bounded retry/circuit decisions. The maintained real-agent demo and
+  temporal version projection remain open.
 
 Planned work:
 
@@ -706,15 +739,108 @@ Acceptance boundary:
 - No dispatch action, runtime policy, YAML parsing, or canonical-state mutation
   moves into the frontend.
 
+### B9: Runtime M4 Temporal Inspection
+
+Status: completed in Workbench Milestone 5.
+
+Source tasks:
+
+- WB5-01 Timeline, Snapshot, And Diff API Client.
+- WB5-02 Timeline And Version Selector.
+- WB5-03 Historical Node And Assignment Inspector.
+- WB5-04 Workflow And State Diff Inspector.
+- WB5-05 Runtime M4 History Smoke Coverage.
+
+Task list:
+[`../tasks/workbench_milestone_5_tasklist.md`](../tasks/workbench_milestone_5_tasklist.md)
+
+Goal: expose Runtime Harness Milestone 4 temporal history in the Workbench
+without moving replay, version projection, or compare semantics into the
+frontend.
+
+Acceptance boundary:
+
+- The workbench reads `/api/replay/timeline`, `/api/replay/snapshot`, and
+  `/api/replay/diff` through typed clients and uses Python runtime payloads as
+  the authoritative source of historical truth.
+- Operators can inspect accepted workflow-version transitions, cursor-selected
+  historical node and assignment state, and supported two-cursor diffs between
+  linear history points.
+- Unsupported cursors, rollback requests, and unavailable historical evidence
+  remain explicit read-only error states rather than frontend fallback logic.
+- No branching replay UI, rollback controls, or frontend-owned mutation
+  authority is added.
+
+### B10: Validated Runtime Operator Actions
+
+Status: completed in Workbench Milestone 6.
+
+Source tasks:
+
+- WB6-01 Runtime Action API Client And Action State Model.
+- WB6-02 Context Request Resolution Panel.
+- WB6-03 Dispatch Packet Compile And Session Launch Controls.
+- WB6-04 Result Staging And Review/Outcome Decision Controls.
+- WB6-05 Runtime Action Safety, Doctoring, And Error Surfaces.
+- WB6-06 Runtime Operator Actions Smoke Coverage.
+
+Task list:
+[`../tasks/workbench_milestone_6_tasklist.md`](../tasks/workbench_milestone_6_tasklist.md)
+
+Goal: close the operational gap between read-only runtime inspection and the
+validated backend actions that advance or launch runtime work.
+
+Acceptance boundary:
+
+- The workbench invokes validated action APIs for context resolution, dispatch
+  compile, bounded launch, result staging, review import, and outcome decision
+  through typed clients.
+- All canonical mutations, packet validation, launch binding, and replay/
+  gatekeeper refresh remain backend-owned.
+- Action failures, strict-ledger rejections, doctor failures, and invalid
+  inputs remain explicit UI states.
+- No frontend-owned workflow mutation semantics, replay semantics, or silent
+  optimistic ledger updates are introduced.
+
+### B11: Guided Runtime Bootstrap And Source Navigation
+
+Status: completed in Workbench Milestone 7.
+
+Source tasks:
+
+- WB7-01 Runtime Demo Bootstrap API Client And Source State.
+- WB7-02 Guided Runtime Entry Panel.
+- WB7-03 Manifest And Run-Bundle Source Navigator.
+- WB7-04 Artifact Readiness And Missing-Evidence Summary.
+- WB7-05 Guided Bootstrap And Source-Navigation Smoke Coverage.
+
+Task list:
+[`../tasks/workbench_milestone_7_tasklist.md`](../tasks/workbench_milestone_7_tasklist.md)
+
+Goal: make the completed runtime inspection and action surface reachable from a
+cold start without requiring the operator to manually construct manifest URLs
+or search for generated bundle paths.
+
+Acceptance boundary:
+
+- The workbench invokes backend-owned bootstrap and source APIs through typed
+  clients and uses returned manifest or bundle roots as authoritative.
+- Operators can bootstrap a maintained runtime demo, open an explicit manifest
+  root, and see which related artifacts are available or missing.
+- Source provenance and missing evidence remain explicit UI states.
+- No frontend-owned workspace generation, path synthesis, replay semantics, or
+  canonical mutation authority is introduced.
+
 ## Current Priority Order
 
-1. Implement RM4-01 worker intent and trusted proposal envelope contracts.
-2. Close the version-bound real-agent mutation proposal path on the completed
-   M3.5 acceptance and dispatch foundations.
-3. Implement failure classification, circuit breaking, workflow versions, and
-   linear event-cursor replay in Runtime M4.
-4. Keep provider expansion, replay branches, rollback, and Workbench history UI
-   outside Runtime M3.5 and M4.
+1. Use the completed Workbench M7 surface to run maintained `codex-cli`
+   end-to-end trials and collect operator-friction findings before proposing a
+   new frontend milestone.
+2. Preserve the completed Runtime M3.5, Runtime M4, and Workbench M4-M7
+   boundaries while validating real workflow runs.
+3. Keep provider expansion, replay branches, rollback, and frontend-owned
+   write authority outside the completed milestones unless a later milestone
+   explicitly accepts them.
 
 ## Decision Rules
 

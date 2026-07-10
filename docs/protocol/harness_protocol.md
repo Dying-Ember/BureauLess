@@ -589,7 +589,7 @@ append claimed workflow events. The node remains blocked with
 result carrying mutation references also does not append a mutation event or
 alter the workflow.
 
-This is the implemented M2.5/M3 compatibility shape. The accepted Runtime M4
+This is the implemented M2.5/M3 compatibility shape. The implemented RM4-01
 contract below replaces the status coupling with an optional typed
 `control_intents` channel while retaining a compatibility reader for existing
 records.
@@ -709,14 +709,32 @@ initial_workflow + accepted_mutations -> current_workflow
 current_workflow + ledger_events      -> current derived state
 ```
 
-This milestone does not expose historical workflow snapshots or arbitrary
-time-based queries.
+RM4-09 exposes read-only historical timeline, snapshot, and diff APIs keyed by
+event cursor. Runtime M4 completion leaves these contracts authoritative:
+
+- `/api/replay/timeline`: ordered event history with event ordinal, event ID,
+  event type, active workflow version, and version-transition metadata.
+- `/api/replay/snapshot`: one cursor-selected historical workflow, replay
+  state, and gatekeeper explanation using `through_event_id` or
+  `through_event_ordinal`.
+- `/api/replay/diff`: runtime-owned workflow/state comparison between two valid
+  linear cursors, with structured errors for unknown cursors, ambiguous
+  selectors, and unsupported rollback-style comparisons.
+
+Timestamp replay, branch comparison, rollback, and frontend-owned replay remain
+outside the runtime contract.
 
 ### Accepted Runtime M4 Extension
 
 Status: accepted by
 [`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md),
-implementation pending under Runtime M4.
+with the worker intent, trusted envelope, assignment escape hatch, structured
+output transport, deterministic proposal registration, bounded retry control,
+maintained mutation/retry acceptance, and workflow version projection
+implemented by RM4-01 through RM4-06. Event-prefix replay and historical
+inspection APIs are implemented by RM4-07 through RM4-09; RM4-10 adds
+determinism and measured replay guardrails, and RM4-11 closes protocol,
+roadmap, and Workbench handoff documentation.
 
 Runtime M4 permits every worker to include at most one inert
 `workflow_mutation` intent in `control_intents`, independently of whether the
@@ -725,12 +743,87 @@ rationale, proposed changes, and evidence refs. The harness owns proposal IDs,
 assignment/session/agent provenance, base workflow version, artifact identity,
 and approval policy.
 
+The worker-authored intent is a closed object:
+
+```yaml
+intent_type: workflow_mutation
+reason: discovered_missing_dependency
+rationale: Verification must complete before commit.
+proposed_changes:
+  add_nodes: []
+  add_edges: []
+  remove_edges: []
+  supersede_assignments: []
+evidence_refs:
+  - artifact-verification-gap
+```
+
+Unknown top-level fields are rejected, including worker-supplied proposal IDs,
+workflow identity, provenance, base version, or approval policy. After intent
+validation, the runtime builds this trusted envelope:
+
+```yaml
+proposal_id: proposal-<deterministic-16-hex-id>
+proposal_type: workflow_mutation
+workflow_id: workflow-001
+base_workflow_version_id: workflow-001:v0002:abc123def456
+source:
+  assignment_id: assign-001
+  session_id: session-001
+  agent_id: codex-cli
+  actor: worker
+requires_approval: orchestrator
+intent: <validated-worker-intent>
+```
+
+The proposal ID is the first 16 hexadecimal SHA-256 characters over the source
+result event ID, intent ordinal zero, assignment-observed workflow version, and
+canonical intent payload. Envelope construction returns structured rejection or
+stale errors and remains inert. It succeeds only when the assignment-observed
+workflow version is still current.
+
+`completed` and `blocked` results may carry at most one `control_intents` item.
+Malformed intent content remains attached to the submitted result for separate
+intake disposition; it does not create a proposal event or invalidate an
+otherwise valid result. A result cannot mix the new channel with legacy
+`mutation_proposal_refs`.
+
+Every exported assignment includes `workflow_version_id` plus a compact
+`workflow_structure` containing valid roles, events, nodes, gates, terminal
+events, and active assignment IDs. The generic assignment prompt always exposes
+the structural escape hatch, including to workers whose original plan omitted
+one. A structural block uses `status: blocked` and
+`verification.status: workflow_structure`; `control_intents` is omitted when no
+graph change is needed.
+
+The maintained Codex CLI adapter extracts `control_intents` from final
+structured YAML and preserves it through the session record and result package.
+The shared structured-output parser provides the same payload path for other
+adapters. Transport preserves malformed intent content for separate intake
+disposition rather than treating it as canonical authority.
+
 Result staging and intent intake are separate transactions. Intake writes a
 `mutation_intake_disposition` evidence artifact with `registered`, `duplicate`,
 `invalid`, `stale`, or `unsupported` status. Only `registered` appends a new
 `workflow_mutation_proposed` event. Duplicate intake returns the existing
 proposal; failed intake appends no canonical event and never erases a valid
 result.
+
+The maintained session staging path implements this boundary. It first appends
+`result_submitted`, including the assignment-observed `workflow_version_id`,
+then validates the optional intent. Intake atomically writes
+`artifacts/mutations/intake-<result-id>.yaml`. Valid ledger-v3 intake also
+atomically writes `artifacts/mutations/<proposal-id>.yaml`, verifies its SHA-256,
+and appends deterministic `event-<proposal-id>` linked to the result and
+artifact. Repeated intake returns `duplicate` without another event. An orphan
+proposal artifact can be reconciled by appending its missing deterministic
+event; an event whose artifact is missing is reported as corruption.
+
+Malformed input returns `invalid`, forbidden mutation vocabulary returns
+`unsupported`, and an assignment/current version mismatch returns `stale`.
+These dispositions remain filesystem evidence only. Ledger v2 cannot register
+maintained mutation proposals and returns `unsupported`; existing M2.5 records
+remain readable.
 
 Maintained mutation/version writes require `ledger_version: 3`. Workflow
 content hashes are SHA-256 over canonical JSON of the validated workflow.
@@ -740,25 +833,45 @@ Version IDs have this form:
 <workflow_id>:v<accepted-mutation-sequence:04d>:<first-12-hash-characters>
 ```
 
-Version zero uses sequence `0000`. Each accepted mutation records full
-before/after hashes, parent version, and `workflow_version_before` /
-`workflow_version_after`. Proposal and rejection events do not advance the
-version. V1 stays historical-read only; v2 temporal compatibility is read only;
-explicit v3 migration appends `workflow_version_initialized` without rewriting
-history.
+Version zero uses sequence `0000`. RM4-06 derives one immutable child for each
+accepted mutation in append order. Native v3 append records full before/after
+hashes, `parent_workflow_version_id`, `workflow_version_before`, and
+`workflow_version_after`; a supplied field that disagrees with deterministic
+replay is rejected before append. Proposal and rejection events do not advance
+the version. V1 stays historical-read only; v2 temporal compatibility is read
+only; explicit v3 migration appends `workflow_version_initialized` without
+rewriting history.
 
-Historical `through_event_id` replay is inclusive. An accepted mutation is
-visible as its child version through its own event; an unknown cursor fails;
-replay through the final event equals current replay. Ledger append order is
+`project_workflow_versions(initial_workflow, ledger)` returns version zero, the
+ordered child versions, and one active-version entry per ledger event. For an
+accepted mutation, that event's active version and after-version are the child;
+all other events have equal before/after identity. Repeated projection over
+equal inputs is structurally equal. Historical compatibility records may omit
+transition metadata, but any recorded transition field is validated against
+the derived linear chain.
+
+Historical replay accepts one inclusive `through_event_id` or zero-based
+`through_event_ordinal`. An accepted mutation is visible as its child version
+through its own event; an unknown or ambiguous cursor fails; replay through the
+final event equals current replay. Prefix selection rebuilds the ledger
+projection before deriving workflow, mutation, node, assignment, terminal, and
+gatekeeper state, so future events cannot leak backward. Replay output includes
+the active workflow version and effective cursor. Ledger append order is
 authoritative and timestamps never order replay.
 
-Assignments record their creation workflow version. They remain valid in a
-child version only if deterministic impact proves their node contract,
-dependencies, gates, scoped evidence, and forbidden actions unchanged.
-Affected in-flight assignments are superseded and cancelled when supported;
-late results remain evidence but cannot satisfy gates. Mutation acceptance uses
-compare-and-swap over expected ledger tail and expected current version. Stale
-proposals never auto-rebase.
+Assignments record their creation workflow version. Replay exposes derived
+assignment validity at every cursor, including creation and active versions,
+impact classification and reasons, and the accepted mutation transition.
+Compatibility assignments without an explicit creation version infer it from
+their creation event's active version. They remain valid in a child version
+only if deterministic impact proves their node contract, dependencies, gates,
+scoped evidence, and forbidden actions unchanged. Affected assignments become
+invalid at the inclusive acceptance cursor; the following
+`assignment_superseded` event preserves explicit lifecycle evidence without
+rewriting history. Gatekeeper explanations identify both assignment and
+mutation. Late results remain evidence but cannot satisfy gates. Mutation
+acceptance uses compare-and-swap over expected ledger tail and expected current
+version. Stale proposals never auto-rebase.
 
 High-risk safety weakening, protected side effects, permission expansion, and
 high-risk in-flight supersession require a distinct human second approver. A
@@ -1037,6 +1150,36 @@ prior attempt, failure class/fingerprint, changed-input evidence, strategy, and
 budget snapshot. The second identical deterministic fingerprint appends
 `assignment_circuit_opened` and launches no third unchanged attempt. Existing
 `assignment_retry_requested` remains a compatibility event until migration.
+
+RM4-04 implements this policy as an explicit decision boundary. Session
+failures are normalized into transient infrastructure, malformed output,
+verification, capability, deterministic, workflow-structure,
+stale/superseded, or policy classes. SHA-256 fingerprints bind root assignment,
+workflow version, normalized failure evidence, agent/model/provider, and
+strategy identity. Verification repair requires both new evidence and a repair
+strategy; capability retry requires a routing decision and changed strategy.
+
+The policy appends either `assignment_retry_scheduled` or
+`assignment_circuit_opened`; it never launches an agent itself. Replay marks the
+prior attempt terminal, exposes the scheduled attempt, and blocks an open
+circuit as `needs_review` or `needs_replan`. A later explicit assignment
+revision clears the old circuit block. Unchanged transient failures may consume
+their three-attempt budget; repeated non-transient fingerprints, exhausted
+attempts, or the 20,000-token aggregate cap open the circuit.
+
+RM4-05 maintains the complete acceptance path as:
+
+```bash
+bureauless mission mutation-retry-demo /tmp/bureauless-rm4-demo
+bureauless mission mutation-retry-demo /tmp/bureauless-rm4-real \
+  --real-agent --target-model <model> --target-provider <provider>
+```
+
+The default command uses deterministic `codex-cli` JSONL fixtures while still
+passing through normal dispatch and session intake. The opt-in command replaces
+only the command runner with the real agent. Both paths require ledger v3 and
+produce `mutation_retry_demo.yaml` with proposal, pending, acceptance, version,
+supersession, resumed dispatch, retry, malformed-intent, and circuit evidence.
 
 Assignment terminality must be explicit in replay:
 

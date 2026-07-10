@@ -216,6 +216,9 @@ export type ReplayAssignmentAttempt = {
   node_id: string;
   state:
     | 'in_flight'
+    | 'retry_scheduled'
+    | 'awaiting_context'
+    | 'context_blocked'
     | 'awaiting_acceptance'
     | 'completed'
     | 'rejected'
@@ -247,11 +250,25 @@ export type ReplayMutationProposal = {
   decision_event_id?: string;
 };
 
+export type ReplayAssignmentValidity = {
+  assignment_id: string;
+  node_id?: string;
+  creation_version_id?: string;
+  active_version_id: string;
+  status: 'affected' | 'unaffected' | 'needs_review';
+  reasons: string[];
+  transition_event_id?: string;
+};
+
 export type ReplayResponse = {
   workflow_id: string;
+  workflow_version_id: string;
+  through_event_id?: string | null;
+  through_event_ordinal?: number | null;
   terminal_complete: boolean;
   nodes: Record<string, ReplayNodeState>;
   mutation_proposals: Record<string, ReplayMutationProposal>;
+  assignment_validity: Record<string, ReplayAssignmentValidity>;
 };
 
 export type MutationWorkbenchPaths = {
@@ -259,6 +276,113 @@ export type MutationWorkbenchPaths = {
   workflowPath: string;
   ledgerPath: string;
   artifactManifestPath: string;
+  throughEventId: string;
+  throughEventOrdinal: string;
+  compareFromEventId: string;
+  compareFromEventOrdinal: string;
+  compareToEventId: string;
+  compareToEventOrdinal: string;
+};
+
+export type ReplayHistoryTimelineEvent = {
+  event_ordinal: number;
+  event_id: string;
+  event_type?: string;
+  active_workflow_version_id: string;
+  assignment_id?: string;
+  node_id?: string;
+  version_transition: {
+    changed: boolean;
+    workflow_version_before: string;
+    workflow_version_after: string;
+    parent_workflow_version_id?: string | null;
+    accepted_event_id?: string | null;
+  };
+};
+
+export type ReplayHistoryTimelineResponse = {
+  workflow_id: string;
+  ledger_version: string | number;
+  initial_workflow_version_id: string;
+  current_workflow_version_id: string;
+  versions: Array<{
+    version_id: string;
+    sequence: number;
+    content_hash: string;
+    parent_version_id?: string;
+    accepted_event_id?: string;
+  }>;
+  events: ReplayHistoryTimelineEvent[];
+};
+
+export type ReplayHistoryCursor = {
+  through_event_id?: string | null;
+  through_event_ordinal?: number | null;
+  workflow_version_id: string;
+};
+
+export type ReplayHistorySnapshotResponse = {
+  workflow_id: string;
+  cursor: ReplayHistoryCursor;
+  selected_event?: ReplayHistoryTimelineEvent | null;
+  workflow: RuntimeWorkflow;
+  replay: ReplayResponse;
+  gatekeeper: GatekeeperResponse;
+};
+
+export type ReplayHistoryDiffResponse = {
+  workflow_id: string;
+  from_cursor: ReplayHistoryCursor;
+  to_cursor: ReplayHistoryCursor;
+  events_between: Array<{
+    event_ordinal: number;
+    event_id?: string;
+    event_type?: string;
+  }>;
+  timeline_between: ReplayHistoryTimelineEvent[];
+  workflow_diff: {
+    changed: boolean;
+    nodes_added: RuntimeWorkflowNode[];
+    nodes_removed: RuntimeWorkflowNode[];
+    nodes_changed: Array<{
+      node_id: string;
+      before: RuntimeWorkflowNode;
+      after: RuntimeWorkflowNode;
+    }>;
+    gates_added: RuntimeWorkflowGate[];
+    gates_removed: RuntimeWorkflowGate[];
+    gates_changed: Array<{
+      gate_id: string;
+      before: RuntimeWorkflowGate;
+      after: RuntimeWorkflowGate;
+    }>;
+    terminal_events_before: string[];
+    terminal_events_after: string[];
+  };
+  state_diff: {
+    terminal_complete_before: boolean;
+    terminal_complete_after: boolean;
+    node_changes: Array<{
+      node_id: string;
+      before?: ReplayNodeState | null;
+      after?: ReplayNodeState | null;
+    }>;
+    assignment_validity_changes: Array<{
+      assignment_id: string;
+      before?: ReplayAssignmentValidity | null;
+      after?: ReplayAssignmentValidity | null;
+    }>;
+    mutation_changes: Array<{
+      proposal_event_id: string;
+      before?: ReplayMutationProposal | null;
+      after?: ReplayMutationProposal | null;
+    }>;
+  };
+};
+
+export type ReplayCursorSelector = {
+  eventId?: string;
+  eventOrdinal?: number;
 };
 
 export type ArtifactSessionManifestStep = {
@@ -340,6 +464,39 @@ export type AssignmentResponse = {
   outcome_metrics_policy: Record<string, unknown>;
 };
 
+export type AgentSpecResponse = {
+  agent_id: string;
+  binary: string;
+  kind: string;
+  help_args: string[];
+  version_args: string[];
+  cancellation: string;
+  metrics_capability: Record<string, string>;
+};
+
+export type AgentsResponse = {
+  agents: AgentSpecResponse[];
+};
+
+export type AgentDoctorCheckResponse = {
+  name: string;
+  status: string;
+  markers: string[];
+  missing_markers: string[];
+};
+
+export type AgentDoctorResponse = {
+  agent_id: string;
+  status: string;
+  control_level: string;
+  binary: string;
+  binary_path?: string | null;
+  version?: string | null;
+  checks: AgentDoctorCheckResponse[];
+  warnings: string[];
+  metrics_capability: Record<string, string>;
+};
+
 export type ContextCapsuleResponse = Record<string, unknown> & {
   assignment_id: string;
   workflow_id: string;
@@ -353,15 +510,42 @@ export type ContextRequestResponse = {
   missing_information: string;
   requested_refs: string[];
   expected_value?: string | null;
+  continuation_id?: string;
+  session_id?: string;
+  request_index?: number;
+  requested_at?: string;
+  expires_at?: string;
 };
 
 export type ContextResolutionResponse = {
   context_request_id: string;
   assignment_id: string;
   status: string;
+  policy_version: string;
   granted_artifacts: Array<Record<string, unknown>>;
-  denied_refs: string[];
-  unavailable_refs: string[];
+  denied_refs: Array<Record<string, string>>;
+  unavailable_refs: Array<Record<string, string>>;
+  added_tokens_estimate: number;
+  continuation_id?: string;
+  session_id?: string;
+  request_index?: number;
+  resolved_at?: string;
+};
+
+export type ContextResolveRequest = {
+  assignment_path: string;
+  ledger_path: string;
+  context_request_path: string;
+  max_artifacts?: number;
+};
+
+export type RuntimeDemoRequest = {
+  workspace: string;
+  agent?: string;
+  shell_command?: string | null;
+  assignment_id?: string;
+  session_id?: string;
+  result_id?: string;
 };
 
 export type ResultResponse = {
@@ -452,6 +636,124 @@ export type DispatchPacketResponse = {
   turn_report_policy: Record<string, unknown>;
 };
 
+export type DispatchPacketCompileRequest = {
+  mission_path: string;
+  workflow_path: string;
+  routing_decision_path: string;
+  assignment_path: string;
+  packet_id: string;
+  review_constraints?: Record<string, unknown> | null;
+  turn_report_policy?: Record<string, unknown> | null;
+};
+
+export type SessionDispatchRequest = {
+  mission_path: string;
+  workflow_path: string;
+  dispatch_packet_path: string;
+  session_record_path: string;
+  ledger_path?: string | null;
+  run_bundle_path?: string | null;
+  agent: string;
+  workdir?: string;
+  timeout_seconds?: number;
+  dry_run?: boolean;
+  isolation_mode?: 'copy' | 'worktree';
+  cleanup_policy?: string;
+  sandbox_mode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  shell_command?: string | null;
+  target_model?: string | null;
+  target_provider?: string | null;
+  provider_base_url?: string | null;
+  provider_api_key_env?: string | null;
+  provider_wire_api?: string | null;
+  session_id?: string | null;
+};
+
+export type SessionDispatchResponse = {
+  session_id: string;
+  assignment_id: string;
+  agent_id: string;
+  status: string;
+  started_at: string;
+  finished_at: string;
+  exit: Record<string, unknown>;
+  native_logs: Record<string, string>;
+  diff_refs: Array<Record<string, unknown>>;
+  artifacts: Array<Record<string, unknown>>;
+  workspace: Record<string, unknown>;
+  outcome_metrics: Record<string, unknown>;
+  extraction: Record<string, unknown>;
+  result_proposal: Record<string, unknown> | null;
+  dispatch: Record<string, unknown> | null;
+  run_bundle_path?: string;
+};
+
+export type RuntimeDemoResponse = {
+  workspace: string;
+  mission_path: string;
+  workflow_path: string;
+  ledger_path: string;
+  assignment_path: string;
+  dispatch_packet_path: string;
+  session_path: string;
+  result_path: string;
+  outcome_path: string;
+  agent: string;
+  assignment_id: string;
+  session_id: string;
+  result_id: string;
+  replay: ReplayResponse;
+  gatekeeper: GatekeeperResponse;
+  result: ResultResponse;
+  acceptance: Record<string, unknown>;
+};
+
+export type ResultStageRequest = {
+  workflow_path: string;
+  ledger_path: string;
+  assignment_path: string;
+  result_path: string;
+};
+
+export type ResultStageResponse = {
+  status: string;
+  result_event_id: string;
+  replay: ReplayResponse;
+  gatekeeper: GatekeeperResponse;
+};
+
+export type ReviewDecisionImportRequest = {
+  workflow_path: string;
+  ledger_path: string;
+  decision_path: string;
+  decision_ref: string;
+  event_id?: string | null;
+};
+
+export type ReviewDecisionImportResponse = Record<string, unknown>;
+
+export type OutcomeDecisionRequest = {
+  workflow_path: string;
+  ledger_path: string;
+  assignment_path: string;
+  result_path: string;
+  outcome_path: string;
+  verification_status: string;
+  review_event_id?: string | null;
+  acceptance_policy: Record<string, unknown>;
+  accepted_event_types?: string[] | null;
+  actor?: string;
+  event_id?: string | null;
+  validation_rule?: string;
+};
+
+export type OutcomeDecisionResponse = {
+  status: string;
+  decision: Record<string, unknown>;
+  replay: ReplayResponse;
+  gatekeeper: GatekeeperResponse;
+};
+
 export type MetricsSummaryResponse = {
   entries: Array<Record<string, unknown>>;
   summary?: Array<Record<string, unknown>>;
@@ -532,6 +834,16 @@ export async function fetchAssignment(path: string): Promise<AssignmentResponse>
   return expectOk(response);
 }
 
+export async function fetchAgents(): Promise<AgentsResponse> {
+  const response = await fetch('/api/agents');
+  return expectOk(response);
+}
+
+export async function fetchAgentDoctor(agentId: string): Promise<AgentDoctorResponse> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/doctor`);
+  return expectOk(response);
+}
+
 export async function fetchContextCapsuleByPath(path: string): Promise<ContextCapsuleResponse> {
   const response = await fetch(`/api/context-capsule?path=${encodeURIComponent(path)}`);
   return expectOk(response);
@@ -542,12 +854,9 @@ export async function fetchContextRequest(path: string): Promise<ContextRequestR
   return expectOk(response);
 }
 
-export async function resolveContextRequest(request: {
-  assignment_path: string;
-  ledger_path: string;
-  context_request_path: string;
-  max_artifacts?: number;
-}): Promise<ContextResolutionResponse> {
+export async function resolveContextRequest(
+  request: ContextResolveRequest,
+): Promise<ContextResolutionResponse> {
   const response = await fetch('/api/context-request/resolve', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -586,6 +895,91 @@ export async function fetchTurnReport(path: string): Promise<TurnReportResponse>
 
 export async function fetchDispatchPacket(path: string): Promise<DispatchPacketResponse> {
   const response = await fetch(`/api/dispatch-packet?path=${encodeURIComponent(path)}`);
+  return expectOk(response);
+}
+
+export async function runRuntimeDemo(
+  request: RuntimeDemoRequest,
+): Promise<RuntimeDemoResponse> {
+  const response = await fetch('/api/runtime-demo', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      agent: request.agent ?? 'shell-dummy',
+      assignment_id: request.assignment_id ?? 'assign-implement-demo',
+      session_id: request.session_id ?? 'session-implement-demo',
+      result_id: request.result_id ?? 'result-implement-demo',
+      shell_command: request.shell_command ?? null,
+      workspace: request.workspace,
+    }),
+  });
+  return expectOk(response);
+}
+
+export async function compileDispatchPacket(
+  request: DispatchPacketCompileRequest,
+): Promise<DispatchPacketResponse> {
+  const response = await fetch('/api/dispatch-packet/compile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return expectOk(response);
+}
+
+export async function dispatchSession(
+  request: SessionDispatchRequest,
+): Promise<SessionDispatchResponse> {
+  const response = await fetch('/api/session/dispatch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      workdir: request.workdir ?? '.',
+      timeout_seconds: request.timeout_seconds ?? 30,
+      dry_run: request.dry_run ?? false,
+      isolation_mode: request.isolation_mode ?? 'copy',
+      cleanup_policy: request.cleanup_policy ?? 'retain_session_root',
+      sandbox_mode: request.sandbox_mode ?? 'workspace-write',
+      ...request,
+    }),
+  });
+  return expectOk(response);
+}
+
+export async function stageResult(
+  request: ResultStageRequest,
+): Promise<ResultStageResponse> {
+  const response = await fetch('/api/result/stage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return expectOk(response);
+}
+
+export async function importReviewDecision(
+  request: ReviewDecisionImportRequest,
+): Promise<ReviewDecisionImportResponse> {
+  const response = await fetch('/api/review-decision/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  return expectOk(response);
+}
+
+export async function decideOutcome(
+  request: OutcomeDecisionRequest,
+): Promise<OutcomeDecisionResponse> {
+  const response = await fetch('/api/outcome/decide', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      actor: request.actor ?? 'harness',
+      validation_rule: request.validation_rule ?? 'acceptance_policy_v1',
+      ...request,
+    }),
+  });
   return expectOk(response);
 }
 
@@ -678,6 +1072,63 @@ export async function fetchReplay(
   return expectOk(response);
 }
 
+export async function fetchReplayTimeline(
+  workflowPath: string = DEFAULT_WORKFLOW_PATH,
+  ledgerPath: string = DEFAULT_LEDGER_PATH,
+): Promise<ReplayHistoryTimelineResponse> {
+  const response = await fetch(
+    `/api/replay/timeline?workflow_path=${encodeURIComponent(workflowPath)}&ledger_path=${encodeURIComponent(ledgerPath)}`,
+  );
+  return expectOk(response);
+}
+
+export async function fetchReplaySnapshot(
+  workflowPath: string = DEFAULT_WORKFLOW_PATH,
+  ledgerPath: string = DEFAULT_LEDGER_PATH,
+  cursor: ReplayCursorSelector = {},
+): Promise<ReplayHistorySnapshotResponse> {
+  const query = new URLSearchParams({
+    workflow_path: workflowPath,
+    ledger_path: ledgerPath,
+  });
+  if (cursor.eventId) {
+    query.set('through_event_id', cursor.eventId);
+  }
+  if (typeof cursor.eventOrdinal === 'number') {
+    query.set('through_event_ordinal', String(cursor.eventOrdinal));
+  }
+  const response = await fetch(`/api/replay/snapshot?${query.toString()}`);
+  return expectOk(response);
+}
+
+export async function fetchReplayDiff(
+  workflowPath: string = DEFAULT_WORKFLOW_PATH,
+  ledgerPath: string = DEFAULT_LEDGER_PATH,
+  compare: {
+    from?: ReplayCursorSelector;
+    to?: ReplayCursorSelector;
+  } = {},
+): Promise<ReplayHistoryDiffResponse> {
+  const query = new URLSearchParams({
+    workflow_path: workflowPath,
+    ledger_path: ledgerPath,
+  });
+  if (compare.from?.eventId) {
+    query.set('from_event_id', compare.from.eventId);
+  }
+  if (typeof compare.from?.eventOrdinal === 'number') {
+    query.set('from_event_ordinal', String(compare.from.eventOrdinal));
+  }
+  if (compare.to?.eventId) {
+    query.set('to_event_id', compare.to.eventId);
+  }
+  if (typeof compare.to?.eventOrdinal === 'number') {
+    query.set('to_event_ordinal', String(compare.to.eventOrdinal));
+  }
+  const response = await fetch(`/api/replay/diff?${query.toString()}`);
+  return expectOk(response);
+}
+
 export async function decideMutation(
   request: MutationDecisionRequest,
 ): Promise<MutationInspectionResponse> {
@@ -691,24 +1142,35 @@ export async function decideMutation(
 
 async function expectOk<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+    throw await readApiError(response);
   }
   return response.json() as Promise<T>;
 }
 
-async function readErrorMessage(response: Response): Promise<string> {
+export class ApiError extends Error {
+  readonly code?: string;
+
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+  }
+}
+
+async function readApiError(response: Response): Promise<ApiError> {
   const fallback = `Request failed: ${response.status}`;
   const contentType = response.headers.get('content-type') ?? '';
 
   try {
     if (contentType.includes('application/json')) {
       const body = (await response.json()) as Record<string, unknown>;
+      const code = pickString(body, 'code') ?? undefined;
       const message =
         pickString(body, 'error') ??
         pickString(body, 'message') ??
         pickString(body, 'detail');
       if (message) {
-        return message;
+        return new ApiError(message, code);
       }
 
       const errors = body.errors;
@@ -723,19 +1185,19 @@ async function readErrorMessage(response: Response): Promise<string> {
           .filter((message): message is string => Boolean(message))
           .join('; ');
         if (joined) {
-          return joined;
+          return new ApiError(joined, code);
         }
       }
     }
     const text = await response.text();
     if (text.trim()) {
-      return text.trim();
+      return new ApiError(text.trim());
     }
   } catch {
-    return fallback;
+    return new ApiError(fallback);
   }
 
-  return fallback;
+  return new ApiError(fallback);
 }
 
 function pickString(record: Record<string, unknown>, key: string): string | null {
