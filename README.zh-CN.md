@@ -95,6 +95,26 @@ uv run python -m bureauless mission execution-spine-acceptance \
 `execution-spine-acceptance` 会运行确定性的 Runtime M3.5 验收路径，并在目标
 workspace 中写入遇错即失败的结构化证据报告。
 
+## 维护中的 Live Demo
+
+使用 OpenAI-compatible endpoint 运行 provider-backed control-plane demo。API key
+只保留在环境变量中；命令传入的是变量名，不是变量值：
+
+```bash
+export DEMO_PROVIDER_BASE_URL=https://provider.example/v1
+export DEMO_PROVIDER_API_KEY=...
+RUN_DIR="live-demos/$(date +%F)-local-boundary-run"
+
+scripts/live-demo-boundary-run \
+  "$RUN_DIR/workspace" \
+  gpt-5.5 \
+  "$DEMO_PROVIDER_BASE_URL" \
+  DEMO_PROVIDER_API_KEY
+```
+
+wrapper 会把 manifest 和 publisher audit 写入本次 run 的 workspace。证据保留与
+脱敏规则见 [`live-demos/README.md`](live-demos/README.md)。
+
 运行当前维护的验证：
 
 ```bash
@@ -146,7 +166,11 @@ human review。
 
 - orchestrator 负责规划、路由、记录、审查和重新规划。
 - worker agent 执行有边界的任务。
-- harness 强制执行 role、event、gate、budget policy 和 provenance。
+- harness 拥有 control runtime：launch admission、execution envelope、lifecycle
+  supervision、bounded context、evidence capture、result intake 和 canonical ledger
+  transition。
+- adapter 保留 agent runtime 的机制，例如 model loop、tool internals、planning、memory
+  以及 provider streaming/retry。
 - advisor 默认懒加载，并受预算 gate 约束。
 
 简短版：Agent 可以干活，但不能自己写史。
@@ -229,14 +253,24 @@ Playwright 会自动启动或复用 Vite dev server。如果本地 npm 安装出
 
 ## 文档
 
-先从文档地图开始，再通过两个 milestone 索引查看当前交付状态：
+先从文档地图开始，再通过 task 索引查看当前交付状态：
 
 - [`docs/README.md`](docs/README.md)
 - [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
+- [`docs/audits/README.md`](docs/audits/README.md)
+- [`docs/audits/2026-07-02-runtime-execution-gap-analysis.md`](docs/audits/2026-07-02-runtime-execution-gap-analysis.md)
+- [`docs/audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](docs/audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md)
 - [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_3_5_tasklist.md`](docs/tasks/runtime_harness_milestone_3_5_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_4_tasklist.md`](docs/tasks/runtime_harness_milestone_4_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_5_tasklist.md`](docs/tasks/runtime_harness_milestone_5_tasklist.md)
+- [`docs/tasks/control_runtime_boundary_follow_up_tasklist.md`](docs/tasks/control_runtime_boundary_follow_up_tasklist.md)
 - [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
 - [`docs/rfcs/README.md`](docs/rfcs/README.md)
 - [`docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
+- [`docs/rfcs/005-authoritative-result-acceptance-spine.md`](docs/rfcs/005-authoritative-result-acceptance-spine.md)
+- [`docs/rfcs/006-bounded-context-continuation.md`](docs/rfcs/006-bounded-context-continuation.md)
+- [`docs/rfcs/007-control-runtime-boundary.md`](docs/rfcs/007-control-runtime-boundary.md)
 - [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md)
 - [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
 - [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)
@@ -246,6 +280,7 @@ Playwright 会自动启动或复用 Vite dev server。如果本地 npm 安装出
 
 - `milestone`：面向验收的交付目标
 - `workstream`：某个 milestone 内部的实现分组
+- `audit`：以证据为基础的能力缺口及其 remediation owner
 
 这样 runtime 和 workbench 的规划语言会保持一致，不会一边讲 phase，
 另一边讲 milestone。

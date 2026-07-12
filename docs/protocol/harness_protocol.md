@@ -31,9 +31,11 @@ writes canonical ledger state.
 
 ## Runtime Boundary
 
-The v1 harness wraps external agent runtimes. It does not implement the
-internal coding-agent loop for model turns, tool calls, context compaction, or
-token-segment tracing.
+The harness owns the control runtime: launch admission, execution envelopes,
+lifecycle supervision, bounded-context brokering, evidence capture, result
+intake, and canonical ledger transition. It wraps external agent runtimes and
+does not implement their internal coding-agent loops, tool calls, planning,
+memory, context compaction, provider streaming/retry, or token-segment tracing.
 
 The v1 control grain is:
 
@@ -350,7 +352,32 @@ Rules:
 ## Workflow
 
 A workflow is an executable coordination proposal. It must compile before any
-assignment is dispatched.
+assignment is dispatched. Only a workflow with `status: accepted` may produce
+a dispatch packet or launch a session. A proposed workflow remains
+control-plane input: it can be reviewed or mutated, but cannot spend provider
+capacity or create worker history.
+
+## Control-Plane Bootstrap
+
+For task-publisher live runs, the harness first dispatches one read-only
+`orchestrator` bootstrap session. Its completed result must contain exactly two
+ordered control intents: `initial_control_plane` with a proposed workflow and
+its routing decision, plus one `{node_id, role, agent_id, model}` binding per node, then
+`accept_initial_control_plane` referencing the same proposal ID. The harness
+validates both intents, appends proposal and acceptance facts to the ledger,
+and only then materializes the accepted workflow artifact. Bootstrap sessions
+with native tool calls, business execution, tests, or commits are rejected.
+The runtime consumes the accepted routing decision; it does not re-create one
+from the legacy demo helper after bootstrap.
+
+The task publisher may additionally state machine-readable acceptance constraints
+(for example, independent verification and a terminal commit). They constrain what
+the harness can approve, but do not prescribe worker roles, agent IDs, or models;
+those remain an orchestrator proposal.
+
+An accepted worker binding must also name a supported runtime adapter. This is an
+approval check, not an adapter choice: unsupported proposed IDs are rejected before
+they can create a worker session.
 
 Workflows must declare `terminal_events`. A workflow is complete when the
 runtime observes those events and all required gates for them are satisfied.
@@ -459,6 +486,11 @@ turn_report_policy:
   after_each_tool_call: true
   max_report_tokens: 600
 ```
+
+For adapters with a native progress stream, `timeout_seconds` is an idle
+deadline: each native progress event renews the deadline. A silent process is
+terminated as `idle_timeout`; a long-running process with observed progress is
+allowed to continue.
 
 Assignments must be interpreted under the
 [Protocol Invariants](#protocol-invariants). Expanding scope, requesting
@@ -1024,6 +1056,11 @@ outcome_metrics:
 
 If token or cost data is unavailable, the runtime should record the missing data
 explicitly with `usage_confidence: none` rather than inventing a precise value.
+
+Telemetry evidence must retain its source level: provider-authoritative,
+agent-native observed, transport-observed, locally estimated, or unavailable.
+Source and confidence describe evidence quality; they do not turn native agent
+events into canonical ledger facts.
 
 Provider-side usage evidence may also be preserved as a non-canonical artifact
 when the maintained execution path can observe billing data outside the agent's

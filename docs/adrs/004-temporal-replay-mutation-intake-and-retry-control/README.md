@@ -13,5 +13,5 @@
 
 ## Implementation
 
-Runtime Harness Milestone 4, RM4-01 through RM4-11. Acceptance of this ADR
-unblocks implementation but does not claim those tasks are complete.
+Runtime Harness Milestone 4, RM4-01 through RM4-11, is complete.
+Tracking issue: [#3 (closed)](https://github.com/Dying-Ember/BureauLess/issues/3).

@@ -3,11 +3,14 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import importlib
 import os
 import shutil
 import subprocess
 import threading
 import time
+from typing import Any
+from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 import pytest
@@ -24,6 +27,7 @@ from bureauless.agents import (
 )
 from bureauless.cli import main
 from bureauless.cli.main import (
+    _control_plane_result_example,
     prepare_demo_workspace,
     prepare_mutation_demo_workspace,
     run_advisor_policy_demo,
@@ -36,6 +40,7 @@ from bureauless.application.acceptance import (
     stage_result,
     stage_session_record,
 )
+from bureauless.application.bootstrap import accept_initial_control_plane
 from bureauless.application.run_bundles import load_run_bundle
 from bureauless.protocol import (
     append_ledger_event,
@@ -72,6 +77,7 @@ from bureauless.protocol import (
 )
 from bureauless.protocol.acceptance import DEFAULT_ACCEPTANCE_POLICY, AcceptancePolicy
 from bureauless.protocol.artifacts import validate_artifact_record
+from bureauless.protocol.bootstrap import collect_initial_control_plane_errors
 from bureauless.protocol.budget import estimate_cost_from_snapshot, evaluate_pre_dispatch_policy, load_price_snapshot
 from bureauless.protocol.harness import (
     Ledger,
@@ -87,6 +93,7 @@ from bureauless.protocol.mutations import (
     validate_workflow_mutation_proposal,
 )
 from bureauless.protocol.results import intake_result_mutation_intent
+from bureauless.protocol.results import ResultProposal
 from bureauless.protocol.outcomes import build_node_outcome_decision_event
 from bureauless.runtime import (
     build_mutation_supersession_events,
@@ -119,6 +126,8 @@ from bureauless.runtime.sessions import (
     supersede_session_record,
     load_provider_usage_capture,
     write_provider_usage_capture_artifact,
+    _is_codex_native_progress_line,
+    _run_live_process,
 )
 
 
@@ -126,6 +135,7 @@ def _workflow(overrides: dict | None = None) -> Workflow:
     data = {
         "workflow_id": "test-workflow",
         "mission_id": "demo",
+        "status": "accepted",
         "mode": "small_dag",
         "roles": {
             "coder": {
@@ -726,6 +736,201 @@ def _multi_version_replay_history() -> tuple[Workflow, Ledger, dict[str, str]]:
         ledger = append_ledger_event(ledger, event, second_workflow)
     cursors["second_supersession"] = ledger.event_log[-1]["event_id"]
     return initial, ledger, cursors
+
+
+def test_accepts_initial_control_plane_with_replayable_worker_bindings(tmp_path) -> None:
+    mission = load_mission(Path("examples/missions/demo/mission.yaml"))
+    workflow = {
+        "workflow_id": "bootstrap-workflow",
+        "mission_id": "demo",
+        "status": "proposed",
+        "proposed_by": "orchestrator",
+        "mode": "single_agent",
+        "reason": "One bounded implementation assignment is sufficient.",
+        "roles": {"coder": {"can_emit": ["patch_ready"], "can_consume": []}},
+        "events": {"patch_ready": {"producer_roles": ["coder"]}},
+        "nodes": [{"id": "implement", "role": "coder", "emits": ["patch_ready"]}],
+        "gates": [],
+        "terminal_events": ["patch_ready"],
+        "broadcast_policy": {"default": "filtered_delta"},
+        "budget_policy": {},
+    }
+    result = ResultProposal(
+        result_id="result-bootstrap",
+        assignment_id="assign-bootstrap",
+        agent_id="codex-cli",
+        status="completed",
+        effective_model="gpt-5.5",
+        effective_provider="openai-compatible",
+        emitted_events=["control_plane_complete"],
+        artifacts=[],
+        outcome_metrics={},
+        verification={"status": "passed"},
+        native_log_refs=[],
+        mutation_proposal_refs=[],
+        review_status=None,
+        control_intents=[
+            {
+                "intent_type": "initial_control_plane",
+                "proposal_id": "proposal-bootstrap",
+                "workflow": workflow,
+                "routing_decision": {
+                    "decision_type": "routing_decision",
+                    "mission_id": "demo",
+                    "workflow_id": "bootstrap-workflow",
+                    "selected_mode": "single_agent",
+                    "selection_policy_version": "0.1",
+                    "triggered_rules": ["bounded_implementation"],
+                    "rejected_modes": [],
+                    "estimated_coordination_ratio": 0.0,
+                    "budget_confidence": "high",
+                    "reason": "One bounded implementation assignment is sufficient.",
+                    "advisor_gate_decision": {
+                        "invoked": False,
+                        "policy_version": "0.1",
+                        "reason": ["first_run_heuristic"],
+                        "decision_basis": "first_run_heuristic",
+                    },
+                },
+                "worker_bindings": [
+                    {"node_id": "implement", "role": "coder", "agent_id": "codex-cli", "model": "gpt-5-mini"}
+                ],
+            },
+            {"intent_type": "accept_initial_control_plane", "proposal_id": "proposal-bootstrap"},
+        ],
+    )
+
+    accepted = accept_initial_control_plane(
+        tmp_path, mission, _empty_ledger(), result, session_id="session-bootstrap"
+    )
+
+    assert accepted.workflow.status == "accepted"
+    assert accepted.routing_decision.workflow_id == "bootstrap-workflow"
+    assert accepted.worker_bindings["implement"]["model"] == "gpt-5-mini"
+    assert [event["event_type"] for event in accepted.ledger.event_log] == [
+        "initial_control_plane_proposed",
+        "initial_control_plane_accepted",
+    ]
+    assert accepted.workflow_path.is_file()
+
+    with pytest.raises(ProtocolError, match="independent verification"):
+        accept_initial_control_plane(
+            tmp_path / "requires-verification",
+            mission,
+            _empty_ledger(),
+            result,
+            session_id="session-bootstrap-verification",
+            requirements={"independent_verification": True},
+        )
+
+    placeholder_intent = dict(result.control_intents[0])
+    placeholder_intent["worker_bindings"] = [
+        {
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "codex-cli",
+            "model": "chosen-by-orchestrator",
+        }
+    ]
+    placeholder_result = replace(
+        result,
+        control_intents=[placeholder_intent, result.control_intents[1]],
+    )
+    with pytest.raises(ProtocolError, match="concrete provider model"):
+        accept_initial_control_plane(
+            tmp_path / "placeholder-model",
+            mission,
+            _empty_ledger(),
+            placeholder_result,
+            session_id="session-bootstrap-placeholder",
+        )
+
+    unsupported_agent_intent = dict(result.control_intents[0])
+    unsupported_agent_intent["worker_bindings"] = [
+        {
+            "node_id": "implement",
+            "role": "coder",
+            "agent_id": "not-a-runtime-adapter",
+            "model": "gpt-5-mini",
+        }
+    ]
+    unsupported_agent_result = replace(
+        result,
+        control_intents=[unsupported_agent_intent, result.control_intents[1]],
+    )
+    with pytest.raises(ProtocolError, match="unsupported agent"):
+        accept_initial_control_plane(
+            tmp_path / "unsupported-agent",
+            mission,
+            _empty_ledger(),
+            unsupported_agent_result,
+            session_id="session-bootstrap-agent",
+            allowed_agent_ids={"codex-cli"},
+        )
+
+
+def test_collects_control_plane_contract_errors_before_rejection() -> None:
+    mission = load_mission(Path("examples/missions/demo/mission.yaml"))
+    intent = {
+        "intent_type": "initial_control_plane",
+        "proposal_id": "invalid-bootstrap",
+        "workflow": {
+            "workflow_id": "invalid-workflow",
+            "mission_id": "bootstrap-assignment",
+            "mode": "single_agent",
+            "status": "proposed",
+            "reason": "Invalid fixture.",
+            "proposed_by": "orchestrator",
+            "roles": {"coder": {"can_emit": ["patch_ready"], "can_consume": []}},
+            "events": {"patch_ready": {"producer_roles": ["coder"]}},
+            "nodes": [{"id": "implement", "role": "coder", "emits": ["patch_ready"]}],
+            "gates": [{"id": "invalid-gate"}],
+            "terminal_events": ["patch_ready"],
+            "broadcast_policy": {"default": "filtered_delta"},
+            "budget_policy": {},
+        },
+        "routing_decision": {
+            "decision_type": "initial_routing",
+            "mission_id": "bootstrap-assignment",
+            "workflow_id": "invalid-workflow",
+            "selected_mode": "single_agent",
+            "selection_policy_version": "0.1",
+            "triggered_rules": [],
+            "rejected_modes": ["single_agent_with_review"],
+            "estimated_coordination_ratio": 0.0,
+            "budget_confidence": "high",
+            "reason": "Invalid fixture.",
+            "advisor_gate_decision": {},
+        },
+        "worker_bindings": [
+            {"node_id": "implement", "role": "coder", "agent_id": "coder-01", "model": "gpt-4.1-mini"}
+        ],
+    }
+
+    errors = collect_initial_control_plane_errors(
+        intent,
+        mission,
+        allowed_agent_ids={"codex-cli"},
+        allowed_models={"gpt-5"},
+    )
+
+    assert any("node_id" in error for error in errors)
+    assert any("workflow mission_id" in error for error in errors)
+    assert any("decision_type" in error for error in errors)
+    assert any("Routing decision mission_id" in error for error in errors)
+    assert any("unsupported agent" in error for error in errors)
+    assert any("outside approved policy" in error for error in errors)
+
+
+def test_control_plane_result_example_uses_existing_loaders() -> None:
+    payload = _control_plane_result_example("demo", "codex-cli", "gpt-5")
+    proposal = payload["control_intents"][0]
+
+    workflow = Workflow.from_dict(proposal["workflow"])
+    routing = load_routing_decision(proposal["routing_decision"])
+
+    assert compile_workflow(workflow).ok
+    validate_routing_decision(load_mission(Path("examples/missions/demo/mission.yaml")), routing, workflow=workflow)
 
 
 def test_validates_inert_workflow_mutation_proposal() -> None:
@@ -3647,6 +3852,29 @@ def test_loads_writable_runtime_m4_ledger_v3(tmp_path) -> None:
     loaded = load_ledger(ledger_path)
 
     assert loaded.ledger_version == 3
+
+
+def test_ledger_writer_rejects_a_stale_loaded_ledger(tmp_path) -> None:
+    ledger_path = tmp_path / "ledger.yaml"
+    write_ledger(ledger_path, replace(_empty_ledger(), ledger_version=2))
+    first = load_ledger(ledger_path)
+    stale = load_ledger(ledger_path)
+    first = append_ledger_event(
+        first,
+        {"event_id": "event-first", "event_type": "assignment_created"},
+    )
+    write_ledger(ledger_path, first)
+    stale = append_ledger_event(
+        stale,
+        {"event_id": "event-stale", "event_type": "assignment_created"},
+    )
+
+    with pytest.raises(ProtocolError, match="Ledger write conflict"):
+        write_ledger(ledger_path, stale)
+
+    assert [event["event_id"] for event in load_ledger(ledger_path).event_log] == [
+        "event-first"
+    ]
 
 
 def test_runs_maintained_mutation_and_retry_demo(tmp_path) -> None:
@@ -6616,6 +6844,167 @@ def test_run_live_demo_executes_three_node_session_path(tmp_path, monkeypatch) -
     ]
 
 
+def test_run_live_demo_follows_replay_ready_nodes_for_separate_verification(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    cli_main = importlib.import_module("bureauless.cli.main")
+    original_prepare = cli_main.prepare_demo_workspace
+
+    def prepare_with_verify(*args, **kwargs):
+        paths = original_prepare(*args, **kwargs)
+        workflow_path = paths["workflow"]
+        payload = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        payload["nodes"].insert(
+            1,
+            {
+                "id": "verify",
+                "role": "coder",
+                "waits_for": {"all_of": ["implement.patch_ready"]},
+                "emits": ["patch_ready"],
+            },
+        )
+        for node in payload["nodes"]:
+            if node["id"] == "review":
+                node["waits_for"] = {"all_of": ["verify.patch_ready"]}
+            if node["id"] == "commit":
+                node["waits_for"] = {
+                    "all_of": ["verify.patch_ready", "review_approved"]
+                }
+        payload["gates"][0]["requires"] = {
+            "all_of": ["verify.patch_ready", "review_approved"]
+        }
+        workflow_path.write_text(
+            yaml.safe_dump(payload, sort_keys=False),
+            encoding="utf-8",
+        )
+        return paths
+
+    monkeypatch.setattr(cli_main, "prepare_demo_workspace", prepare_with_verify)
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        prompt = kwargs["input"]
+        if "Node: implement" in prompt:
+            event_name = "patch_ready"
+        elif "Node: verify" in prompt:
+            event_name = "patch_ready"
+        elif "Node: review" in prompt:
+            event_name = "review_approved"
+        elif "Node: commit" in prompt:
+            event_name = "commit_created"
+        else:
+            raise AssertionError(prompt)
+        stdout = (
+            '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'
+            f'status: completed\\nemitted_events:\\n  - {event_name}\\nverification:\\n  status: passed'
+            '"}}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20}}\n'
+        )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo-with-verify",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        timeout_seconds=10.0,
+        command_runner=fake_runner,
+    )
+
+    assert manifest["terminal_complete"] is True
+    assert manifest["failure"] is None
+    assert [step["node_id"] for step in manifest["steps"]] == [
+        "implement",
+        "verify",
+        "review",
+        "commit",
+    ]
+    assert manifest["steps"][0]["ready_after"] == ["verify"]
+
+
+def test_run_live_demo_rejects_unstructured_implement_progress(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        prompt = kwargs["input"]
+        if "Node: implement" in prompt:
+            body = (
+                "status: completed\n"
+                "emitted_events:\n"
+                "  - patch_ready\n"
+                "verification:\n"
+                "  status: coder_smoke_passed_final_verification_pending_independent_assignment\n"
+                "  verifier_entrypoint: scripts/verify_demo_cli.sh"
+            )
+        elif "Node: review" in prompt:
+            body = (
+                "status: completed\n"
+                "emitted_events:\n"
+                "  - review_approved\n"
+                "verification:\n"
+                "  status: passed"
+            )
+        elif "Node: commit" in prompt:
+            body = (
+                "status: completed\n"
+                "emitted_events:\n"
+                "  - commit_created\n"
+                "verification:\n"
+                "  status: passed"
+            )
+        else:
+            raise AssertionError(prompt)
+        escaped_body = body.replace("\n", "\\n")
+        stdout = (
+            '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"'
+            f"{escaped_body}"
+            '"}}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":20}}\n'
+        )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo-boundary",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        timeout_seconds=10.0,
+        command_runner=fake_runner,
+    )
+
+    assert manifest["terminal_complete"] is False
+    assert manifest["failure"] is None
+    assert manifest["steps"][0]["node_id"] == "implement"
+    assert manifest["steps"][0]["ready_after"] == []
+
+    ledger = load_ledger(Path(manifest["ledger_path"]))
+    implement_decision = next(
+        event
+        for event in ledger.event_log
+        if event.get("event_id") == "event-outcome-session-implement-live-decision"
+    )
+    assert implement_decision["disposition"] == "rejected"
+    assert implement_decision["accepted_event_types"] == []
+    assert implement_decision["verification_status"] == (
+        "coder_smoke_passed_final_verification_pending_independent_assignment"
+    )
+    assert implement_decision["acceptance_policy_version"] == "acceptance-v1"
+
+
 def test_execution_spine_acceptance_cli_proves_cross_capability_path(
     tmp_path,
     capsys,
@@ -6746,6 +7135,448 @@ def test_run_live_demo_returns_partial_manifest_when_session_times_out(
             "node_state_after": "blocked",
         }
     ]
+
+
+def test_run_live_demo_blocks_proposed_workflow_before_dispatch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    cli_main = importlib.import_module("bureauless.cli.main")
+    original_prepare = cli_main.prepare_demo_workspace
+
+    def prepare_proposed(*args, **kwargs):
+        paths = original_prepare(*args, **kwargs)
+        workflow_path = paths["workflow"]
+        workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        workflow["status"] = "proposed"
+        workflow_path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
+        return paths
+
+    monkeypatch.setattr(cli_main, "prepare_demo_workspace", prepare_proposed)
+    runner_called = False
+
+    def runner(*_args, **_kwargs):
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("proposed workflow reached the external runner")
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo-proposed",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        command_runner=runner,
+    )
+
+    assert runner_called is False
+    assert manifest["steps"] == []
+    assert manifest["failure"] == {
+        "node_id": None,
+        "status": "blocked",
+        "reason": "workflow_not_accepted",
+        "workflow_status": "proposed",
+    }
+
+
+def test_run_live_demo_bootstraps_accepted_worker_workflow(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    workflow = {
+        "workflow_id": "orchestrated-workflow",
+        "mission_id": "demo",
+        "status": "proposed",
+        "proposed_by": "orchestrator",
+        "mode": "single_agent",
+        "reason": "One bounded implementation assignment is sufficient.",
+        "roles": {"coder": {"can_emit": ["patch_ready"], "can_consume": []}},
+        "events": {"patch_ready": {"producer_roles": ["coder"]}},
+        "nodes": [{"id": "implement", "role": "coder", "emits": ["patch_ready"]}],
+        "gates": [],
+        "terminal_events": ["patch_ready"],
+        "broadcast_policy": {"default": "filtered_delta"},
+        "budget_policy": {},
+    }
+
+    def runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        prompt = kwargs["input"]
+        if "Node: orchestrate" in prompt:
+            payload = {
+                "status": "completed",
+                "emitted_events": ["control_plane_complete"],
+                "verification": {"status": "passed"},
+                "control_intents": [
+                    {
+                        "intent_type": "initial_control_plane",
+                        "proposal_id": "proposal-live-bootstrap",
+                        "workflow": workflow,
+                        "routing_decision": {
+                            "decision_type": "routing_decision",
+                            "mission_id": "demo",
+                            "workflow_id": "orchestrated-workflow",
+                            "selected_mode": "single_agent",
+                            "selection_policy_version": "0.1",
+                            "triggered_rules": ["bounded_implementation"],
+                            "rejected_modes": [],
+                            "estimated_coordination_ratio": 0.0,
+                            "budget_confidence": "high",
+                            "reason": "One bounded implementation assignment is sufficient.",
+                            "advisor_gate_decision": {
+                                "invoked": False,
+                                "policy_version": "0.1",
+                                "reason": ["first_run_heuristic"],
+                                "decision_basis": "first_run_heuristic",
+                            },
+                        },
+                        "worker_bindings": [
+                            {
+                                "node_id": "implement",
+                                "role": "coder",
+                                "agent_id": "codex-cli",
+                                "model": "gpt-5-mini",
+                            }
+                        ],
+                    },
+                    {
+                        "intent_type": "accept_initial_control_plane",
+                        "proposal_id": "proposal-live-bootstrap",
+                    },
+                ],
+            }
+        elif "Node: implement" in prompt:
+            payload = {
+                "status": "completed",
+                "emitted_events": ["patch_ready"],
+                "verification": {"status": "passed"},
+            }
+        else:
+            raise AssertionError(prompt)
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": yaml.safe_dump(payload, sort_keys=False)}}),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+            ]
+        )
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo-bootstrap",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        command_runner=runner,
+        bootstrap_context={
+            "task": "Plan a bounded implementation workflow.",
+            "provider_allowed_worker_models": ["gpt-5-mini"],
+        },
+    )
+
+    assert manifest["terminal_complete"] is True
+    ledger = load_ledger(Path(manifest["ledger_path"]))
+    assert [event["event_type"] for event in ledger.event_log[:3]] == [
+        "assignment_created",
+        "initial_control_plane_proposed",
+        "initial_control_plane_accepted",
+    ]
+    assert load_session_record(
+        yaml.safe_load(
+            (tmp_path / "live-demo-bootstrap" / "generated" / "sessions" / "implement_session.yaml").read_text(encoding="utf-8")
+        )
+    ).result_proposal["effective_model"] == "gpt-5-mini"
+
+
+def test_run_live_demo_replans_rejected_bootstrap_once_then_runs_semantic_dag(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    calls: list[str] = []
+    workflow = {
+        "workflow_id": "orchestrated-semantic-workflow",
+        "mission_id": "demo",
+        "status": "proposed",
+        "proposed_by": "orchestrator",
+        "mode": "small_dag",
+        "reason": "Separate implementation, review, verification, and commit evidence.",
+        "roles": {
+            "coder": {"can_emit": ["patch_ready"], "can_consume": []},
+            "reviewer": {
+                "can_emit": ["review_approved"],
+                "can_consume": ["patch_ready"],
+            },
+            "verifier": {
+                "can_emit": ["verification_passed"],
+                "can_consume": ["patch_ready"],
+            },
+            "committer": {
+                "can_emit": ["commit_complete"],
+                "can_consume": [
+                    "patch_ready",
+                    "review_approved",
+                    "verification_passed",
+                ],
+            },
+        },
+        "events": {
+            "patch_ready": {"producer_roles": ["coder"]},
+            "review_approved": {"producer_roles": ["reviewer"]},
+            "verification_passed": {"producer_roles": ["verifier"]},
+            "commit_complete": {"producer_roles": ["committer"]},
+        },
+        "nodes": [
+            {"id": "write_cli", "role": "coder", "emits": ["patch_ready"]},
+            {
+                "id": "inspect_patch",
+                "role": "reviewer",
+                "waits_for": ["write_cli.patch_ready"],
+                "emits": ["review_approved"],
+            },
+            {
+                "id": "accept_cli",
+                "role": "verifier",
+                "waits_for": ["write_cli.patch_ready"],
+                "emits": ["verification_passed"],
+            },
+            {
+                "id": "publish_release",
+                "role": "committer",
+                "waits_for": [
+                    "write_cli.patch_ready",
+                    "inspect_patch.review_approved",
+                    "accept_cli.verification_passed",
+                ],
+                "emits": ["commit_complete"],
+            },
+        ],
+        "gates": [
+            {
+                "id": "release-requires-verification",
+                "node_id": "publish_release",
+                "requires": ["accept_cli.verification_passed"],
+            }
+        ],
+        "terminal_events": ["publish_release.commit_complete"],
+        "broadcast_policy": {"default": "filtered_delta"},
+        "budget_policy": {},
+    }
+
+    def bootstrap_payload(selected_mode: str) -> dict[str, Any]:
+        return {
+            "status": "completed",
+            "emitted_events": ["control_plane_complete"],
+            "verification": {"status": "passed"},
+            "control_intents": [
+                {
+                    "intent_type": "initial_control_plane",
+                    "proposal_id": "proposal-live-replan",
+                    "workflow": workflow,
+                    "routing_decision": {
+                        "decision_type": "routing_decision",
+                        "mission_id": "demo",
+                        "workflow_id": workflow["workflow_id"],
+                        "selected_mode": selected_mode,
+                        "selection_policy_version": "0.1",
+                        "triggered_rules": ["independent_verification_required"],
+                        "rejected_modes": (
+                            [
+                                {
+                                    "mode": "single_agent",
+                                    "rejected_because": "Independent verification requires separate evidence boundaries.",
+                                }
+                            ]
+                            if selected_mode == "small_dag"
+                            else []
+                        ),
+                        "estimated_coordination_ratio": 0.1,
+                        "budget_confidence": "high",
+                        "reason": "Separate evidence-bearing nodes are required.",
+                        "advisor_gate_decision": {
+                            "invoked": False,
+                            "policy_version": "0.1",
+                            "reason": ["first_run_heuristic"],
+                            "decision_basis": "first_run_heuristic",
+                        },
+                    },
+                    "worker_bindings": [
+                        {
+                            "node_id": node["id"],
+                            "role": node["role"],
+                            "agent_id": "codex-cli",
+                            "model": "gpt-5-mini",
+                        }
+                        for node in workflow["nodes"]
+                    ],
+                },
+                {
+                    "intent_type": "accept_initial_control_plane",
+                    "proposal_id": "proposal-live-replan",
+                },
+            ],
+        }
+
+    def runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        prompt = kwargs["input"]
+        if "Node: orchestrate" in prompt:
+            calls.append("orchestrate")
+            if len(calls) == 1:
+                payload = bootstrap_payload("single_agent")
+            else:
+                assert "control_plane_replan" in prompt
+                assert "selected_mode does not match workflow mode" in prompt
+                assert "previous_proposal" in prompt
+                payload = bootstrap_payload("small_dag")
+        elif "Node: write_cli" in prompt:
+            calls.append("write_cli")
+            assert "pending_separate_assignment" in prompt
+            payload = {
+                "status": "completed",
+                "emitted_events": ["patch_ready"],
+                "verification": {
+                    "status": "implementation_smoke_passed",
+                    "final_independent_verification": "pending_separate_assignment",
+                },
+            }
+        elif "Node: inspect_patch" in prompt:
+            calls.append("inspect_patch")
+            payload = {
+                "status": "completed",
+                "emitted_events": ["review_approved"],
+                "verification": {"status": "passed"},
+            }
+        elif "Node: accept_cli" in prompt:
+            calls.append("accept_cli")
+            assert "verification.evidence" in prompt
+            payload = {
+                "status": "completed",
+                "emitted_events": ["verification_passed"],
+                "verification": {
+                    "status": "passed",
+                    "evidence": {"command": "verify-demo", "observed": "passed"},
+                },
+            }
+        elif "Node: publish_release" in prompt:
+            calls.append("publish_release")
+            assert "danger-full-access" in command
+            payload = {
+                "status": "completed",
+                "emitted_events": ["commit_complete"],
+                "verification": {"status": "passed"},
+            }
+        else:
+            raise AssertionError(prompt)
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": yaml.safe_dump(payload, sort_keys=False),
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    }
+                ),
+            ]
+        )
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo-bootstrap-replan",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        command_runner=runner,
+        bootstrap_context={
+            "task": "Plan and run a verified implementation workflow.",
+            "provider_allowed_worker_models": ["gpt-5-mini"],
+            "control_plane_requirements": {
+                "independent_verification": True,
+                "terminal_commit": True,
+            },
+        },
+    )
+
+    assert calls == [
+        "orchestrate",
+        "orchestrate",
+        "write_cli",
+        "inspect_patch",
+        "accept_cli",
+        "publish_release",
+    ]
+    assert manifest["terminal_complete"] is True
+    assert manifest["failure"] is None
+    assert len(manifest["steps"][0]["attempts"]) == 2
+    assert "selected_mode does not match workflow mode" in (
+        manifest["steps"][0]["attempts"][0]["protocol_error"]
+    )
+    assert manifest["steps"][0]["attempts"][1]["accepted"] is True
+    assert any(
+        item["field"] == "steps[0].attempts[0].session_path"
+        for item in manifest["artifact_index"]
+    )
+    assert [step["node_id"] for step in manifest["steps"][1:]] == [
+        "write_cli",
+        "inspect_patch",
+        "accept_cli",
+        "publish_release",
+    ]
+    assert set(manifest["node_states"].values()) == {"completed"}
+
+
+def test_run_live_demo_records_rejected_control_plane_without_worker_dispatch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    orchestrator_calls = 0
+
+    def runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        nonlocal orchestrator_calls
+        orchestrator_calls += 1
+        prompt = kwargs["input"]
+        assert "Node: orchestrate" in prompt
+        payload = {
+            "status": "completed",
+            "emitted_events": ["control_plane_complete"],
+            "verification": {"status": "passed"},
+            "control_intents": [
+                {
+                    "intent_type": "initial_control_plane",
+                    "proposal_id": "invalid-bootstrap",
+                    "proposed_workflow": {"nodes": []},
+                    "worker_bindings": [],
+                },
+                {
+                    "intent_type": "accept_initial_control_plane",
+                    "proposal_id": "invalid-bootstrap",
+                },
+            ],
+        }
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": yaml.safe_dump(payload, sort_keys=False)}}),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+            ]
+        )
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    manifest = run_live_demo(
+        tmp_path / "live-demo-invalid-bootstrap",
+        agent_id="codex-cli",
+        target_model="gpt-5",
+        target_provider="openai",
+        command_runner=runner,
+        bootstrap_context={"task": "Plan a bounded implementation workflow."},
+    )
+
+    assert manifest["terminal_complete"] is False
+    assert manifest["failure"]["reason"] == "control_plane_bootstrap_rejected"
+    assert "Initial control-plane workflow must be an object" in manifest["failure"]["message"]
+    assert [step["node_id"] for step in manifest["steps"]] == ["orchestrate"]
+    assert manifest["ready"] == []
+    assert set(manifest["node_states"].values()) == {"blocked"}
+    assert Path(manifest["steps"][0]["session_path"]).is_file()
+    assert orchestrator_calls == 2
+    assert len(manifest["steps"][0]["attempts"]) == 2
 
 
 def test_prepare_demo_workspace_initializes_clean_git_repo(tmp_path) -> None:
@@ -7224,6 +8055,30 @@ def test_shell_dummy_session_timeout(tmp_path) -> None:
     assert record.exit["reason"] == "timed_out"
     assert record.extraction["status"] == "timed_out"
     assert record.result_proposal is None
+
+
+def test_codex_native_progress_extends_the_idle_timeout(tmp_path) -> None:
+    completed = _run_live_process(
+        [
+            "python",
+            "-u",
+            "-c",
+            "import sys, time; "
+            "events = ['{\"type\":\"thread.started\"}', "
+            "'{\"type\":\"item.started\"}', "
+            "'{\"type\":\"turn.completed\"}']; "
+            "[(sys.stdout.write(event + '\\n'), sys.stdout.flush(), time.sleep(0.04)) "
+            "for event in events]",
+        ],
+        cwd=tmp_path,
+        timeout=0.06,
+        env=None,
+        input_text=None,
+        controller=None,
+        progress_line=_is_codex_native_progress_line,
+    )
+
+    assert completed.returncode == 0
 
 
 def test_shell_dummy_failed_run_reports_partial_workspace_effects(tmp_path) -> None:
@@ -8019,6 +8874,209 @@ def test_codex_openai_compatible_session_captures_provider_usage_artifact(
         provider_thread.join(timeout=1.0)
 
 
+def test_codex_openai_compatible_session_captures_provider_usage_from_sse(
+    tmp_path, monkeypatch
+) -> None:
+    class _ProviderHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length:
+                self.rfile.read(length)
+            chunks = [
+                'event: response.output_text.delta\n'
+                'data: {"type":"response.output_text.delta","delta":"pong"}\n\n',
+                'event: response.completed\n'
+                'data: {"type":"response.completed","response":{"id":"resp_sse_123","model":"gpt-5.5","usage":{"input_tokens":140,"output_tokens":35,"input_tokens_details":{"cached_tokens":22},"output_tokens_details":{"reasoning_tokens":6}}}}\n\n',
+            ]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            for chunk in chunks:
+                self.wfile.write(chunk.encode("utf-8"))
+                self.wfile.flush()
+
+        def log_message(self, _format: str, *_args) -> None:
+            return
+
+    provider_server = ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
+    provider_thread = threading.Thread(target=provider_server.serve_forever, daemon=True)
+    provider_thread.start()
+    try:
+        source_root = tmp_path / "repo"
+        source_root.mkdir()
+        assignment = export_assignment(
+            _workflow(), _empty_ledger(), "implement", assignment_id="assign-001"
+        )
+        monkeypatch.setenv("TEST_OPENAI_COMPAT_KEY", "test-key")
+        spec = create_session_spec(
+            assignment=assignment,
+            agent_id="codex-cli",
+            workdir=source_root,
+            target_model="gpt-5.5",
+            target_provider="openai-compatible",
+            provider_base_url=f"http://127.0.0.1:{provider_server.server_port}",
+            provider_api_key_env="TEST_OPENAI_COMPAT_KEY",
+            session_id="session-001",
+        )
+        assistant_text = yaml.safe_dump(
+            {
+                "status": "completed",
+                "emitted_events": ["patch_ready"],
+                "verification": {"status": "passed"},
+            },
+            sort_keys=False,
+        ).strip()
+
+        def fake_runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+            proxy_base_url = None
+            for index, value in enumerate(command):
+                if value == "-c" and index + 1 < len(command):
+                    override = command[index + 1]
+                    prefix = "model_providers.bureauless.base_url="
+                    if override.startswith(prefix):
+                        proxy_base_url = override[len(prefix) :].strip('"')
+                        break
+            assert proxy_base_url is not None
+            request = urllib_request.Request(
+                f"{proxy_base_url}/responses",
+                data=json.dumps({"input": "ping"}).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer test-key",
+                },
+                method="POST",
+            )
+            with urllib_request.urlopen(request, timeout=5) as response:
+                body = response.read().decode("utf-8")
+            assert '"type":"response.completed"' in body
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": assistant_text},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1},
+                        }
+                    ),
+                ]
+            )
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        record = run_session(spec, assignment, command_runner=fake_runner)
+
+        assert record.outcome_metrics["usage_source"] == "provider_attributed"
+        assert record.outcome_metrics["input_tokens"] == 140
+        assert record.outcome_metrics["output_tokens"] == 35
+        assert record.outcome_metrics["total_tokens"] == 175
+        assert record.outcome_metrics["cached_input_tokens"] == 22
+        assert record.outcome_metrics["reasoning_output_tokens"] == 6
+        assert record.extraction["provider_usage_capture"]["source_ref"] == "resp_sse_123"
+    finally:
+        provider_server.shutdown()
+        provider_server.server_close()
+        provider_thread.join(timeout=1.0)
+
+
+def test_codex_openai_compatible_proxy_returns_502_when_provider_disconnects(
+    tmp_path, monkeypatch
+) -> None:
+    class _ProviderHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            self.connection.close()
+
+        def log_message(self, _format: str, *_args) -> None:
+            return
+
+    provider_server = ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
+    provider_thread = threading.Thread(target=provider_server.serve_forever, daemon=True)
+    provider_thread.start()
+    try:
+        source_root = tmp_path / "repo"
+        source_root.mkdir()
+        assignment = export_assignment(
+            _workflow(), _empty_ledger(), "implement", assignment_id="assign-001"
+        )
+        monkeypatch.setenv("TEST_OPENAI_COMPAT_KEY", "test-key")
+        spec = create_session_spec(
+            assignment=assignment,
+            agent_id="codex-cli",
+            workdir=source_root,
+            target_model="gpt-5.5",
+            target_provider="openai-compatible",
+            provider_base_url=f"http://127.0.0.1:{provider_server.server_port}",
+            provider_api_key_env="TEST_OPENAI_COMPAT_KEY",
+            session_id="session-001",
+        )
+        assistant_text = yaml.safe_dump(
+            {
+                "status": "completed",
+                "emitted_events": ["patch_ready"],
+                "verification": {"status": "passed"},
+            },
+            sort_keys=False,
+        ).strip()
+
+        def fake_runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+            proxy_base_url = None
+            for index, value in enumerate(command):
+                if value == "-c" and index + 1 < len(command):
+                    override = command[index + 1]
+                    prefix = "model_providers.bureauless.base_url="
+                    if override.startswith(prefix):
+                        proxy_base_url = override[len(prefix) :].strip('"')
+                        break
+            assert proxy_base_url is not None
+            request = urllib_request.Request(
+                f"{proxy_base_url}/responses",
+                data=json.dumps({"input": "ping"}).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer test-key",
+                },
+                method="POST",
+            )
+            with pytest.raises(urllib_error.HTTPError) as exc_info:
+                urllib_request.urlopen(request, timeout=5)
+            assert exc_info.value.code == 502
+            stdout = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": assistant_text},
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "turn.completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1},
+                        }
+                    ),
+                ]
+            )
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        record = run_session(spec, assignment, command_runner=fake_runner)
+
+        assert record.status == "completed"
+        assert record.outcome_metrics["usage_source"] == "agent_reported"
+        assert "provider_usage_capture" not in record.extraction
+    finally:
+        provider_server.shutdown()
+        provider_server.server_close()
+        provider_thread.join(timeout=1.0)
+
+
 def test_package_session_result_merges_provider_usage_capture_into_result_metrics(tmp_path) -> None:
     assignment = export_assignment(
         _workflow(), _empty_ledger(), "implement", assignment_id="assign-001"
@@ -8102,6 +9160,63 @@ def test_package_session_result_merges_provider_usage_capture_into_result_metric
     assert packaged.outcome_metrics["reasoning_output_tokens"] == 5
     assert packaged.outcome_metrics["usage_source"] == "provider_attributed"
     assert packaged.outcome_metrics["usage_confidence"] == "high"
+
+
+def test_dispatch_session_allows_provider_specific_gpt5_family_models(
+    tmp_path, monkeypatch
+) -> None:
+    workflow = _workflow()
+    assignment = export_assignment(
+        workflow, _empty_ledger(), "implement", assignment_id="assign-001"
+    )
+    mission, packet = _dispatch_fixture(workflow, assignment)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def fake_runner(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        stdout = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": yaml.safe_dump(
+                                {
+                                    "status": "completed",
+                                    "emitted_events": ["patch_ready"],
+                                    "verification": {"status": "passed"},
+                                },
+                                sort_keys=False,
+                            ).strip(),
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 10, "output_tokens": 2},
+                    }
+                ),
+            ]
+        )
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    record = dispatch_session(
+        mission,
+        workflow,
+        packet,
+        agent_id="codex-cli",
+        workdir=tmp_path,
+        dispatch_packet_path=tmp_path / "dispatch.yaml",
+        target_model="gpt-5.5",
+        target_provider="openai",
+        session_id="session-family-model",
+        command_runner=fake_runner,
+    )
+
+    assert record.status == "completed"
+    assert record.result_proposal is not None
+    assert record.result_proposal["effective_model"] == "gpt-5.5"
 
 
 def test_metrics_summarize_preserves_provider_attribution_after_result_import(tmp_path) -> None:
@@ -9250,6 +10365,39 @@ def test_dispatch_session_rejects_invalid_packet_before_runner(tmp_path) -> None
             mission,
             workflow,
             invalid_packet,
+            agent_id="codex-cli",
+            workdir=tmp_path,
+            dispatch_packet_path=tmp_path / "dispatch.yaml",
+            target_model="gpt-5",
+            target_provider="openai",
+            command_runner=runner,
+        )
+
+    assert runner_called is False
+    assert not (tmp_path / "dispatch.yaml").exists()
+
+
+def test_dispatch_session_rejects_proposed_workflow_before_runner(tmp_path) -> None:
+    workflow = _workflow()
+    assignment = export_assignment(
+        workflow,
+        _empty_ledger(),
+        "implement",
+        assignment_id="assign-dispatch-proposed",
+    )
+    mission, packet = _dispatch_fixture(workflow, assignment)
+    runner_called = False
+
+    def runner(*_args, **_kwargs):
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("proposed workflow reached the external runner")
+
+    with pytest.raises(ProtocolError, match="Dispatch workflow must be accepted"):
+        dispatch_session(
+            mission,
+            replace(workflow, status="proposed"),
+            packet,
             agent_id="codex-cli",
             workdir=tmp_path,
             dispatch_packet_path=tmp_path / "dispatch.yaml",

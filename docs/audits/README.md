@@ -107,4 +107,10 @@ A capability is end-to-end complete only when every required layer is complete.
 - [`2026-07-02-runtime-execution-gap-analysis.md`](2026-07-02-runtime-execution-gap-analysis.md):
   closed audit of the real-agent execution spine from dispatch through
   acceptance, progressive context, lifecycle control, and Workbench discovery;
-  mutation intake remains explicitly deferred to Runtime M4.
+  mutation intake was completed by Runtime M4 and ADR-004.
+- [`2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md):
+  confirmed follow-up audit for implementation debt under RFC-007, owned by a
+  task list rather than a new delivery milestone.
+- [`2026-07-11-live-demo-control-plane-bootstrap-gap.md`](2026-07-11-live-demo-control-plane-bootstrap-gap.md):
+  verified control-plane bootstrap remediation with a real provider-backed
+  bootstrap-to-commit run.

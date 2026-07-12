@@ -1,4 +1,18 @@
-# Keep the directory and docs, ignore per-run local output by default.
+# Ignore live-run output by default. Keep only reviewed, redacted evidence.
 *
 !.gitignore
 !README.md
+
+# Per-run material that may be reviewed and committed.
+!*/
+!*/README.md
+!*/inputs/
+!*/inputs/**
+!*/notes/
+!*/notes/.gitkeep
+!*/notes/*.md
+
+# Never publish mutable workspaces or native runtime output.
+**/workspace/
+**/runs/
+**/.bureauless/

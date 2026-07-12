@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,8 @@ class Ledger:
     broadcasts: list[dict[str, Any]]
     open_questions: list[dict[str, Any]]
     event_log: list[dict[str, Any]]
+    source_sha256: str | None = None
+    source_path: Path | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Ledger":
@@ -283,7 +286,12 @@ def load_mission(path: Path) -> Mission:
 def load_ledger(path: Path) -> Ledger:
     from .ledger import rebuild_ledger_projection
 
-    return rebuild_ledger_projection(Ledger.from_dict(_load_yaml_mapping(path, "Ledger")))
+    loaded = rebuild_ledger_projection(Ledger.from_dict(_load_yaml_mapping(path, "Ledger")))
+    return replace(
+        loaded,
+        source_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        source_path=path.resolve(),
+    )
 
 
 def load_workflow(path: Path) -> Workflow:

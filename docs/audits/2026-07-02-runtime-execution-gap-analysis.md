@@ -45,7 +45,7 @@ capability matrix continues to state that this path is not implemented.
 ### REX-001: Mutation Intent Does Not Reach Proposal Intake
 
 - Severity: high
-- Status: deferred to Runtime M4
+- Status: closed by Runtime M4 and ADR-004
 - Claim: a worker can identify a structural problem and submit a controlled
   workflow mutation proposal.
 - Evidence: the Codex output contract in

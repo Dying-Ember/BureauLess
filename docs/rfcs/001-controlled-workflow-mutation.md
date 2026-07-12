@@ -6,11 +6,11 @@
 [`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md). The
 final decision record lives in
 [`docs/adrs/001-controlled-workflow-mutation/001-accepted-design.md`](../adrs/001-controlled-workflow-mutation/001-accepted-design.md).
-This RFC remains as proposal history. Full temporal replay remains deferred to
-M3+.
+This RFC remains as proposal history. The deferred temporal-replay scope was
+implemented separately by RFC-004 in Runtime Milestone 4.
 
 Tracking issue:
-[#1 RFC: Controlled Workflow Mutation](https://github.com/Dying-Ember/BureauLess/issues/1)
+[#1 RFC-001: Controlled Workflow Mutation (closed)](https://github.com/Dying-Ember/BureauLess/issues/1)
 
 Implementation task list:
 [`docs/tasks/runtime_harness_milestone_2_5_tasklist.md`](../tasks/runtime_harness_milestone_2_5_tasklist.md)

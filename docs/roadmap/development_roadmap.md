@@ -247,6 +247,12 @@ No additional engineering-cleanup milestone is planned. Documentation indexes,
 task status, and API boundaries remain part of each delivery milestone's
 acceptance work.
 
+The confirmed RFC-007 implementation debt is tracked separately in
+[`../tasks/control_runtime_boundary_follow_up_tasklist.md`](../tasks/control_runtime_boundary_follow_up_tasklist.md).
+It is deliberately not a Runtime M6 or Workbench M8: CRT-001 through CRT-003
+are boundary-maintenance work, while CRT-004 must reuse existing operator
+readers before a dedicated UI delivery is justified.
+
 ## North Star
 
 Build a YAML-only orchestration harness where:

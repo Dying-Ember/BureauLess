@@ -147,6 +147,8 @@ def compile_dispatch_packet(
     turn_report_policy: dict[str, Any] | None = None,
 ) -> DispatchPacket:
     validate_routing_decision(mission, routing_decision, workflow=workflow)
+    if workflow.status != "accepted":
+        raise ProtocolError("Dispatch workflow must be accepted")
     if assignment.workflow_id != workflow.workflow_id:
         raise ProtocolError("Dispatch assignment workflow_id does not match workflow")
     if workflow.mission_id != mission.mission_id:

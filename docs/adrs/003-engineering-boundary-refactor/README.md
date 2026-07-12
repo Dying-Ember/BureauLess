@@ -3,7 +3,7 @@
 ## RFC
 
 - Implemented RFC: `docs/rfcs/003-engineering-boundary-refactor.md`
-- Tracking issue: [#2 RFC: Engineering Boundary Refactor](https://github.com/Dying-Ember/BureauLess/issues/2)
+- Tracking issue: [#2 RFC-003: Engineering Boundary Refactor (closed)](https://github.com/Dying-Ember/BureauLess/issues/2)
 
 ## Purpose
 

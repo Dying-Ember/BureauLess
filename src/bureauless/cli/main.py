@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -14,7 +14,8 @@ from typing import Any
 
 import yaml
 
-from ..application.acceptance import decide_staged_result, stage_result, stage_session_record
+from ..application.acceptance import decide_staged_result, stage_session_record
+from ..application.bootstrap import BootstrapAcceptance, accept_initial_control_plane
 from ..application.demo import prepare_demo_workspace
 from ..application.mutation_retry_demo import run_mutation_retry_demo
 from ..application.run_bundles import load_run_bundle, write_run_bundle, write_session_run_bundle
@@ -24,13 +25,14 @@ from ..protocol.advisors import (
     load_advisor_gate_decision,
     load_advisor_outcome,
 )
-from ..protocol.acceptance import DEFAULT_ACCEPTANCE_POLICY
+from ..protocol.acceptance import AcceptancePolicy, DEFAULT_ACCEPTANCE_POLICY
 from ..protocol.artifacts import sha256_file
 from ..protocol.assignments import export_assignment, load_assignment
 from ..protocol.dispatch import compile_dispatch_packet
-from ..protocol.harness import load_ledger, load_mission, load_workflow
+from ..protocol.harness import Workflow, load_ledger, load_mission, load_workflow
 from ..protocol.ledger import append_ledger_event, write_ledger
-from ..protocol.outcomes import load_node_outcome, node_outcome_from_session
+from ..protocol.outcomes import load_node_outcome
+from ..protocol.progress import INDEPENDENT_VERIFICATION_PENDING
 from ..protocol.results import load_result_proposal
 from ..protocol.reviews import apply_review_decision, load_review_decision
 from ..protocol.routing import load_routing_decision, validate_routing_decision
@@ -48,7 +50,6 @@ from ..runtime.sessions import (
     cancel_session_record,
     dispatch_session,
     load_session_record,
-    package_session_result,
     reconstruct_dispatched_session,
     start_dispatch_session,
     CommandRunner,
@@ -528,6 +529,7 @@ def run_live_demo(
     provider_wire_api: str | None = None,
     timeout_seconds: float = 120.0,
     command_runner: CommandRunner | None = None,
+    bootstrap_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     paths = prepare_demo_workspace(
         workspace,
@@ -547,21 +549,113 @@ def run_live_demo(
     artifact_root = workspace
     workflow = load_workflow(workflow_path)
     mission = load_mission(paths["mission"])
+    worker_bindings: dict[str, dict[str, str]] = {}
+    routing_decision: dict[str, Any] | None = None
+    steps: list[dict[str, Any]] = []
+    failure: dict[str, Any] | None = None
+    if bootstrap_context is not None:
+        bootstrap_run = _run_control_plane_bootstrap(
+            workspace=workspace,
+            mission=mission,
+            ledger=load_ledger(ledger_path),
+            agent_id=agent_id,
+            target_model=target_model,
+            target_provider=target_provider,
+            provider_base_url=provider_base_url,
+            provider_api_key_env=provider_api_key_env,
+            provider_wire_api=provider_wire_api,
+            timeout_seconds=timeout_seconds,
+            command_runner=command_runner,
+            context=bootstrap_context,
+        )
+        write_ledger(ledger_path, bootstrap_run.ledger)
+        steps.append(
+            {
+                "node_id": "orchestrate",
+                "control_plane": True,
+                "attempts": list(bootstrap_run.attempts),
+                "assignment_path": str(bootstrap_run.assignment_path),
+                "context_capsule_path": str(bootstrap_run.capsule_path),
+                "session_path": str(bootstrap_run.session_path),
+                "turn_report_path": str(bootstrap_run.turn_report_path),
+                "dispatch_packet_path": str(bootstrap_run.dispatch_packet_path),
+                "record_status": bootstrap_run.record_status,
+                "failure_reason": bootstrap_run.error,
+                "ready_after": [],
+                "node_state_after": (
+                    "completed" if bootstrap_run.acceptance is not None else "rejected"
+                ),
+            }
+        )
+        if bootstrap_run.acceptance is None:
+            failure = {
+                "node_id": "orchestrate",
+                "session_id": bootstrap_run.attempts[-1]["session_id"],
+                "status": bootstrap_run.record_status,
+                "reason": "control_plane_bootstrap_rejected",
+                "message": bootstrap_run.error,
+                "session_path": str(bootstrap_run.session_path),
+            }
+        else:
+            bootstrap = bootstrap_run.acceptance
+            workflow_path = bootstrap.workflow_path
+            workflow = bootstrap.workflow
+            routing_decision = bootstrap.routing_decision.to_dict()
+            worker_bindings = bootstrap.worker_bindings
+            mission = replace(
+                mission,
+                models={
+                    **mission.models,
+                    **{
+                        binding["model"]: {"role": "accepted_worker"}
+                        for binding in worker_bindings.values()
+                    },
+                },
+            )
 
-    routing_decision = _build_demo_routing_decision(workflow)
+    if routing_decision is None:
+        routing_decision = _build_demo_routing_decision(workflow)
     routing_decision_path = decisions_dir / "routing_decision.yaml"
     _write_yaml(routing_decision_path, routing_decision)
 
-    advisor_gate_decision = _build_demo_advisor_gate_decision(workflow)
+    advisor_gate_decision = {
+        "mission_id": workflow.mission_id,
+        "workflow_id": workflow.workflow_id,
+        "advisor_gate_decision": routing_decision["advisor_gate_decision"],
+    }
     advisor_gate_decision_path = decisions_dir / "advisor_gate_decision.yaml"
     _write_yaml(advisor_gate_decision_path, advisor_gate_decision)
 
-    node_ids = ["implement", "review", "commit"]
-    steps: list[dict[str, Any]] = []
-    failure: dict[str, Any] | None = None
-    for node_id in node_ids:
+    executed_nodes: set[str] = set()
+    while failure is None:
         workflow = load_workflow(workflow_path)
         ledger = load_ledger(ledger_path)
+        if workflow.status != "accepted":
+            failure = {
+                "node_id": None,
+                "status": "blocked",
+                "reason": "workflow_not_accepted",
+                "workflow_status": workflow.status,
+            }
+            break
+        replay = replay_workflow(workflow, ledger)
+        gatekeeper = evaluate_gatekeeper(workflow, ledger)
+        if replay.terminal_complete or not gatekeeper.ready:
+            break
+        node_id = next(
+            candidate for candidate in replay.nodes if candidate in gatekeeper.ready
+        )
+        if node_id in executed_nodes:
+            failure = {
+                "node_id": node_id,
+                "status": "blocked",
+                "reason": "ready node repeated in live demo",
+            }
+            break
+        executed_nodes.add(node_id)
+        binding = worker_bindings.get(node_id, {})
+        node_agent_id = binding.get("agent_id", agent_id)
+        node_model = binding.get("model", target_model)
         assignment_id = f"assign-{node_id}-live"
         session_id = f"session-{node_id}-live"
         result_id = f"result-{node_id}-live"
@@ -592,7 +686,7 @@ def run_live_demo(
             workflow,
             assignment,
             session_id,
-            agent_id,
+            node_agent_id,
         )
         ledger = append_ledger_event(ledger, created_event, workflow)
         write_ledger(ledger_path, ledger)
@@ -601,14 +695,18 @@ def run_live_demo(
             mission,
             workflow,
             dispatch_packet,
-            agent_id=agent_id,
+            agent_id=node_agent_id,
             workdir=workspace,
             dispatch_packet_path=dispatch_packet_path,
             timeout_seconds=timeout_seconds,
             isolation_mode="copy",
             cleanup_policy="retain_session_root",
-            sandbox_mode="danger-full-access" if node_id == "commit" else "workspace-write",
-            target_model=target_model,
+            sandbox_mode=(
+                "danger-full-access"
+                if _is_commit_node(workflow, node_id)
+                else "workspace-write"
+            ),
+            target_model=node_model,
             target_provider=target_provider,
             provider_base_url=provider_base_url,
             provider_api_key_env=provider_api_key_env,
@@ -688,30 +786,23 @@ def run_live_demo(
 
         _promote_demo_workspace_snapshot(Path(record.workspace["path"]), workspace)
 
-        packaged = package_session_result(
-            record,
-            assignment,
-            artifact_root=artifact_root,
-            result_id=result_id,
-        )
-        result_path = results_dir / f"{node_id}_result.yaml"
-        _write_yaml(result_path, packaged.to_dict())
-
-        outcome = node_outcome_from_session(
-            assignment,
-            record.to_dict(),
-            outcome_id=f"outcome-{session_id}",
-        )
-        outcome_path = outcomes_dir / f"{node_id}_node_outcome.yaml"
-        _write_yaml(outcome_path, outcome.to_dict())
-
-        staged = stage_result(
+        staged_session = stage_session_record(
             workflow,
             load_ledger(ledger_path),
             assignment,
-            packaged,
-            outcome,
+            record,
+            artifact_root=artifact_root,
+            result_id=result_id,
+            outcome_id=f"outcome-{session_id}",
         )
+        packaged = staged_session.result
+        result_path = results_dir / f"{node_id}_result.yaml"
+        _write_yaml(result_path, packaged.to_dict())
+
+        outcome = staged_session.outcome
+        outcome_path = outcomes_dir / f"{node_id}_node_outcome.yaml"
+        _write_yaml(outcome_path, outcome.to_dict())
+
         review_decision_payload = _build_demo_review_decision(
             workflow=workflow,
             assignment=assignment,
@@ -722,7 +813,7 @@ def run_live_demo(
         review_decision_path = reviews_dir / f"{node_id}_review_decision.yaml"
         _write_yaml(review_decision_path, review_decision_payload)
         reviewed = apply_review_decision(
-            staged.ledger,
+            staged_session.ledger,
             load_review_decision(review_decision_payload),
             workflow=workflow,
             event_id=f"event-review-{node_id}-live",
@@ -734,13 +825,19 @@ def run_live_demo(
             if isinstance(verification.get("status"), str)
             else "unknown"
         )
+        acceptance_policy = _live_demo_acceptance_policy(
+            workflow=workflow,
+            node_id=node_id,
+            verification=verification if isinstance(verification, dict) else {},
+            verification_status=verification_status,
+        )
         accepted = decide_staged_result(
             workflow,
             reviewed,
             assignment,
             packaged,
             outcome,
-            policy=DEFAULT_ACCEPTANCE_POLICY,
+            policy=acceptance_policy,
             verification_status=verification_status,
             review_event_id=f"event-review-{node_id}-live",
             event_id=f"event-outcome-{session_id}-decision",
@@ -770,6 +867,7 @@ def run_live_demo(
                 "turn_report_path": str(turn_report_path),
                 "dispatch_packet_path": str(dispatch_packet_path),
                 "record_status": record.status,
+                "mutation_intake": staged_session.mutation_intake_disposition,
                 "emitted_events": (
                     packaged.emitted_events if record.status == "completed" else []
                 ),
@@ -816,6 +914,9 @@ def run_live_demo(
     write_ledger(ledger_path, ledger)
     query = f"workflow_path={workflow_path}&ledger_path={ledger_path}"
     manifest_path = telemetry_dir / "m3_integrated_demo_manifest.yaml"
+    workflow_is_accepted = workflow.status == "accepted" and not (
+        failure is not None and failure.get("reason") == "control_plane_bootstrap_rejected"
+    )
     manifest = {
         "milestone": "runtime-milestone-3",
         "flow_id": "demo-live-session-path",
@@ -834,13 +935,493 @@ def run_live_demo(
         "steps": steps,
         "failure": failure,
         "terminal_complete": replay.terminal_complete,
-        "ready": gatekeeper.ready,
+        "ready": gatekeeper.ready if workflow_is_accepted else [],
         "node_states": {
-            node_id: node_state.state
+            node_id: node_state.state if workflow_is_accepted else "blocked"
             for node_id, node_state in replay.nodes.items()
         },
     }
     return write_run_bundle(manifest_path, manifest)
+
+
+@dataclass(frozen=True)
+class _BootstrapRun:
+    acceptance: BootstrapAcceptance | None
+    ledger: Any
+    assignment_path: Path
+    capsule_path: Path
+    session_path: Path
+    turn_report_path: Path
+    dispatch_packet_path: Path
+    record_status: str
+    error: str | None = None
+    attempts: tuple[dict[str, Any], ...] = ()
+
+
+def _run_control_plane_bootstrap(
+    *,
+    workspace: Path,
+    mission: Any,
+    ledger: Any,
+    agent_id: str,
+    target_model: str,
+    target_provider: str,
+    provider_base_url: str | None,
+    provider_api_key_env: str | None,
+    provider_wire_api: str | None,
+    timeout_seconds: float,
+    command_runner: CommandRunner | None,
+    context: dict[str, Any],
+) -> _BootstrapRun:
+    configured_worker_models = context.get("provider_allowed_worker_models")
+    approved_worker_models = (
+        configured_worker_models
+        if isinstance(configured_worker_models, list)
+        and configured_worker_models
+        and all(
+            isinstance(model, str) and model.strip()
+            for model in configured_worker_models
+        )
+        else [target_model]
+    )
+    workflow = Workflow.from_dict(
+        {
+            "workflow_id": "control-plane-bootstrap-v1",
+            "mission_id": mission.mission_id,
+            "mode": "single_agent",
+            "status": "accepted",
+            "reason": "Harness-owned control-plane bootstrap.",
+            "proposed_by": "harness",
+            "roles": {
+                "orchestrator": {"can_emit": ["control_plane_complete"], "can_consume": []}
+            },
+            "events": {"control_plane_complete": {"producer_roles": ["orchestrator"]}},
+            "nodes": [
+                {
+                    "id": "orchestrate",
+                    "role": "orchestrator",
+                    "emits": ["control_plane_complete"],
+                }
+            ],
+            "gates": [],
+            "terminal_events": ["control_plane_complete"],
+            "broadcast_policy": {"default": "filtered_delta"},
+            "budget_policy": {},
+        }
+    )
+    assignment = export_assignment(
+        workflow,
+        ledger,
+        "orchestrate",
+        assignment_id="assign-control-plane-bootstrap",
+        mission=mission,
+    )
+    assignment = replace(
+        assignment,
+        goal=(
+            "Produce only control-plane YAML. Do not use tools, edit files, run tests, "
+            "or perform business work. Return exactly two control_intents: first "
+            "initial_control_plane with proposal_id, workflow, routing_decision, and "
+            "one worker binding per node; second accept_initial_control_plane "
+            "referencing that proposal_id. Use the literal field names and YAML shape "
+            "in bootstrap_contract. Do not use proposed_workflow, workflow_mode, edges, "
+            "or model fields inside workflow nodes. The schema describes field names, "
+            "not a solution: choose concrete IDs, roles, events, and provider models "
+            "yourself, and satisfy acceptance_requirements. The bootstrap dispatch "
+            "routing mode applies only to this read-only orchestrator turn; do not "
+            "copy it into the proposed worker workflow. The proposed routing_decision "
+            "selected_mode must exactly equal the proposed workflow mode."
+        ),
+        visible_context={
+            "external_task": context,
+            "bootstrap_contract": {
+                "workflow_status": "proposed",
+                "workflow_proposed_by": "orchestrator",
+                "workflow_mission_id": mission.mission_id,
+                "worker_binding_fields": ["node_id", "role", "agent_id", "model"],
+                "allowed_worker_agents": [agent_id],
+                "approved_worker_models": approved_worker_models,
+                "forbidden": ["tool_calls", "business_execution", "tests", "commit"],
+                "required_emitted_event": "control_plane_complete",
+                "proposal_routing_rules": [
+                    "The bootstrap dispatch mode is not a constraint on the proposed worker workflow.",
+                    "routing_decision.selected_mode must equal workflow.mode.",
+                    "Use single_agent only when separate verification or terminal commit nodes are not required.",
+                ],
+                "result_example": _control_plane_result_example(
+                    mission.mission_id,
+                    agent_id,
+                    approved_worker_models[0],
+                ),
+                "acceptance_requirements": context.get("control_plane_requirements", {}),
+            },
+        },
+    )
+    attempts: list[dict[str, Any]] = []
+    validation_errors: list[str] = []
+    previous_proposal: Any = None
+    for attempt_index in range(2):
+        is_replan = attempt_index == 1
+        name = "control_plane_bootstrap_replan" if is_replan else "control_plane_bootstrap"
+        session_id = (
+            "session-control-plane-bootstrap-replan"
+            if is_replan
+            else "session-control-plane-bootstrap"
+        )
+        current_assignment = assignment
+        if is_replan:
+            current_assignment = replace(
+                assignment,
+                assignment_id="assign-control-plane-bootstrap-replan",
+                goal=(
+                    "Correct only the prior control-plane proposal using the structured "
+                    "validation errors. Do not use tools or perform business work. Return "
+                    "the same two control_intents in the required schema. Re-evaluate the "
+                    "proposed workflow mode, then make routing_decision.selected_mode "
+                    "exactly equal workflow.mode."
+                ),
+                visible_context={
+                    **assignment.visible_context,
+                    "control_plane_replan": {
+                        "attempt": 2,
+                        "validation_errors": validation_errors,
+                        "previous_proposal": previous_proposal,
+                        "constraints": [
+                            "Correct control-plane fields only.",
+                            "Do not use tools, edit files, run tests, commit, or dispatch workers.",
+                            "The bootstrap dispatch mode does not constrain the proposed workflow mode.",
+                            "routing_decision.selected_mode must equal workflow.mode.",
+                        ],
+                    },
+                },
+            )
+
+        assignment_path = (
+            workspace / "generated" / "assignments" / f"{name}_assignment.yaml"
+        )
+        _write_yaml(assignment_path, current_assignment.to_dict())
+        capsule_path = (
+            workspace / "generated" / "capsules" / f"{name}_context_capsule.yaml"
+        )
+        _write_yaml(
+            capsule_path,
+            current_assignment.visible_context.get("context_capsule", {}),
+        )
+        packet = compile_dispatch_packet(
+            mission,
+            workflow,
+            load_routing_decision(_build_demo_routing_decision(workflow)),
+            current_assignment,
+            packet_id=(
+                "packet-control-plane-bootstrap-replan"
+                if is_replan
+                else "packet-control-plane-bootstrap"
+            ),
+        )
+        ledger = append_ledger_event(
+            ledger,
+            build_assignment_created_event(
+                workflow, current_assignment, session_id, agent_id
+            ),
+            workflow,
+        )
+        dispatch_packet_path = (
+            workspace
+            / "generated"
+            / "control-plane"
+            / ("replan-dispatch.yaml" if is_replan else "dispatch.yaml")
+        )
+        record = dispatch_session(
+            mission,
+            workflow,
+            packet,
+            agent_id=agent_id,
+            workdir=workspace,
+            dispatch_packet_path=dispatch_packet_path,
+            timeout_seconds=timeout_seconds,
+            isolation_mode="copy",
+            cleanup_policy="retain_session_root",
+            sandbox_mode="read-only",
+            target_model=target_model,
+            target_provider=target_provider,
+            provider_base_url=provider_base_url,
+            provider_api_key_env=provider_api_key_env,
+            provider_wire_api=provider_wire_api,
+            session_id=session_id,
+            command_runner=command_runner,
+        )
+        session_path = workspace / "generated" / "sessions" / f"{name}_session.yaml"
+        _write_yaml(
+            session_path,
+            {
+                **record.to_dict(),
+                "role": "orchestrator",
+                "task_type": "control_plane_replan" if is_replan else "control_plane_bootstrap",
+                "bootstrap_attempt": attempt_index + 1,
+            },
+        )
+        reports = record.extraction.get("turn_reports", [])
+        turn_report = reports[-1] if isinstance(reports, list) and reports else {
+            "session_id": record.session_id,
+            "status": record.status,
+        }
+        turn_report_path = (
+            workspace / "generated" / "telemetry" / f"{name}_turn_report.yaml"
+        )
+        _write_yaml(turn_report_path, turn_report)
+        attempt = {
+            "attempt": attempt_index + 1,
+            "kind": "replan" if is_replan else "initial",
+            "session_id": session_id,
+            "assignment_path": str(assignment_path),
+            "context_capsule_path": str(capsule_path),
+            "session_path": str(session_path),
+            "turn_report_path": str(turn_report_path),
+            "dispatch_packet_path": str(dispatch_packet_path),
+            "record_status": record.status,
+            "protocol_error": None,
+        }
+        attempts.append(attempt)
+
+        if record.status != "completed" or record.result_proposal is None:
+            terminal_event = build_session_terminal_event(
+                workflow,
+                current_assignment,
+                record,
+                event_id=f"event-{record.session_id}-{record.status}",
+            )
+            if terminal_event is not None:
+                ledger = append_ledger_event(ledger, terminal_event, workflow)
+            return _BootstrapRun(
+                acceptance=None,
+                ledger=ledger,
+                assignment_path=assignment_path,
+                capsule_path=capsule_path,
+                session_path=session_path,
+                turn_report_path=turn_report_path,
+                dispatch_packet_path=dispatch_packet_path,
+                record_status=record.status,
+                error="Control-plane bootstrap session did not complete",
+                attempts=tuple(attempts),
+            )
+        if record.extraction.get("native_tool_events"):
+            return _BootstrapRun(
+                acceptance=None,
+                ledger=ledger,
+                assignment_path=assignment_path,
+                capsule_path=capsule_path,
+                session_path=session_path,
+                turn_report_path=turn_report_path,
+                dispatch_packet_path=dispatch_packet_path,
+                record_status=record.status,
+                error="Control-plane bootstrap session must not use tools",
+                attempts=tuple(attempts),
+            )
+        try:
+            acceptance = accept_initial_control_plane(
+                workspace,
+                mission,
+                ledger,
+                load_result_proposal(record.result_proposal),
+                session_id=record.session_id,
+                requirements=context.get("control_plane_requirements"),
+                allowed_agent_ids={agent_id},
+                allowed_models=set(approved_worker_models),
+            )
+        except ProtocolError as exc:
+            message = str(exc)
+            attempt["protocol_error"] = message
+            if not is_replan:
+                validation_errors = _bootstrap_validation_errors(message)
+                control_intents = record.result_proposal.get("control_intents", [])
+                previous_proposal = (
+                    control_intents[0]
+                    if isinstance(control_intents, list) and control_intents
+                    else None
+                )
+                continue
+            return _BootstrapRun(
+                acceptance=None,
+                ledger=ledger,
+                assignment_path=assignment_path,
+                capsule_path=capsule_path,
+                session_path=session_path,
+                turn_report_path=turn_report_path,
+                dispatch_packet_path=dispatch_packet_path,
+                record_status=record.status,
+                error=message,
+                attempts=tuple(attempts),
+            )
+        attempt["accepted"] = True
+        return _BootstrapRun(
+            acceptance=acceptance,
+            ledger=acceptance.ledger,
+            assignment_path=assignment_path,
+            capsule_path=capsule_path,
+            session_path=session_path,
+            turn_report_path=turn_report_path,
+            dispatch_packet_path=dispatch_packet_path,
+            record_status=record.status,
+            attempts=tuple(attempts),
+        )
+
+    raise AssertionError("bounded bootstrap loop exhausted")
+
+
+def _bootstrap_validation_errors(message: str) -> list[str]:
+    return [
+        line.removeprefix("- ").strip()
+        for line in message.splitlines()
+        if line.strip() and not line.rstrip().endswith("rejected:")
+    ]
+
+
+def _control_plane_result_example(
+    mission_id: str,
+    agent_id: str,
+    model: str,
+) -> dict[str, Any]:
+    return {
+        "status": "completed",
+        "emitted_events": ["control_plane_complete"],
+        "verification": {"status": "passed"},
+        "control_intents": [
+            {
+                "intent_type": "initial_control_plane",
+                "proposal_id": "bootstrap-demo-cli-v1",
+                "workflow": {
+                    "workflow_id": "demo-cli-verified-commit-v1",
+                    "mission_id": mission_id,
+                    "mode": "small_dag",
+                    "status": "proposed",
+                    "reason": "Implementation, review, independent verification, and commit need separate evidence boundaries.",
+                    "proposed_by": "orchestrator",
+                    "roles": {
+                        "coder": {"can_emit": ["patch_ready"], "can_consume": []},
+                        "reviewer": {
+                            "can_emit": ["review_approved"],
+                            "can_consume": ["patch_ready"],
+                        },
+                        "verifier": {
+                            "can_emit": ["verification_passed"],
+                            "can_consume": ["patch_ready"],
+                        },
+                        "committer": {
+                            "can_emit": ["commit_complete"],
+                            "can_consume": ["patch_ready", "review_approved", "verification_passed"],
+                        },
+                    },
+                    "events": {
+                        "patch_ready": {"producer_roles": ["coder"]},
+                        "review_approved": {"producer_roles": ["reviewer"]},
+                        "verification_passed": {"producer_roles": ["verifier"]},
+                        "commit_complete": {"producer_roles": ["committer"]},
+                    },
+                    "nodes": [
+                        {"id": "implement", "role": "coder", "waits_for": [], "emits": ["patch_ready"]},
+                        {"id": "review", "role": "reviewer", "waits_for": ["implement.patch_ready"], "emits": ["review_approved"]},
+                        {"id": "verify", "role": "verifier", "waits_for": ["implement.patch_ready"], "emits": ["verification_passed"]},
+                        {"id": "commit", "role": "committer", "waits_for": ["implement.patch_ready", "review.review_approved", "verify.verification_passed"], "emits": ["commit_complete"]},
+                    ],
+                    "gates": [
+                        {
+                            "id": "commit-requires-independent-verification",
+                            "node_id": "commit",
+                            "requires": ["verify.verification_passed"],
+                        }
+                    ],
+                    "terminal_events": ["commit.commit_complete"],
+                    "broadcast_policy": {"default": "filtered_delta"},
+                    "budget_policy": {},
+                },
+                "routing_decision": {
+                    "decision_type": "routing_decision",
+                    "mission_id": mission_id,
+                    "workflow_id": "demo-cli-verified-commit-v1",
+                    "selected_mode": "small_dag",
+                    "selection_policy_version": "0.1",
+                    "triggered_rules": ["independent_verification_required"],
+                    "rejected_modes": [
+                        {
+                            "mode": "single_agent",
+                            "rejected_because": "It cannot provide independent verification before commit.",
+                        }
+                    ],
+                    "estimated_coordination_ratio": 0.18,
+                    "budget_confidence": "medium",
+                    "reason": "The task needs independently replayable implementation, verification, and commit evidence.",
+                    "advisor_gate_decision": {
+                        "invoked": False,
+                        "policy_version": "0.1",
+                        "reason": ["first_run_heuristic"],
+                        "decision_basis": "first_run_heuristic",
+                    },
+                },
+                "worker_bindings": [
+                    {"node_id": "implement", "role": "coder", "agent_id": agent_id, "model": model},
+                    {"node_id": "review", "role": "reviewer", "agent_id": agent_id, "model": model},
+                    {"node_id": "verify", "role": "verifier", "agent_id": agent_id, "model": model},
+                    {"node_id": "commit", "role": "committer", "agent_id": agent_id, "model": model},
+                ],
+            },
+            {"intent_type": "accept_initial_control_plane", "proposal_id": "bootstrap-demo-cli-v1"},
+        ],
+    }
+
+
+def _live_demo_acceptance_policy(
+    *,
+    workflow: Workflow,
+    node_id: str,
+    verification: dict[str, Any],
+    verification_status: str,
+) -> AcceptancePolicy:
+    if (
+        _is_implementation_node(workflow, node_id)
+        and _live_demo_verification_is_progress_only(
+            workflow,
+            node_id,
+            verification,
+        )
+    ):
+        return AcceptancePolicy(
+            policy_version="acceptance-v1-live-demo-progress",
+            review_required=DEFAULT_ACCEPTANCE_POLICY.review_required,
+            allowed_review_actors=DEFAULT_ACCEPTANCE_POLICY.allowed_review_actors,
+            required_verification_statuses=["passed", verification_status],
+            allow_partial_acceptance=DEFAULT_ACCEPTANCE_POLICY.allow_partial_acceptance,
+        )
+    return DEFAULT_ACCEPTANCE_POLICY
+
+
+def _live_demo_verification_is_progress_only(
+    workflow: Workflow,
+    node_id: str,
+    verification: dict[str, Any],
+) -> bool:
+    marker = verification.get("final_independent_verification")
+    has_independent_verifier = any(
+        node.id != node_id
+        and any("verification" in event.casefold() for event in node.emits)
+        for node in workflow.nodes.values()
+    )
+    return has_independent_verifier and marker == INDEPENDENT_VERIFICATION_PENDING
+
+
+def _is_implementation_node(workflow: Workflow, node_id: str) -> bool:
+    node = workflow.nodes.get(node_id)
+    return node is not None and "patch_ready" in node.emits
+
+
+def _is_commit_node(workflow: Workflow, node_id: str) -> bool:
+    node = workflow.nodes.get(node_id)
+    if node is None:
+        return False
+    return (
+        "commit" in node.id.casefold()
+        or "commit" in node.role.casefold()
+        or any("commit" in event.casefold() for event in node.emits)
+    )
 
 
 def run_advisor_policy_demo(
@@ -983,7 +1564,7 @@ def run_advisor_policy_demo(
         workflow=load_workflow(workflow_path),
         outcome_ref=str(outcome_path.relative_to(workspace)),
     )
-    write_ledger(paths["ledger"], ledger)
+    ledger = write_ledger(paths["ledger"], ledger)
     return {
         "scenario": scenario,
         "invoked": gate_decision.invoked,
@@ -1058,7 +1639,7 @@ def run_execution_spine_acceptance(workspace: Path) -> dict[str, Any]:
         "mutable": False,
     }
     ledger = replace(ledger, artifacts=[context_artifact])
-    write_ledger(paths["ledger"], ledger)
+    ledger = write_ledger(paths["ledger"], ledger)
     assignment = export_assignment(
         workflow,
         ledger,
@@ -1089,7 +1670,7 @@ def run_execution_spine_acceptance(workspace: Path) -> dict[str, Any]:
         ),
         workflow,
     )
-    write_ledger(paths["ledger"], ledger)
+    ledger = write_ledger(paths["ledger"], ledger)
 
     turns = 0
 
@@ -1213,7 +1794,7 @@ def run_execution_spine_acceptance(workspace: Path) -> dict[str, Any]:
         validation_rule="execution_spine_acceptance_v1",
         created_at=record.finished_at,
     )
-    write_ledger(paths["ledger"], accepted.ledger)
+    ledger = write_ledger(paths["ledger"], accepted.ledger)
     replay_after_acceptance = replay_workflow(workflow, accepted.ledger)
 
     cancellation_paths = prepare_demo_workspace(
@@ -1491,7 +2072,7 @@ def _attach_demo_context_telemetry(
     artifact_refs = assignment.artifact_refs
     record_payload["role"] = assignment.role
     record_payload["task_type"] = node_id
-    record_payload["risk_level"] = _demo_risk_level(node_id)
+    record_payload["risk_level"] = _demo_risk_level(assignment)
     record_payload["context_delivery"] = {
         "policy_version": capsule.get("policy_version", "context-v1")
         if isinstance(capsule, dict)
@@ -1535,6 +2116,7 @@ def _build_demo_review_decision(
     node_id: str,
     result_id: str,
 ) -> dict[str, Any]:
+    is_commit = _is_commit_node(workflow, node_id)
     verification = packaged_result.get("verification", {})
     verification_status = (
         verification.get("status")
@@ -1555,7 +2137,7 @@ def _build_demo_review_decision(
         "mission_id": workflow.mission_id,
         "workflow_id": workflow.workflow_id,
         "reviewed_event": f"event-{result_id}",
-        "actor": "orchestrator" if node_id != "commit" else "human",
+        "actor": "human" if is_commit else "orchestrator",
         "verdict": "approved",
         "reason": (
             f"{node_id} completed with verification status {verification_status} "
@@ -1572,14 +2154,18 @@ def _build_demo_review_decision(
             }
         ],
         "rejected_findings": [],
-        "next_action": "continue" if node_id != "commit" else "stop",
+        "next_action": "stop" if is_commit else "continue",
     }
 
 
-def _demo_risk_level(node_id: str) -> str:
-    if node_id == "commit":
+def _demo_risk_level(assignment: Any) -> str:
+    role = assignment.role.casefold()
+    events = [event.casefold() for event in assignment.expected_events]
+    if "commit" in role or any("commit" in event for event in events):
         return "high"
-    if node_id == "review":
+    if "review" in role or any(
+        "review" in event or "verification" in event for event in events
+    ):
         return "medium"
     return "low"
 

@@ -703,7 +703,7 @@ def create_app() -> FastAPI:
             request.agent,
         )
         ledger = append_ledger_event(ledger, created_event, workflow)
-        write_ledger(paths["ledger"], ledger)
+        ledger = write_ledger(paths["ledger"], ledger)
 
         record = dispatch_session(
             mission,
@@ -755,7 +755,7 @@ def create_app() -> FastAPI:
             created_at=record.finished_at,
         )
         ledger = accepted.ledger
-        write_ledger(paths["ledger"], ledger)
+        ledger = write_ledger(paths["ledger"], ledger)
 
         return {
             "workspace": str(Path(request.workspace).resolve()),

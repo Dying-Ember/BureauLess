@@ -11,6 +11,7 @@ from ..runtime.gatekeeper import evaluate_gatekeeper
 from .harness import Ledger, Mission, Workflow
 from .ledger import rebuild_ledger_projection
 from .mutations import materialize_current_workflow, workflow_version_identity
+from .progress import INDEPENDENT_VERIFICATION_PENDING
 
 
 DEFAULT_FORBIDDEN_ACTIONS = [
@@ -161,6 +162,21 @@ def export_assignment(
 
 
 def render_assignment_prompt(assignment: AssignmentPacket) -> str:
+    workflow_nodes = assignment.visible_context.get("workflow_structure", {}).get("nodes", [])
+    progress_contract = (
+        [
+            "For completed implementation awaiting independent verification, set:",
+            f"final_independent_verification: {INDEPENDENT_VERIFICATION_PENDING}",
+        ]
+        if "patch_ready" in assignment.expected_events
+        and any(
+            isinstance(node, dict)
+            and node.get("id") != assignment.node_id
+            and any("verification" in event for event in node.get("emits", []))
+            for node in workflow_nodes
+        )
+        else []
+    )
     return "\n".join(
         [
             f"# Assignment {assignment.assignment_id}",
@@ -174,6 +190,7 @@ def render_assignment_prompt(assignment: AssignmentPacket) -> str:
             "",
             "## Expected Events",
             _lines(assignment.expected_events),
+            *progress_contract,
             "",
             "## Forbidden Actions",
             _lines(assignment.forbidden_actions),

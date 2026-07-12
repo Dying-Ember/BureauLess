@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv is required. Install uv, then run 'uv sync --dev' from $ROOT_DIR." >&2
+  exit 1
+fi
+
+if [[ $# -lt 4 ]]; then
+  echo "usage: scripts/live-demo-boundary-run <workspace> <target-model> <provider-base-url> <provider-api-key-env> [provider-wire-api]" >&2
+  exit 1
+fi
+
+WORKSPACE="$1"
+TARGET_MODEL="$2"
+PROVIDER_BASE_URL="$3"
+PROVIDER_API_KEY_ENV="$4"
+PROVIDER_WIRE_API="${5:-responses}"
+
+unset VIRTUAL_ENV
+cd "$ROOT_DIR"
+uv run python scripts/live_demo_boundary_run.py \
+  "$WORKSPACE" \
+  --target-model "$TARGET_MODEL" \
+  --provider-base-url "$PROVIDER_BASE_URL" \
+  --provider-api-key-env "$PROVIDER_API_KEY_ENV" \
+  --provider-wire-api "$PROVIDER_WIRE_API"
