@@ -2,14 +2,13 @@
 
 ## Status
 
-Accepted for Runtime Harness Milestone 4 by
+Accepted and implemented by Runtime Harness Milestone 4 under
 [`ADR-004`](../adrs/004-temporal-replay-mutation-intake-and-retry-control/001-accepted-design.md).
-Runtime implementation has not started.
 
 Decision: accepted on 2026-07-03.
 
 Tracking issue:
-[#3 RFC-004: Temporal Replay, Mutation Intake, And Retry Control](https://github.com/Dying-Ember/BureauLess/issues/3)
+[#3 RFC-004: Temporal Replay, Mutation Intake, And Retry Control (closed)](https://github.com/Dying-Ember/BureauLess/issues/3)
 
 Implementation planning:
 [`docs/tasks/runtime_harness_milestone_4_tasklist.md`](../tasks/runtime_harness_milestone_4_tasklist.md)

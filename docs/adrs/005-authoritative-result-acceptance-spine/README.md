@@ -15,3 +15,5 @@
 This archive stores the decisions that remediate audit finding REX-002 under
 Runtime Milestone 3.5. The RFC remains proposal history; the accepted ADR is the
 stable implementation decision.
+
+Tracking issue: [#10 (closed)](https://github.com/Dying-Ember/BureauLess/issues/10).

@@ -7,7 +7,7 @@ Implemented. The accepted decision records are archived under
 and implementation completion is recorded in the task list below.
 
 Tracking issue:
-[#2 RFC: Engineering Boundary Refactor](https://github.com/Dying-Ember/BureauLess/issues/2)
+[#2 RFC-003: Engineering Boundary Refactor (closed)](https://github.com/Dying-Ember/BureauLess/issues/2)
 
 Implementation tracking:
 [`docs/tasks/engineering_boundary_refactor_tasklist.md`](../tasks/engineering_boundary_refactor_tasklist.md)

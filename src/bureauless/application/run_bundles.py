@@ -254,6 +254,21 @@ def _validate_step(step: dict[str, Any], *, index: int) -> None:
     for field in OPTIONAL_STEP_PATHS:
         _require_optional_string(step, field, prefix)
     _require_optional_string(step, "failure_reason", prefix)
+    attempts = step.get("attempts")
+    if attempts is not None:
+        if not isinstance(attempts, list) or not all(
+            isinstance(attempt, dict) for attempt in attempts
+        ):
+            raise ProtocolError(f"{prefix} field 'attempts' must be a list of objects")
+        for attempt_index, attempt in enumerate(attempts):
+            attempt_prefix = f"{prefix}.attempts[{attempt_index}]"
+            for field in (
+                "session_id",
+                "record_status",
+                *REQUIRED_STEP_PATHS,
+            ):
+                _require_string(attempt, field, attempt_prefix)
+            _require_optional_string(attempt, "protocol_error", attempt_prefix)
 
 
 def _build_artifact_index(manifest: dict[str, Any]) -> list[dict[str, str]]:
@@ -269,6 +284,15 @@ def _build_artifact_index(manifest: dict[str, Any]) -> list[dict[str, str]]:
             value = step.get(field)
             if isinstance(value, str) and value:
                 refs.append((f"steps[{index}].{field}", value))
+        for attempt_index, attempt in enumerate(step.get("attempts", [])):
+            if not isinstance(attempt, dict):
+                continue
+            for field in REQUIRED_STEP_PATHS:
+                value = attempt.get(field)
+                if isinstance(value, str) and value:
+                    refs.append(
+                        (f"steps[{index}].attempts[{attempt_index}].{field}", value)
+                    )
     result = []
     for field, value in refs:
         artifact_path = Path(value)

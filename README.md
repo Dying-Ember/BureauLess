@@ -110,6 +110,27 @@ uv run python -m bureauless mission execution-spine-acceptance \
 The execution-spine command runs the deterministic Runtime M3.5 acceptance
 path and writes a failing-on-error evidence report into the target workspace.
 
+## Maintained Live Demo
+
+Run the provider-backed control-plane demo with an OpenAI-compatible endpoint.
+The API key stays in an environment variable; pass its name, not its value:
+
+```bash
+export DEMO_PROVIDER_BASE_URL=https://provider.example/v1
+export DEMO_PROVIDER_API_KEY=...
+RUN_DIR="live-demos/$(date +%F)-local-boundary-run"
+
+scripts/live-demo-boundary-run \
+  "$RUN_DIR/workspace" \
+  gpt-5.5 \
+  "$DEMO_PROVIDER_BASE_URL" \
+  DEMO_PROVIDER_API_KEY
+```
+
+The wrapper writes the manifest and publisher audit under the run workspace.
+See [`live-demos/README.md`](live-demos/README.md) for evidence-retention and
+redaction rules.
+
 Run the maintained checks with:
 
 ```bash
@@ -164,7 +185,11 @@ The long-term architecture separates the control plane from execution:
 
 - The orchestrator plans, routes, records, reviews, and replans.
 - Worker agents execute bounded tasks.
-- The harness enforces roles, events, gates, budget policy, and provenance.
+- The harness owns the control runtime: launch admission, execution envelopes,
+  lifecycle supervision, bounded context, evidence capture, result intake, and
+  canonical ledger transitions.
+- Adapters retain agent-runtime mechanisms such as model loops, tool internals,
+  planning, memory, and provider streaming/retry.
 - Advisors are lazy and budget-gated.
 
 The short version: agents can do work, but they do not get to write history.
@@ -270,19 +295,25 @@ as one flat module shelf:
 
 ## Documentation
 
-Start with the documentation map, then use the two milestone indexes for current
-delivery status:
+Start with the documentation map, then use the task indexes for current delivery
+status:
 
 - [`docs/README.md`](docs/README.md)
 - [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
 - [`docs/audits/README.md`](docs/audits/README.md)
 - [`docs/audits/2026-07-02-runtime-execution-gap-analysis.md`](docs/audits/2026-07-02-runtime-execution-gap-analysis.md)
+- [`docs/audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](docs/audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md)
 - [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
 - [`docs/tasks/runtime_harness_milestone_3_5_tasklist.md`](docs/tasks/runtime_harness_milestone_3_5_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_4_tasklist.md`](docs/tasks/runtime_harness_milestone_4_tasklist.md)
+- [`docs/tasks/runtime_harness_milestone_5_tasklist.md`](docs/tasks/runtime_harness_milestone_5_tasklist.md)
+- [`docs/tasks/control_runtime_boundary_follow_up_tasklist.md`](docs/tasks/control_runtime_boundary_follow_up_tasklist.md)
 - [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
 - [`docs/rfcs/README.md`](docs/rfcs/README.md)
 - [`docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
 - [`docs/rfcs/005-authoritative-result-acceptance-spine.md`](docs/rfcs/005-authoritative-result-acceptance-spine.md)
+- [`docs/rfcs/006-bounded-context-continuation.md`](docs/rfcs/006-bounded-context-continuation.md)
+- [`docs/rfcs/007-control-runtime-boundary.md`](docs/rfcs/007-control-runtime-boundary.md)
 - [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md)
 - [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
 - [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for implementation by RM35-03 in Runtime Harness Milestone 3.5.
+Accepted and implemented by RM35-03 in Runtime Harness Milestone 3.5.
 
 ADR:
 [`ADR-006: Bounded Context Continuation`](../adrs/006-bounded-context-continuation/001-accepted-design.md)
@@ -12,6 +12,9 @@ Implementation tracking:
 
 Source audit:
 [`REX-004: Context Requests Do Not Round Trip Through A Real Session`](../audits/2026-07-02-runtime-execution-gap-analysis.md)
+
+Tracking issue:
+[#12 RFC-006: Bounded Context Continuation (closed)](https://github.com/Dying-Ember/BureauLess/issues/12)
 
 ## Problem
 

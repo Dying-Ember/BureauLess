@@ -76,7 +76,7 @@ def run_mutation_retry_demo(
         "mutable": False,
     }
     ledger = replace(ledger, artifacts=[*ledger.artifacts, gap_artifact])
-    write_ledger(paths["ledger"], ledger)
+    ledger = write_ledger(paths["ledger"], ledger)
     initial_version = workflow_version_id(workflow, ledger)
     launch_count = 0
 
@@ -117,7 +117,7 @@ def run_mutation_retry_demo(
         ),
         workflow,
     )
-    write_ledger(paths["ledger"], ledger)
+    ledger = write_ledger(paths["ledger"], ledger)
 
     review_record = _dispatch(
         mission,
@@ -185,7 +185,7 @@ def run_mutation_retry_demo(
     for event in build_mutation_supersession_events(workflow, accepted_event, impacts):
         ledger = append_ledger_event(ledger, event, workflow)
     accepted_version = workflow_version_id(after, ledger)
-    write_ledger(paths["ledger"], ledger)
+    ledger = write_ledger(paths["ledger"], ledger)
 
     verify_assignment = export_assignment(
         workflow,
@@ -356,7 +356,7 @@ def run_mutation_retry_demo(
         repair_strategy="repair-v1",
     )
     ledger = circuit.ledger
-    write_ledger(paths["ledger"], ledger)
+    ledger = write_ledger(paths["ledger"], ledger)
 
     superseded = any(
         event.get("event_type") == "assignment_superseded"

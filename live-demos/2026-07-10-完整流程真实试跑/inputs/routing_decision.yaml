@@ -1,0 +1,29 @@
+decision_type: routing_decision
+mission_id: demo
+selected_mode: single_agent
+selection_policy_version: "0.1"
+triggered_rules: []
+rejected_modes:
+  - mode: small_dag
+    rejected_because: >
+      在任务发布人仅提出“需要独立 verification 证据”这一约束时，
+      尚不能预先断言必须拆成多节点控制流；应先证明单个有边界 worker
+      或单 worker 加 review 是否不足。
+estimated_coordination_ratio: 0.0
+budget_confidence: medium
+reason: >
+  当前外部输入只给出任务目标、verification 约束和审计要求，没有先验证
+  现有简单模式是否失效，因此默认先从最简单可执行模式开始。
+budget_reason: >
+  先避免无证据扩编角色，减少控制平面开销，后续如发现结构不足，再通过
+  proposal 或 mutation 显式升级。
+risk_reason: >
+  任务本身低风险，但 verification 约束明确，因此后续若单 worker 不能自然
+  产生独立验证证据，应通过显式控制平面产物升级，而不是直接跳到预制 DAG。
+advisor_gate_decision:
+  invoked: false
+  policy_version: "0.1"
+  reason:
+    - node_count <= 2
+    - risk_level == low
+  decision_basis: first_run_heuristic

@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import queue
 import signal
 import shutil
 import subprocess
@@ -44,6 +46,7 @@ from ..protocol.outcomes import (
     node_outcome_from_session,
     reconcile_node_outcome_state,
 )
+from ..protocol.progress import INDEPENDENT_VERIFICATION_PENDING
 from ..protocol.results import ResultProposal, load_result_proposal
 from ..protocol.results import import_result_proposal
 from ..runtime_workspace import (
@@ -51,6 +54,13 @@ from ..runtime_workspace import (
     assess_workspace_isolation,
     git_environment,
     probe_git_worktree,
+)
+from .provider_usage import (
+    ProviderUsageCapture,
+    build_provider_usage_capture as _build_provider_usage_capture_from_proxy,
+    load_provider_usage_capture,
+    merge_provider_usage_into_outcome_metrics as _merge_provider_usage_into_outcome_metrics,
+    write_provider_usage_capture_artifact,
 )
 
 
@@ -206,38 +216,6 @@ class SessionRecord:
 
 
 @dataclass(frozen=True)
-class ProviderUsageCapture:
-    assignment_id: str
-    session_id: str
-    agent_id: str
-    provider: str
-    model: str
-    collected_at: str
-    usage: dict[str, Any]
-    source: str = "provider_usage_capture_v1"
-    result_id: str | None = None
-    source_ref: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = {
-            "artifact_type": "provider_usage_capture",
-            "assignment_id": self.assignment_id,
-            "session_id": self.session_id,
-            "agent_id": self.agent_id,
-            "provider": self.provider,
-            "model": self.model,
-            "collected_at": self.collected_at,
-            "source": self.source,
-            "usage": self.usage,
-        }
-        if self.result_id is not None:
-            payload["result_id"] = self.result_id
-        if self.source_ref is not None:
-            payload["source_ref"] = self.source_ref
-        return payload
-
-
-@dataclass(frozen=True)
 class RetryControlResult:
     ledger: Ledger
     action: str
@@ -273,6 +251,45 @@ class _ProviderUsageCollector:
             if self._latest_capture is None:
                 return None
             return dict(self._latest_capture)
+
+
+class _SSEUsageCaptureParser:
+    def __init__(self) -> None:
+        self._buffer = b""
+
+    def feed(self, chunk: bytes) -> dict[str, Any] | None:
+        self._buffer += chunk
+        capture = None
+        while b"\n\n" in self._buffer:
+            raw_event, self._buffer = self._buffer.split(b"\n\n", 1)
+            event_capture = self._parse_event(raw_event)
+            if event_capture is not None:
+                capture = event_capture
+        return capture
+
+    def finish(self) -> dict[str, Any] | None:
+        if not self._buffer.strip():
+            return None
+        capture = self._parse_event(self._buffer)
+        self._buffer = b""
+        return capture
+
+    def _parse_event(self, raw_event: bytes) -> dict[str, Any] | None:
+        data_lines: list[str] = []
+        for raw_line in raw_event.splitlines():
+            line = raw_line.decode("utf-8", errors="ignore")
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if not data_lines:
+            return None
+        payload_text = "\n".join(data_lines).strip()
+        if not payload_text or payload_text == "[DONE]":
+            return None
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return None
+        return _extract_openai_compatible_usage_capture(payload)
 
 
 class _OpenAICompatibleTelemetryProxy:
@@ -336,35 +353,33 @@ class _OpenAICompatibleTelemetryProxy:
                 )
                 try:
                     with urllib_request.urlopen(request, timeout=300) as response:
-                        status = response.status
-                        response_headers = response.headers
-                        response_body = response.read()
+                        self.send_response(response.status)
+                        for key, value in response.headers.items():
+                            lowered = key.lower()
+                            if lowered in {"connection", "content-length", "transfer-encoding"}:
+                                continue
+                            self.send_header(key, value)
+                        self.end_headers()
+                        proxy._stream_response(response, self.wfile, response.headers)
+                        return
                 except urllib_error.HTTPError as exc:
-                    status = exc.code
-                    response_headers = exc.headers
-                    response_body = exc.read()
-                proxy._maybe_capture_response(response_body)
-                self.send_response(status)
-                for key, value in response_headers.items():
-                    lowered = key.lower()
-                    if lowered in {"connection", "content-length", "transfer-encoding"}:
-                        continue
-                    self.send_header(key, value)
-                self.send_header("Content-Length", str(len(response_body)))
-                self.end_headers()
-                if response_body:
-                    self.wfile.write(response_body)
+                    self.send_response(exc.code)
+                    for key, value in exc.headers.items():
+                        lowered = key.lower()
+                        if lowered in {"connection", "content-length", "transfer-encoding"}:
+                            continue
+                        self.send_header(key, value)
+                    self.end_headers()
+                    proxy._stream_response(exc, self.wfile, exc.headers)
+                    return
+                except (urllib_error.URLError, http.client.HTTPException, OSError) as exc:
+                    reason = exc.reason if isinstance(exc, urllib_error.URLError) else str(exc)
+                    self.send_error(502, explain=reason)
+                    return
 
         return ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
 
-    def _maybe_capture_response(self, response_body: bytes) -> None:
-        if not response_body:
-            return
-        try:
-            payload = json.loads(response_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return
-        capture = _extract_openai_compatible_usage_capture(payload)
+    def _record_capture(self, capture: dict[str, Any] | None) -> None:
         if capture is None:
             return
         self._collector.record(
@@ -373,6 +388,37 @@ class _OpenAICompatibleTelemetryProxy:
             usage=capture["usage"],
             source_ref=capture.get("source_ref"),
         )
+
+    def _stream_response(
+        self,
+        response: Any,
+        output: Any,
+        response_headers: Any,
+    ) -> None:
+        content_type = response_headers.get("Content-Type", "")
+        is_sse = "text/event-stream" in content_type.lower()
+        sse_parser = _SSEUsageCaptureParser() if is_sse else None
+        json_chunks: list[bytes] | None = [] if not is_sse else None
+        while True:
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            if sse_parser is not None:
+                self._record_capture(sse_parser.feed(chunk))
+            elif json_chunks is not None:
+                json_chunks.append(chunk)
+            output.write(chunk)
+            output.flush()
+        if sse_parser is not None:
+            self._record_capture(sse_parser.finish())
+            return
+        if json_chunks is None:
+            return
+        try:
+            payload = json.loads(b"".join(json_chunks).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        self._record_capture(_extract_openai_compatible_usage_capture(payload))
 
 
 def classify_session_failure(
@@ -794,7 +840,11 @@ def start_dispatch_session(
 ) -> LiveSessionHandle:
     """Validate and persist one dispatch, then return its live session handle."""
     validate_dispatch_packet(mission, workflow, packet)
-    if target_model is not None and mission.models and target_model not in mission.models:
+    if (
+        target_model is not None
+        and mission.models
+        and not _mission_allows_target_model(mission.models, target_model)
+    ):
         raise ProtocolError(
             f"Dispatch target_model {target_model!r} is not allowed by mission"
         )
@@ -860,6 +910,24 @@ def start_dispatch_session(
         )
 
     return LiveSessionHandle(spec.session_id, run).start()
+
+
+def _mission_allows_target_model(models: dict[str, Any], target_model: str) -> bool:
+    normalized_target = target_model.strip().lower()
+    if not normalized_target:
+        return False
+    normalized_allowed = {str(name).strip().lower() for name in models}
+    if normalized_target in normalized_allowed:
+        return True
+    return any(_model_family_matches(allowed, normalized_target) for allowed in normalized_allowed)
+
+
+def _model_family_matches(allowed: str, target: str) -> bool:
+    if allowed == "gpt-5":
+        return target.startswith("gpt-5") and "-mini" not in target
+    if allowed == "gpt-5-mini":
+        return target.startswith("gpt-5") and "-mini" in target
+    return False
 
 
 def dispatch_session(
@@ -1300,7 +1368,7 @@ def load_session_record(data: dict[str, Any]) -> SessionRecord:
     )
 
 
-def load_provider_usage_capture(data: dict[str, Any]) -> ProviderUsageCapture:
+def _legacy_load_provider_usage_capture(data: dict[str, Any]) -> ProviderUsageCapture:
     artifact_type = _as_string(data, "artifact_type")
     if artifact_type != "provider_usage_capture":
         raise ProtocolError("Provider usage capture artifact_type must be provider_usage_capture")
@@ -1320,7 +1388,7 @@ def load_provider_usage_capture(data: dict[str, Any]) -> ProviderUsageCapture:
     )
 
 
-def write_provider_usage_capture_artifact(
+def _legacy_write_provider_usage_capture_artifact(
     path: Path,
     capture: ProviderUsageCapture,
     *,
@@ -1414,6 +1482,11 @@ def _join_upstream_url(base_url: str, request_path: str) -> str:
 
 
 def _extract_openai_compatible_usage_capture(payload: dict[str, Any]) -> dict[str, Any] | None:
+    if (
+        payload.get("type") == "response.completed"
+        and isinstance(payload.get("response"), dict)
+    ):
+        payload = payload["response"]
     usage = payload.get("usage")
     if not isinstance(usage, dict):
         return None
@@ -1476,7 +1549,7 @@ def _retarget_binding_base_url(binding: Any, base_url: str) -> Any:
     return replace(binding, base_url=base_url, codex_config_overrides=overrides)
 
 
-def _build_provider_usage_capture_from_proxy(
+def _legacy_build_provider_usage_capture_from_proxy(
     telemetry_capture: dict[str, Any] | None,
     *,
     assignment_id: str,
@@ -1508,7 +1581,7 @@ def _build_provider_usage_capture_from_proxy(
     )
 
 
-def _merge_provider_usage_into_outcome_metrics(
+def _legacy_merge_provider_usage_into_outcome_metrics(
     outcome_metrics: dict[str, Any],
     capture: ProviderUsageCapture | None,
 ) -> dict[str, Any]:
@@ -1902,6 +1975,7 @@ def _run_codex_cli_session(
                     timeout=spec.timeout_seconds,
                     input_text=prompt,
                     process_controller=process_controller,
+                    progress_line=_is_codex_native_progress_line,
                 )
             finally:
                 _cleanup_codex_home(codex_home)
@@ -1910,13 +1984,14 @@ def _run_codex_cli_session(
                 telemetry_capture = telemetry_proxy.snapshot()
                 telemetry_proxy.close()
     except subprocess.TimeoutExpired as exc:
+        timeout_reason = _timeout_reason(exc)
         finished_at = _now()
         native_logs = _persist_native_logs(workspace, exc.stdout or "", exc.stderr or "")
         _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
         outcome_metrics = _base_outcome_metrics(
             wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
         )
-        extraction = _empty_agent_extraction("timed_out", [])
+        extraction = _empty_agent_extraction(timeout_reason, [])
         extraction["contract"] = "codex_exec_v1"
         return SessionRecord(
             session_id=spec.session_id,
@@ -1925,7 +2000,7 @@ def _run_codex_cli_session(
             status="timed_out",
             started_at=started_at,
             finished_at=finished_at,
-            exit={"code": None, "reason": "timed_out"},
+            exit={"code": None, "reason": timeout_reason},
             native_logs=native_logs,
             diff_refs=[],
             artifacts=[],
@@ -2076,6 +2151,25 @@ def _render_codex_assignment_prompt(
     context_resolution: dict[str, Any] | None = None,
 ) -> str:
     sections = [render_assignment_prompt(assignment)]
+    workflow_nodes = assignment.visible_context.get("workflow_structure", {}).get(
+        "nodes", []
+    )
+    awaits_independent_verification = (
+        "patch_ready" in assignment.expected_events
+        and isinstance(workflow_nodes, list)
+        and any(
+            isinstance(node, dict)
+            and node.get("id") != assignment.node_id
+            and any(
+                isinstance(event, str) and "verification" in event
+                for event in node.get("emits", [])
+            )
+            for node in workflow_nodes
+        )
+    )
+    is_independent_verification = any(
+        "verification" in event.casefold() for event in assignment.expected_events
+    )
     if dispatch_packet is not None:
         sections.append(
             "\n".join(
@@ -2117,10 +2211,29 @@ def _render_codex_assignment_prompt(
                 "- status: completed | blocked | context_requested",
                 "- emitted_events: list of workflow events you actually satisfied",
                 "- verification: object with at least status",
+                *(
+                    [
+                        "- verification.final_independent_verification: "
+                        f"{INDEPENDENT_VERIFICATION_PENDING}",
+                        "  Use this exact marker after implementation self-checks; "
+                        "do not claim final verification.",
+                    ]
+                    if awaits_independent_verification
+                    else [
+                        "- verification.status: passed",
+                        "- verification.evidence: structured commands and observed results, "
+                        "or reference a verification artifact",
+                    ]
+                    if is_independent_verification
+                    else [
+                        "- For status completed, set verification.status: passed only "
+                        "after this assignment's checks pass.",
+                    ]
+                ),
                 "Optional fields:",
                 "- review_status",
                 "- control_intents: omit or use the single workflow_mutation intent defined above",
-                "- artifacts",
+                "- artifacts: list of objects with a path; do not use bare path strings",
                 "When status is context_requested, include exactly one context_request object.",
                 "Use plain YAML scalars only. Do not use markdown backticks or code fences inside values.",
                 "Do not wrap the YAML in code fences.",
@@ -2560,6 +2673,7 @@ def _run_command_runner(
     timeout: float,
     input_text: str,
     process_controller: _ProcessController | None = None,
+    progress_line: Callable[[str], bool] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if command_runner is not None:
         return command_runner(
@@ -2579,6 +2693,7 @@ def _run_command_runner(
         env=env,
         input_text=input_text,
         controller=process_controller,
+        progress_line=progress_line,
     )
 
 
@@ -2590,6 +2705,7 @@ def _run_live_process(
     env: dict[str, str] | None,
     input_text: str | None,
     controller: _ProcessController | None,
+    progress_line: Callable[[str], bool] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process_controller = controller or _ProcessController()
     process = subprocess.Popen(
@@ -2603,6 +2719,15 @@ def _run_live_process(
         start_new_session=os.name == "posix",
     )
     process_controller.attach(process)
+    if progress_line is not None:
+        return _wait_for_native_progress(
+            process,
+            command=command,
+            input_text=input_text,
+            idle_timeout=timeout,
+            process_controller=process_controller,
+            progress_line=progress_line,
+        )
     try:
         stdout, stderr = process.communicate(input=input_text, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -2624,6 +2749,86 @@ def _run_live_process(
         stdout=stdout,
         stderr=stderr,
     )
+
+
+def _wait_for_native_progress(
+    process: subprocess.Popen[str],
+    *,
+    command: list[str],
+    input_text: str | None,
+    idle_timeout: float,
+    process_controller: _ProcessController,
+    progress_line: Callable[[str], bool],
+) -> subprocess.CompletedProcess[str]:
+    outputs = {"stdout": [], "stderr": []}
+    updates: queue.Queue[bool] = queue.Queue()
+
+    def drain(stream: Any, output_name: str) -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                outputs[output_name].append(line)
+                if progress_line(line):
+                    updates.put(True)
+        finally:
+            stream.close()
+            updates.put(False)
+
+    readers = [
+        threading.Thread(target=drain, args=(process.stdout, "stdout"), daemon=True),
+        threading.Thread(target=drain, args=(process.stderr, "stderr"), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+    if process.stdin is not None:
+        try:
+            process.stdin.write(input_text or "")
+        except BrokenPipeError:
+            pass
+        finally:
+            process.stdin.close()
+
+    last_progress = time.monotonic()
+    idle_timed_out = False
+    while process.poll() is None:
+        remaining = idle_timeout - (time.monotonic() - last_progress)
+        if remaining <= 0:
+            idle_timed_out = process_controller.request(
+                "timed_out", "idle_timeout", grace_seconds=0.25
+            )
+            break
+        try:
+            if updates.get(timeout=remaining):
+                last_progress = time.monotonic()
+        except queue.Empty:
+            if process.poll() is None:
+                idle_timed_out = process_controller.request(
+                    "timed_out", "idle_timeout", grace_seconds=0.25
+                )
+            break
+
+    process.wait()
+    for reader in readers:
+        reader.join()
+    stdout = "".join(outputs["stdout"])
+    stderr = "".join(outputs["stderr"])
+    if idle_timed_out:
+        timeout_error = subprocess.TimeoutExpired(command, idle_timeout, output=stdout, stderr=stderr)
+        timeout_error.reason = "idle_timeout"
+        raise timeout_error
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _is_codex_native_progress_line(line: str) -> bool:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("type"), str)
+
+
+def _timeout_reason(exc: subprocess.TimeoutExpired) -> str:
+    reason = getattr(exc, "reason", "timed_out")
+    return reason if isinstance(reason, str) and reason else "timed_out"
 
 
 def _signal_process_group(process: subprocess.Popen[str], *, force: bool) -> None:

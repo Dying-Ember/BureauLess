@@ -70,6 +70,22 @@ stable.
   - Maintained CLI, API, manual golden path, and live demo use strict staged
     acceptance; v1 writes require conservative migration.
   - Focused and full backend tests plus web type/build verification pass.
+  - 2026-07-11 maintenance: the maintained live demo now advances by replayed
+    `gatekeeper.ready` state instead of a hard-coded `implement -> review ->
+    commit` list, so separate verification nodes can run before review when
+    the accepted workflow requires them.
+  - 2026-07-11 live verification note: a JOJO provider run timed out at the
+    `implement` node before it emitted a result. The resulting lack of
+    multi-agent, mutation, independent-verification, and commit coverage is a
+    provider/runtime execution limitation, not evidence of a workflow or
+    harness regression.
+  - 2026-07-11 maintenance: Codex native JSONL events now renew a session's
+    configured idle deadline. A silent provider path records `idle_timeout`;
+    observed long-running agent work is not cut off at its original start time.
+  - 2026-07-11 maintenance: the implement progress contract now uses the shared
+    `final_independent_verification: pending_separate_assignment` marker, so an
+    accepted `patch_ready` can unlock separate review and verifier nodes without
+    pretending final acceptance already happened.
 
 ## Workstream 1: Executable Handoff
 
@@ -110,6 +126,20 @@ stable.
     `reconstruct_dispatched_session` verifies both before reconstruction.
   - Maintained CLI, API runtime demo, generic session-dispatch API, and live
     demo paths use the bridge. Focused and full backend tests pass.
+  - 2026-07-11 boundary-demo maintenance: the task-publisher wrapper records
+    only the orchestrator model. It cannot preselect derived worker/agent
+    models; those require an explicit orchestrator control-plane artifact and
+    harness approval.
+  - 2026-07-11 boundary-demo maintenance: dispatch rejects proposed workflows
+    before assignment creation or provider launch. The publisher audit reports
+    that condition as old-helper control-plane contamination and evaluates
+    provider telemetry only for nodes that actually executed.
+  - 2026-07-11 boundary-demo maintenance: control-plane bootstrap now supports
+    one bounded replan attempt with full artifact retention and worker zero
+    dispatch on rejection; accepted worker bindings, semantic node roles, and
+    replay-driven readiness were validated by the real
+    `2026-07-11-jojocode-control-plane-bootstrap-v12` run through terminal
+    commit.
 
 ### [x] RM35-03: Progressive Context Request Continuation
 

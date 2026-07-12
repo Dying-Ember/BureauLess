@@ -13,7 +13,8 @@ Implementation planning:
 Source audit:
 [`REX-002: Result Events Can Bypass Authoritative Acceptance`](../audits/2026-07-02-runtime-execution-gap-analysis.md)
 
-Tracking issue: not opened.
+Tracking issue:
+[#10 RFC-005: Authoritative Result Acceptance Spine (closed)](https://github.com/Dying-Ember/BureauLess/issues/10)
 
 ## Problem
 

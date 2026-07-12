@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted; partially implemented in Milestone 3.
+Accepted and implemented through Runtime Milestones 3 and 3.5.
 
 ## RFC
 

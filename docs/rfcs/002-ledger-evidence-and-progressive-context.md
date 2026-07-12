@@ -2,16 +2,21 @@
 
 ## Status
 
-**Accepted design; partially implemented in Milestone 3.** The node-outcome
+**Accepted and implemented.** Runtime Milestone 3 delivered the node-outcome
 protocol, outcome-decision event, accepted-state projection cursor, stale
-outcome guardrails, and review-decision artifact path are now implemented.
-Context-capsule compilation remains tracked in later M3 tasks. Canonical rules
-are promoted into [`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md)
-and [`docs/architecture/context_economy.md`](../architecture/context_economy.md).
+outcome guardrails, review-decision artifacts, and bounded context artifacts.
+Runtime Milestone 3.5 completed the maintained real-session request, resolution,
+and continuation loop. Canonical rules are promoted into
+[`docs/protocol/harness_protocol.md`](../protocol/harness_protocol.md) and
+[`docs/architecture/context_economy.md`](../architecture/context_economy.md).
 The decision record lives in
 [`docs/adrs/002-ledger-evidence-and-progressive-context/001-accepted-design.md`](../adrs/002-ledger-evidence-and-progressive-context/001-accepted-design.md).
-This RFC remains as decision history while implementation is tracked in
-[`docs/tasks/runtime_harness_milestone_3_tasklist.md`](../tasks/runtime_harness_milestone_3_tasklist.md).
+This RFC remains as decision history; implementation is recorded in
+[`docs/tasks/runtime_harness_milestone_3_tasklist.md`](../tasks/runtime_harness_milestone_3_tasklist.md)
+and [`docs/tasks/runtime_harness_milestone_3_5_tasklist.md`](../tasks/runtime_harness_milestone_3_5_tasklist.md).
+
+Tracking issue:
+[#11 RFC-002: Ledger Evidence And Progressive Context (closed)](https://github.com/Dying-Ember/BureauLess/issues/11)
 
 ## Problem
 

@@ -3,6 +3,7 @@
 ## RFC
 
 - Source RFC: `docs/rfcs/002-ledger-evidence-and-progressive-context.md`
+- Tracking issue: [#11 (closed)](https://github.com/Dying-Ember/BureauLess/issues/11)
 
 ## Decision Record
 

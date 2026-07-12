@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import fcntl
+import hashlib
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import yaml
@@ -45,6 +49,8 @@ LIFECYCLE_EVENT_TYPES = {
     "context_requested",
     "context_resolved",
     "context_resumed",
+    "initial_control_plane_proposed",
+    "initial_control_plane_accepted",
 }
 
 MUTATION_DECISION_EVENT_TYPES = {
@@ -152,6 +158,10 @@ def validate_ledger_event(
         _validate_retry_control_event(ledger, event, event_type)
     elif event_type in {"context_requested", "context_resolved", "context_resumed"}:
         _validate_context_lifecycle_event(ledger, event, event_type)
+    elif event_type == "initial_control_plane_proposed":
+        _validate_initial_control_plane_proposed_event(event)
+    elif event_type == "initial_control_plane_accepted":
+        _validate_initial_control_plane_accepted_event(ledger, event)
 
     mission_id = event.get("mission_id")
     if mission_id is not None and mission_id != ledger.mission_id:
@@ -290,6 +300,47 @@ def _validate_retry_control_event(
         if terminal_state not in {"needs_review", "needs_replan"}:
             raise ProtocolError("Circuit terminal_state is invalid")
         _required_string(event, "reason")
+
+
+def _validate_initial_control_plane_proposed_event(event: dict[str, Any]) -> None:
+    _required_string(event, "proposal_id")
+    _required_string(event, "source_session_id")
+    _required_string(event, "source_agent_id")
+    _required_string(event, "proposal_path")
+    requirements = event.get("acceptance_requirements", {})
+    if not isinstance(requirements, dict):
+        raise ProtocolError("Initial control-plane acceptance_requirements must be an object")
+    proposal = event.get("proposal")
+    if not isinstance(proposal, dict):
+        raise ProtocolError("Initial control-plane proposal event requires proposal")
+    if proposal.get("proposal_id") != event.get("proposal_id"):
+        raise ProtocolError("Initial control-plane proposal_id must match proposal")
+
+
+def _validate_initial_control_plane_accepted_event(
+    ledger: Ledger,
+    event: dict[str, Any],
+) -> None:
+    source_event_id = _required_string(event, "source_event_id")
+    source = next(
+        (item for item in ledger.event_log if item.get("event_id") == source_event_id),
+        None,
+    )
+    if source is None or source.get("event_type") != "initial_control_plane_proposed":
+        raise ProtocolError("Initial control-plane acceptance must reference its proposal")
+    if any(
+        item.get("event_type") == "initial_control_plane_accepted"
+        and item.get("source_event_id") == source_event_id
+        for item in ledger.event_log
+    ):
+        raise ProtocolError("Initial control-plane proposal already has an acceptance decision")
+    if _required_string(event, "actor") not in {"orchestrator", "human"}:
+        raise ProtocolError("Initial control-plane acceptance actor must be orchestrator or human")
+    _required_string(event, "source_session_id")
+    _required_string(event, "workflow_path")
+    bindings = event.get("worker_bindings")
+    if not isinstance(bindings, list) or not all(isinstance(item, dict) for item in bindings):
+        raise ProtocolError("Initial control-plane acceptance worker_bindings must be a list")
 
 
 def _validate_mutation_proposed_event(
@@ -813,10 +864,42 @@ def _validate_advisor_outcome_recorded_event(event: dict[str, Any]) -> None:
             )
 
 
-def write_ledger(path: Path, ledger: Ledger) -> None:
+def write_ledger(path: Path, ledger: Ledger) -> Ledger:
     ledger = rebuild_ledger_projection(ledger)
-    with path.open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(ledger_to_dict(ledger), handle, sort_keys=False)
+    content = yaml.safe_dump(
+        ledger_to_dict(ledger), sort_keys=False, allow_unicode=True
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        actual_sha256 = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+        if (
+            ledger.source_path == path.resolve()
+            and ledger.source_sha256 is not None
+            and ledger.source_sha256 != actual_sha256
+        ):
+            raise ProtocolError("Ledger write conflict: source ledger has changed")
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as temporary:
+                temporary.write(content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_name, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+    return replace(
+        ledger,
+        source_sha256=hashlib.sha256(content).hexdigest(),
+        source_path=path.resolve(),
+    )
 
 
 def ledger_to_dict(ledger: Ledger) -> dict[str, Any]:

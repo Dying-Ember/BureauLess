@@ -78,11 +78,13 @@ Each RFC should include:
 - `002-ledger-evidence-and-progressive-context/`: archived decision record for
   the ledger evidence and progressive context RFC.
 - `003-engineering-boundary-refactor/`: archive path for the engineering
-  boundary refactor RFC currently under discussion.
-- `004-temporal-replay-mutation-intake-and-retry-control/`: accepted
+  boundary refactor RFC, implemented through its accepted ADRs.
+- `004-temporal-replay-mutation-intake-and-retry-control/`: implemented
   version-bound mutation intake, bounded retry, ledger v3, and inclusive replay
   design for Runtime Milestone 4.
 - `005-authoritative-result-acceptance-spine/`: accepted staged-result and
   strict outcome-acceptance design for Runtime Milestone 3.5.
 - `006-bounded-context-continuation/`: accepted bounded progressive-context
   continuation design for Runtime Milestone 3.5.
+- `007-control-runtime-boundary/`: accepted control runtime
+  boundary RFC.

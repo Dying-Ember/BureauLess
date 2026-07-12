@@ -114,8 +114,12 @@ YYYY-MM-DD-用途简述
 - 已脱敏的示例输入
 - 已脱敏的审计记录
 
+当前 `.gitignore` 只允许每次 run 的根 `README.md`、`inputs/` 和 `notes/*.md`
+进入待提交列表。提交前仍须人工确认它们不含密钥或不应公开的 provider 信息。
+
 通常不要提交：
 
+- `workspace/` 和 `runs/`
 - `.bureauless/`
 - 生成的 session 日志
 - provider 认证材料

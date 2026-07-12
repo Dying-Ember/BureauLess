@@ -19,7 +19,12 @@ RFCs, and ADRs without replacing any of them.
 - [`audits/README.md`](audits/README.md): gap-analysis format, severity,
   completion vocabulary, and processing workflow.
 - [`audits/2026-07-02-runtime-execution-gap-analysis.md`](audits/2026-07-02-runtime-execution-gap-analysis.md):
-  closed real-agent execution-spine audit with REX-001 deferred to Runtime M4.
+  closed real-agent execution-spine audit; REX-001 was completed by Runtime M4
+  and ADR-004.
+- [`audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md):
+  confirmed implementation-debt audit for follow-up cleanup under RFC-007.
+- [`audits/2026-07-11-live-demo-control-plane-bootstrap-gap.md`](audits/2026-07-11-live-demo-control-plane-bootstrap-gap.md):
+  verified remediation record for control-plane bootstrap in the real live demo.
 
 ## Tasks
 
@@ -48,6 +53,9 @@ acceptance criteria.
   completed runtime milestone for provider-side telemetry capture, usage
   attribution, and backtest-ready metrics on the maintained OpenAI-compatible
   path, with generic multi-agent telemetry still explicitly out of scope.
+- [`tasks/control_runtime_boundary_follow_up_tasklist.md`](tasks/control_runtime_boundary_follow_up_tasklist.md):
+  planned engineering-debt follow-up for RFC-007; it is not a delivery
+  milestone.
 - [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
   milestone index.
 - [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
@@ -82,20 +90,24 @@ behavior is promoted into `protocol/`; the RFC remains as provenance.
   RFC-001, implemented Milestone 2.5 design history for controlled workflow
   mutation.
 - [`rfcs/002-ledger-evidence-and-progressive-context.md`](rfcs/002-ledger-evidence-and-progressive-context.md):
-  RFC-002, accepted design for separating native evidence, node outcomes,
+  RFC-002, implemented design for separating native evidence, node outcomes,
   canonical ledger facts, progressive context disclosure, and context-policy
   feedback.
 - [`rfcs/003-engineering-boundary-refactor.md`](rfcs/003-engineering-boundary-refactor.md):
   RFC-003, implemented engineering-boundary refactor for shared errors, CLI
   split, application services, and narrower protocol exports.
 - [`rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](rfcs/004-temporal-replay-mutation-intake-and-retry-control.md):
-  RFC-004, accepted Runtime Milestone 4 design for mutation intent intake,
+  RFC-004, implemented Runtime Milestone 4 design for mutation intent intake,
   bounded retry control, workflow versions, and linear temporal replay.
 - [`rfcs/005-authoritative-result-acceptance-spine.md`](rfcs/005-authoritative-result-acceptance-spine.md):
   RFC-005, implemented Runtime Milestone 3.5 design for staged result intake and
   one authoritative review/outcome/replay acceptance chain.
 - [`rfcs/006-bounded-context-continuation.md`](rfcs/006-bounded-context-continuation.md):
   RFC-006, implemented Runtime Milestone 3.5 bounded context continuation design.
+- [`rfcs/007-control-runtime-boundary.md`](rfcs/007-control-runtime-boundary.md):
+  RFC-007, accepted boundary for harness-owned control runtime versus
+  external-agent runtime ownership; its implementation debt is tracked by the
+  follow-up task list.
 
 ## ADRs
 
@@ -105,7 +117,7 @@ choice.
 - [`adrs/README.md`](adrs/README.md): ADR archive rules and RFC/ADR linking
   model.
 - [`adrs/001-controlled-workflow-mutation/README.md`](adrs/001-controlled-workflow-mutation/README.md):
-  ADR-001 archive for GitHub issue #1 and controlled workflow mutation.
+  ADR-001 archive for closed GitHub issue #1 and controlled workflow mutation.
 - [`adrs/002-ledger-evidence-and-progressive-context/README.md`](adrs/002-ledger-evidence-and-progressive-context/README.md):
   ADR-002 archive for ledger evidence and progressive context.
 - [`adrs/003-engineering-boundary-refactor/README.md`](adrs/003-engineering-boundary-refactor/README.md):
@@ -116,6 +128,8 @@ choice.
   ADR-005 accepted result, review, outcome, and strict ledger acceptance design.
 - [`adrs/006-bounded-context-continuation/README.md`](adrs/006-bounded-context-continuation/README.md):
   ADR-006 accepted bounded context continuation design.
+- [`adrs/007-control-runtime-boundary/README.md`](adrs/007-control-runtime-boundary/README.md):
+  ADR-007 archive index for the control runtime boundary RFC.
 
 ## Architecture
 

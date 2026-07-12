@@ -1,7 +1,7 @@
 workflow_id: coder-reviewer-committer-001
 mission_id: demo
 proposed_by: orchestrator
-status: proposed
+status: accepted
 mode: small_dag
 reason: >
   A patch must be implemented, reviewed, and committed only after approval.
@@ -67,4 +67,3 @@ broadcast_policy:
   default: filtered_delta
 budget_policy:
   max_coordination_ratio: 0.25
-
