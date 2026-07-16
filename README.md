@@ -295,6 +295,7 @@ Source ownership follows the runtime boundary:
 | Stable Harness protocol | [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md) |
 | Current implementation order | [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md) |
 | Dated live compatibility evidence | [`docs/audits/2026-07-15-agent-endpoint-capability-matrix.md`](docs/audits/2026-07-15-agent-endpoint-capability-matrix.md) |
+| v0.4.0 release notes | [`docs/releases/v0.4.0.md`](docs/releases/v0.4.0.md) |
 | v0.3.0 release notes | [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) |
 | v0.2.0 release demo | [`live-demos/2026-07-16-agent-audit-v0.2.0/README.md`](live-demos/2026-07-16-agent-audit-v0.2.0/README.md) |
 | Control-runtime boundary decision | [`docs/rfcs/007-control-runtime-boundary.md`](docs/rfcs/007-control-runtime-boundary.md) |
