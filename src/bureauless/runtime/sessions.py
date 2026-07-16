@@ -1478,6 +1478,22 @@ def _load_audit_evidence(value: Any) -> dict[str, Any]:
                     raise ProtocolError("Decision point candidate disposition is invalid")
                 if not _string_or_none(candidate.get("reason")):
                     raise ProtocolError("Decision point candidate reason must be non-empty")
+            selected = [
+                candidate for candidate in candidate_set
+                if candidate.get("disposition") == "selected"
+            ]
+            if len(selected) != 1 or selected[0]["action"] != point["action_selected"]:
+                raise ProtocolError(
+                    "Decision point candidate_set must select action_selected exactly once"
+                )
+            action_dimension = point["action_selected"].partition(":")[0]
+            if any(
+                candidate["action"].partition(":")[0] != action_dimension
+                for candidate in candidate_set
+            ):
+                raise ProtocolError(
+                    "Decision point candidate_set actions must share one decision dimension"
+                )
 
     for effect in side_effects:
         if effect.get("type") not in ("workspace", "process", "network", "credential", "payment"):
@@ -1522,6 +1538,7 @@ def _load_audit_evidence(value: Any) -> dict[str, Any]:
         if benchmark_schema not in {
             "bureauless_benchmark_identity_v1",
             "bureauless_benchmark_identity_v2",
+            "bureauless_benchmark_identity_v3",
         }:
             raise ProtocolError("Benchmark identity schema is invalid")
         for key in ("cohort_id", "trial_id"):
@@ -1531,18 +1548,78 @@ def _load_audit_evidence(value: Any) -> dict[str, Any]:
             raise ProtocolError("Benchmark identity cohort_declared must be boolean")
         task_key = (
             "task_contract_sha256"
-            if benchmark_schema == "bureauless_benchmark_identity_v2"
+            if benchmark_schema in {
+                "bureauless_benchmark_identity_v2",
+                "bureauless_benchmark_identity_v3",
+            }
             else "task_sha256"
         )
         task_sha = benchmark_identity.get(task_key)
         if not isinstance(task_sha, str) or not task_sha:
             raise ProtocolError(f"Benchmark identity {task_key} must be a non-empty string")
-        if benchmark_schema == "bureauless_benchmark_identity_v2":
-            for key in ("context_contract_sha256", "execution_contract_sha256"):
+        if benchmark_schema in {
+            "bureauless_benchmark_identity_v2",
+            "bureauless_benchmark_identity_v3",
+        }:
+            context_key = (
+                "initial_context_contract_sha256"
+                if benchmark_schema == "bureauless_benchmark_identity_v3"
+                else "context_contract_sha256"
+            )
+            for key in (context_key, "execution_contract_sha256"):
                 if not _string_or_none(benchmark_identity.get(key)):
                     raise ProtocolError(f"Benchmark identity {key} must be a non-empty string")
             if not isinstance(benchmark_identity.get("execution_contract"), dict):
                 raise ProtocolError("Benchmark identity execution_contract must be an object")
+        if benchmark_schema == "bureauless_benchmark_identity_v3":
+            for payload_key, sha_key in (
+                ("task_contract", "task_contract_sha256"),
+                ("initial_context_contract", "initial_context_contract_sha256"),
+            ):
+                contract = benchmark_identity.get(payload_key)
+                if not isinstance(contract, dict):
+                    raise ProtocolError(
+                        f"Benchmark identity {payload_key} must be an object"
+                    )
+                contract_sha = hashlib.sha256(
+                    yaml.safe_dump(contract, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                if contract_sha != benchmark_identity.get(sha_key):
+                    raise ProtocolError(
+                        f"Benchmark identity {payload_key} hash mismatch"
+                    )
+            deliveries = benchmark_identity.get("realized_context_delivery")
+            if not isinstance(deliveries, list) or not all(
+                isinstance(item, dict) for item in deliveries
+            ):
+                raise ProtocolError(
+                    "Benchmark identity realized_context_delivery must be a list of objects"
+                )
+            realized_sha = benchmark_identity.get(
+                "realized_context_delivery_sha256"
+            )
+            if not _string_or_none(realized_sha):
+                raise ProtocolError(
+                    "Benchmark identity realized_context_delivery_sha256 must be non-empty"
+                )
+            expected_realized_sha = hashlib.sha256(
+                yaml.safe_dump(
+                    {"deliveries": deliveries}, sort_keys=True
+                ).encode("utf-8")
+            ).hexdigest()
+            if realized_sha != expected_realized_sha:
+                raise ProtocolError("Benchmark identity realized context hash mismatch")
+            context_metrics = benchmark_identity.get("context_request_metrics")
+            if not isinstance(context_metrics, dict) or any(
+                not isinstance(context_metrics.get(key), int)
+                or context_metrics[key] < 0
+                for key in (
+                    "request_count",
+                    "granted_request_count",
+                    "added_context_tokens_estimate",
+                )
+            ):
+                raise ProtocolError("Benchmark identity context_request_metrics is invalid")
         baseline_ref = benchmark_identity.get("workspace_baseline_ref")
         if baseline_ref is not None and (
             not isinstance(baseline_ref, str) or not baseline_ref
@@ -1619,7 +1696,7 @@ def _session_audit_evidence(
         verification_status = _mapping_value(verification.get("verification")).get(
             "status", "not_run"
         )
-        selected_action = f"dispatch_agent:{spec.agent_id}"
+        selected_action = f"routing_mode:{packet.routing_decision.selected_mode}"
         rejected_candidates = [
             {
                 "action": f"routing_mode:{item['mode']}",
@@ -1630,8 +1707,8 @@ def _session_audit_evidence(
         ]
         evidence.setdefault("decision_points", []).append(
             {
-                "decision_id": f"decision-{record.session_id}-dispatch",
-                "decision_type": "dispatch",
+                "decision_id": f"decision-{record.session_id}-routing-mode",
+                "decision_type": "routing_mode_selection",
                 "source": "harness",
                 "evidence_available_at_time": [
                     "dispatch_packet.routing_decision",
@@ -1648,6 +1725,11 @@ def _session_audit_evidence(
                     },
                     *rejected_candidates,
                 ],
+                "fixed_bindings": {
+                    "agent_id": spec.agent_id,
+                    "target_provider": spec.target_provider,
+                    "target_model": spec.target_model,
+                },
                 "selection_basis": {
                     "selection_policy_version": packet.routing_decision.selection_policy_version,
                     "triggered_rules": packet.routing_decision.triggered_rules,
@@ -1659,17 +1741,12 @@ def _session_audit_evidence(
                     "advisor_gate_decision": packet.routing_decision.advisor_gate_decision,
                 },
                 "selection_scope": {
-                    "routing_mode": "policy_selected",
-                    "agent_id": "operator_fixed",
-                    "target_provider": "operator_fixed",
-                    "target_model": "operator_fixed",
-                },
-                "selected_context": {
-                    "routing_mode": packet.routing_decision.selected_mode,
-                    "selection_policy_version": packet.routing_decision.selection_policy_version,
-                    "agent_id": spec.agent_id,
-                    "target_provider": spec.target_provider,
-                    "target_model": spec.target_model,
+                    "routing_mode": (
+                        "harness_profile_fixed"
+                        if packet.routing_decision.selection_policy_version
+                        == "audit-single-agent-v1"
+                        else "policy_selected"
+                    ),
                 },
                 "later_outcome": {
                     "session_status": record.status,
@@ -4365,7 +4442,7 @@ def _terminalize_live_record(
         dict(point) for point in audit_evidence.get("decision_points", [])
     ]
     for point in decision_points:
-        if point.get("decision_type") != "dispatch":
+        if point.get("decision_type") not in {"dispatch", "routing_mode_selection"}:
             continue
         later_outcome = dict(point.get("later_outcome") or {})
         later_outcome.update({"session_status": status, "exit_reason": reason})
