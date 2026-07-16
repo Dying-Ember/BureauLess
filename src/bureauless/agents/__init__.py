@@ -3,7 +3,10 @@
 from .registry import (
     AGENT_SPECS,
     AGENT_PROVIDER_BINDINGS,
+    AGENT_PROVIDER_ROUTE_EVIDENCE,
     AgentCompatibility,
+    AgentProviderRouteEvidence,
+    AgentRoute,
     AgentBinding,
     DispatchReadiness,
     AgentSpec,
@@ -18,15 +21,21 @@ from .registry import (
     get_provider_profile,
     get_agent_spec,
     list_agent_compatibility,
+    list_agent_route_evidence,
     list_provider_profiles,
     list_agent_specs,
+    route_agent,
     resolve_agent_binding,
+    session_adapter_for,
 )
 
 __all__ = [
     "AGENT_SPECS",
     "AGENT_PROVIDER_BINDINGS",
+    "AGENT_PROVIDER_ROUTE_EVIDENCE",
     "AgentCompatibility",
+    "AgentProviderRouteEvidence",
+    "AgentRoute",
     "AgentBinding",
     "DispatchReadiness",
     "AgentSpec",
@@ -41,7 +50,10 @@ __all__ = [
     "get_provider_profile",
     "get_agent_spec",
     "list_agent_compatibility",
+    "list_agent_route_evidence",
     "list_provider_profiles",
     "list_agent_specs",
+    "route_agent",
     "resolve_agent_binding",
+    "session_adapter_for",
 ]

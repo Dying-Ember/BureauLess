@@ -55,6 +55,7 @@ from ..runtime.sessions import (
     CommandRunner,
 )
 from . import agents as agent_commands
+from . import audit as audit_commands
 from . import exchange as exchange_commands
 from . import legacy as legacy_commands
 from . import metrics as metrics_commands
@@ -68,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     legacy_commands.register(subparsers)
+    audit_commands.register(subparsers)
 
     mission_parser = subparsers.add_parser("mission", help="Mission operations")
     mission_subparsers = mission_parser.add_subparsers(dest="mission_command", required=True)
@@ -215,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime_commands.handle,
             exchange_commands.handle,
             agent_commands.handle,
+            audit_commands.handle,
             session_commands.handle,
             metrics_commands.handle,
         ):

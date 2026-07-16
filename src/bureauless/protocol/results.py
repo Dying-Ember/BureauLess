@@ -39,6 +39,9 @@ class ResultProposal:
     mutation_proposal_refs: list[str]
     review_status: str | None
     control_intents: list[Any] = field(default_factory=list)
+    model_identity: dict[str, Any] = field(default_factory=dict)
+    metric_provenance: dict[str, Any] = field(default_factory=dict)
+    route_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -61,6 +64,12 @@ class ResultProposal:
             payload["review_status"] = self.review_status
         if self.control_intents:
             payload["control_intents"] = self.control_intents
+        if self.model_identity:
+            payload["model_identity"] = self.model_identity
+        if self.metric_provenance:
+            payload["metric_provenance"] = self.metric_provenance
+        if self.route_evidence:
+            payload["route_evidence"] = self.route_evidence
         return payload
 
 
@@ -88,6 +97,9 @@ def load_result_proposal(data: dict[str, Any]) -> ResultProposal:
         ),
         review_status=_as_optional_string(data.get("review_status")),
         control_intents=_as_list(data, "control_intents", default=[]),
+        model_identity=_as_mapping(data, "model_identity", default={}),
+        metric_provenance=_as_mapping(data, "metric_provenance", default={}),
+        route_evidence=_as_mapping(data, "route_evidence", default={}),
     )
 
 

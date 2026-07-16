@@ -45,6 +45,8 @@ class MetricsEntry:
     rework_required: bool | None
     context_fit_classification: str
     context_fit_reason: str | None
+    metric_provenance: dict[str, Any]
+    comparison_eligibility: dict[str, str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +82,8 @@ class MetricsEntry:
             "rework_required": self.rework_required,
             "context_fit_classification": self.context_fit_classification,
             "context_fit_reason": self.context_fit_reason,
+            "metric_provenance": self.metric_provenance,
+            "comparison_eligibility": self.comparison_eligibility,
         }
 
 
@@ -122,15 +126,19 @@ def summarize_metrics(path: Path, price_snapshot_path: Path | None = None) -> di
         "advisor_score_summary": advisor_score_summary,
         "context_summary": _summarize_context(entries),
         "policy_recommendations": _policy_recommendations(entries),
+        "comparison": _comparison_summary(entries),
     }
 
 
 def _load_entries(path: Path) -> list[MetricsEntry]:
     if path.is_dir():
         entries: list[MetricsEntry] = []
-        for record_path in sorted(path.glob("*.yaml")):
+        for record_path in sorted(path.rglob("*.yaml")):
             data = _load_yaml(record_path)
-            entries.extend(_entries_from_mapping(data))
+            if "event_log" in data or all(
+                key in data for key in ("session_id", "assignment_id", "outcome_metrics")
+            ):
+                entries.extend(_entries_from_mapping(data))
         return entries
 
     data = _load_yaml(path)
@@ -242,6 +250,7 @@ def _entries_from_ledger_mapping(data: dict[str, Any]) -> list[MetricsEntry]:
         if not isinstance(verification, dict):
             verification = {}
         context_delivery = _mapping_or_empty(result.get("context_delivery"))
+        metric_provenance = _mapping_or_empty(result.get("metric_provenance"))
         context_requests = _mapping_list_or_empty(result.get("context_requests"))
         outcome = _mapping_or_empty(result.get("outcome"))
         classification, reason = _classify_context_fit(
@@ -293,6 +302,10 @@ def _entries_from_ledger_mapping(data: dict[str, Any]) -> list[MetricsEntry]:
                 rework_required=_bool_or_none(outcome.get("rework_required")),
                 context_fit_classification=classification,
                 context_fit_reason=reason,
+                metric_provenance=metric_provenance,
+                comparison_eligibility=_string_mapping(
+                    metric_provenance.get("comparison_eligibility")
+                ),
             )
         )
     return entries
@@ -309,6 +322,7 @@ def _entry_from_session_mapping(data: dict[str, Any]) -> MetricsEntry:
     if not isinstance(verification, dict):
         verification = {}
     context_delivery = _mapping_or_empty(data.get("context_delivery"))
+    metric_provenance = _mapping_or_empty(result_proposal.get("metric_provenance"))
     extraction = _mapping_or_empty(data.get("extraction"))
     context_requests = _mapping_list_or_empty(
         data.get("context_requests", extraction.get("context_requests"))
@@ -362,6 +376,10 @@ def _entry_from_session_mapping(data: dict[str, Any]) -> MetricsEntry:
         rework_required=_bool_or_none(outcome.get("rework_required")),
         context_fit_classification=classification,
         context_fit_reason=reason,
+        metric_provenance=metric_provenance,
+        comparison_eligibility=_string_mapping(
+            metric_provenance.get("comparison_eligibility")
+        ),
     )
 
 
@@ -428,6 +446,56 @@ def _group_entries(entries: list[MetricsEntry]) -> list[dict[str, Any]]:
         elif entry.context_fit_classification == "insufficient_evidence":
             bucket["insufficient_evidence_count"] += 1
     return [grouped[key] for key in sorted(grouped)]
+
+
+def _comparison_summary(entries: list[MetricsEntry]) -> dict[str, dict[str, Any]]:
+    metrics = {
+        "latency": ("wall_time", lambda entry: entry.wall_time_ms is not None),
+        "file_delta": ("file_delta", lambda entry: entry.changed_files_count is not None),
+        "token_usage": ("token_usage", lambda entry: entry.total_tokens is not None),
+        "monetary_cost": ("monetary_cost", lambda entry: entry.cost_usd is not None),
+        "tool_timeline": (
+            "tool_timeline",
+            lambda entry: entry.metric_provenance.get("tool_timeline")
+            not in {None, "not_captured", "unavailable"},
+        ),
+    }
+    summary: dict[str, dict[str, Any]] = {}
+    for metric, (provenance_key, observed) in metrics.items():
+        levels = [
+            entry.comparison_eligibility.get(metric)
+            for entry in entries
+            if entry.comparison_eligibility.get(metric)
+        ]
+        missing_eligibility_count = len(entries) - len(levels)
+        summary[metric] = {
+            "eligibility": _least_comparable(levels, missing_eligibility_count),
+            "sources": sorted(
+                {
+                    str(source)
+                    for entry in entries
+                    if (source := entry.metric_provenance.get(provenance_key)) is not None
+                }
+            ),
+            "observed_count": sum(observed(entry) for entry in entries),
+            "missing_count": sum(not observed(entry) for entry in entries),
+            "missing_eligibility_count": missing_eligibility_count,
+        }
+    return summary
+
+
+def _least_comparable(levels: list[str], missing_count: int) -> str:
+    if not levels:
+        return "unavailable"
+    if missing_count:
+        return "incomplete"
+    rank = {
+        "comparable": 0,
+        "conditional": 1,
+        "incomplete": 2,
+        "not_comparable": 3,
+    }
+    return max(levels, key=lambda level: rank.get(level, 2))
 
 
 def _observed_budget(entries: list[MetricsEntry]) -> ObservedRuntimeBudget:
@@ -508,6 +576,8 @@ def _apply_price_snapshot(entry: MetricsEntry, snapshot: dict[str, Any]) -> Metr
         rework_required=entry.rework_required,
         context_fit_classification=entry.context_fit_classification,
         context_fit_reason=entry.context_fit_reason,
+        metric_provenance=entry.metric_provenance,
+        comparison_eligibility=entry.comparison_eligibility,
     )
 
 
@@ -720,6 +790,16 @@ def _string_list(value: Any) -> list[str]:
 
 def _mapping_or_empty(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _string_mapping(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): item
+        for key, item in value.items()
+        if isinstance(key, str) and isinstance(item, str)
+    }
 
 
 def _mapping_list_or_empty(value: Any) -> list[dict[str, Any]]:

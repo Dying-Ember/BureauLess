@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import hashlib
 import http.client
@@ -9,11 +9,13 @@ import json
 import os
 from pathlib import Path
 import queue
+import shlex
 import signal
 import shutil
 import subprocess
 import threading
 import time
+import tempfile
 from typing import Any, Callable
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -22,7 +24,7 @@ from uuid import uuid4
 
 import yaml
 
-from ..agents import resolve_agent_binding
+from ..agents import get_agent_spec, resolve_agent_binding, route_agent, session_adapter_for
 from ..errors import ProtocolError
 from ..protocol.artifacts import sha256_file
 from ..protocol.assignments import AssignmentPacket, workflow_version_id
@@ -64,7 +66,7 @@ from .provider_usage import (
 )
 
 
-SUPPORTED_SESSION_AGENTS = {"fake", "shell-dummy", "codex-cli"}
+SUPPORTED_SESSION_AGENTS = {"fake", "shell-dummy"}
 
 RETRY_ATTEMPT_LIMITS = {
     "transient_infrastructure": 3,
@@ -194,6 +196,7 @@ class SessionRecord:
     extraction: dict[str, Any]
     result_proposal: dict[str, Any] | None
     dispatch: dict[str, Any] | None = None
+    audit_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +215,7 @@ class SessionRecord:
             "extraction": self.extraction,
             "result_proposal": self.result_proposal,
             "dispatch": self.dispatch,
+            "audit_evidence": self.audit_evidence,
         }
 
 
@@ -775,17 +779,22 @@ def create_session_spec(
     session_id: str | None = None,
     reuse_workspace_path: str | None = None,
 ) -> SessionSpec:
-    if agent_id not in SUPPORTED_SESSION_AGENTS:
-        raise ProtocolError(f"Unsupported session agent: {agent_id}")
+    adapter = None if agent_id in SUPPORTED_SESSION_AGENTS else session_adapter_for(agent_id)
     if isolation_mode not in {"copy", "worktree"}:
         raise ProtocolError(f"Unsupported isolation_mode: {isolation_mode}")
     if sandbox_mode not in {"read-only", "workspace-write", "danger-full-access"}:
         raise ProtocolError(f"Unsupported sandbox_mode: {sandbox_mode}")
     if agent_id == "shell-dummy" and not dry_run and not shell_command:
         raise ProtocolError("shell-dummy session requires --shell-command")
-    if agent_id == "codex-cli":
+    if adapter in {
+        "codex_exec_v1",
+        "claude_stream_json_v1",
+        "gemini_stream_json_v1",
+        "opencode_run_json_v1",
+        "pi_json_v1",
+    }:
         if target_model is None or target_provider is None:
-            raise ProtocolError("codex-cli session requires target_model and target_provider")
+            raise ProtocolError(f"{agent_id} session requires target_model and target_provider")
         resolve_agent_binding(
             agent_id,
             target_model=target_model,
@@ -904,6 +913,10 @@ def start_dispatch_session(
                 process_controller=controller,
             )
         record = _attach_dispatch_turn_report(record, packet)
+        record = replace(
+            record,
+            audit_evidence=_session_audit_evidence(record, spec, packet),
+        )
         return replace(
             record,
             dispatch=dispatch_evidence,
@@ -1062,6 +1075,7 @@ def run_session(
 
     if spec.dry_run:
         base_metrics = _base_outcome_metrics(wall_time_ms=0)
+        base_metrics["cost_source"] = "unavailable"
         return SessionRecord(
             session_id=spec.session_id,
             assignment_id=spec.assignment_id,
@@ -1140,8 +1154,57 @@ def run_session(
             result_proposal=result.to_dict(),
         )
 
-    if spec.agent_id == "codex-cli":
+    adapter = None if spec.agent_id in SUPPORTED_SESSION_AGENTS else session_adapter_for(spec.agent_id)
+    if adapter == "codex_exec_v1":
         return _run_codex_cli_session(
+            spec,
+            assignment,
+            started_at,
+            started_monotonic,
+            command_runner=command_runner,
+            dispatch_packet=dispatch_packet,
+            process_controller=process_controller,
+            context_resolution=context_resolution,
+        )
+
+    if adapter == "claude_stream_json_v1":
+        return _run_claude_code_session(
+            spec,
+            assignment,
+            started_at,
+            started_monotonic,
+            command_runner=command_runner,
+            dispatch_packet=dispatch_packet,
+            process_controller=process_controller,
+            context_resolution=context_resolution,
+        )
+
+    if adapter == "gemini_stream_json_v1":
+        return _run_gemini_cli_session(
+            spec,
+            assignment,
+            started_at,
+            started_monotonic,
+            command_runner=command_runner,
+            dispatch_packet=dispatch_packet,
+            process_controller=process_controller,
+            context_resolution=context_resolution,
+        )
+
+    if adapter == "opencode_run_json_v1":
+        return _run_opencode_session(
+            spec,
+            assignment,
+            started_at,
+            started_monotonic,
+            command_runner=command_runner,
+            dispatch_packet=dispatch_packet,
+            process_controller=process_controller,
+            context_resolution=context_resolution,
+        )
+
+    if adapter == "pi_json_v1":
+        return _run_pi_session(
             spec,
             assignment,
             started_at,
@@ -1365,7 +1428,384 @@ def load_session_record(data: dict[str, Any]) -> SessionRecord:
         extraction=_as_mapping(data, "extraction", default={}),
         result_proposal=data.get("result_proposal"),
         dispatch=data.get("dispatch") if isinstance(data.get("dispatch"), dict) else None,
+        audit_evidence=_load_audit_evidence(data.get("audit_evidence")),
     )
+
+
+def _load_audit_evidence(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ProtocolError("Session audit_evidence must be an object")
+    decision_points = value.get("decision_points", [])
+    side_effects = value.get("side_effects", [])
+    capability_contributions = value.get("capability_contributions", [])
+    independent_verification = value.get("independent_verification")
+    benchmark_identity = value.get("benchmark_identity")
+    side_effect_coverage = value.get("side_effect_coverage")
+    for name, records in (
+        ("decision_points", decision_points),
+        ("side_effects", side_effects),
+        ("capability_contributions", capability_contributions),
+    ):
+        if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
+            raise ProtocolError(f"Session audit_evidence.{name} must be a list of objects")
+
+    for point in decision_points:
+        if not isinstance(point.get("evidence_available_at_time"), list):
+            raise ProtocolError("Decision point evidence_available_at_time must be a list")
+        if not _string_or_none(point.get("action_selected")):
+            raise ProtocolError("Decision point action_selected must be a non-empty string")
+        alternatives = point.get("alternatives_visible")
+        if not isinstance(alternatives, list) or not all(
+            isinstance(item, str) and item for item in alternatives
+        ):
+            raise ProtocolError("Decision point alternatives_visible must be a list of strings")
+        if point.get("later_outcome") is not None and not isinstance(
+            point.get("later_outcome"), dict
+        ):
+            raise ProtocolError("Decision point later_outcome must be an object or null")
+
+    for effect in side_effects:
+        if effect.get("type") not in ("workspace", "process", "network", "credential", "payment"):
+            raise ProtocolError("Side effect type is invalid")
+        if effect.get("source") not in ("harness", "agent", "provider"):
+            raise ProtocolError("Side effect source is invalid")
+        verified = effect.get("verified")
+        if not isinstance(verified, bool) and verified != "unknown":
+            raise ProtocolError("Side effect verified must be true, false, or unknown")
+
+    for contribution in capability_contributions:
+        if not _string_or_none(contribution.get("capability_id")):
+            raise ProtocolError("Capability contribution capability_id must be a non-empty string")
+        if not isinstance(contribution.get("invoked"), bool):
+            raise ProtocolError("Capability contribution invoked must be boolean")
+        result_used = contribution.get("result_used")
+        if not isinstance(result_used, bool) and result_used != "unknown":
+            raise ProtocolError("Capability contribution result_used must be true, false, or unknown")
+        if contribution.get("measurable_delta") is not None and not isinstance(
+            contribution.get("measurable_delta"), dict
+        ):
+            raise ProtocolError("Capability contribution measurable_delta must be an object or null")
+
+    if independent_verification is not None:
+        if not isinstance(independent_verification, dict):
+            raise ProtocolError("Session audit_evidence.independent_verification must be an object")
+        if independent_verification.get("status") not in (
+            "passed",
+            "failed",
+            "timed_out",
+            "error",
+            "not_run",
+        ):
+            raise ProtocolError("Independent verification status is invalid")
+        if independent_verification.get("source") != "harness":
+            raise ProtocolError("Independent verification source must be harness")
+
+    if benchmark_identity is not None:
+        if not isinstance(benchmark_identity, dict):
+            raise ProtocolError("Session audit_evidence.benchmark_identity must be an object")
+        if benchmark_identity.get("schema") != "bureauless_benchmark_identity_v1":
+            raise ProtocolError("Benchmark identity schema is invalid")
+        for key in ("cohort_id", "trial_id"):
+            if not _string_or_none(benchmark_identity.get(key)):
+                raise ProtocolError(f"Benchmark identity {key} must be a non-empty string")
+        if not isinstance(benchmark_identity.get("cohort_declared"), bool):
+            raise ProtocolError("Benchmark identity cohort_declared must be boolean")
+        task_sha = benchmark_identity.get("task_sha256")
+        if not isinstance(task_sha, str) or not task_sha:
+            raise ProtocolError("Benchmark identity task_sha256 must be a non-empty string")
+        baseline_ref = benchmark_identity.get("workspace_baseline_ref")
+        if baseline_ref is not None and (
+            not isinstance(baseline_ref, str) or not baseline_ref
+        ):
+            raise ProtocolError(
+                "Benchmark identity workspace_baseline_ref must be a string or null"
+            )
+        acceptance_sha = benchmark_identity.get("acceptance_contract_sha256")
+        if acceptance_sha is not None and (
+            not isinstance(acceptance_sha, str) or not acceptance_sha
+        ):
+            raise ProtocolError(
+                "Benchmark identity acceptance_contract_sha256 must be a string or null"
+            )
+
+    if side_effect_coverage is not None:
+        if not isinstance(side_effect_coverage, dict):
+            raise ProtocolError("Session audit_evidence.side_effect_coverage must be an object")
+        expected_effects = {"workspace", "process", "network", "credential", "payment"}
+        if set(side_effect_coverage) != expected_effects:
+            raise ProtocolError("Side effect coverage must declare all five effect types")
+        for effect_type, coverage in side_effect_coverage.items():
+            if not isinstance(coverage, dict):
+                raise ProtocolError(f"Side effect coverage {effect_type} must be an object")
+            if coverage.get("status") not in (
+                "observed",
+                "not_observed",
+                "not_applicable",
+            ):
+                raise ProtocolError(f"Side effect coverage {effect_type} status is invalid")
+            if coverage.get("evidence_source") not in (
+                "harness",
+                "agent",
+                "provider",
+                "unavailable",
+            ):
+                raise ProtocolError(
+                    f"Side effect coverage {effect_type} evidence_source is invalid"
+                )
+
+    evidence = {
+        "decision_points": [dict(item) for item in decision_points],
+        "side_effects": [dict(item) for item in side_effects],
+        "capability_contributions": [dict(item) for item in capability_contributions],
+    }
+    if independent_verification is not None:
+        evidence["independent_verification"] = dict(independent_verification)
+    if benchmark_identity is not None:
+        evidence["benchmark_identity"] = dict(benchmark_identity)
+    if side_effect_coverage is not None:
+        evidence["side_effect_coverage"] = {
+            key: dict(item) for key, item in side_effect_coverage.items()
+        }
+    return evidence
+
+
+def _session_audit_evidence(
+    record: SessionRecord,
+    spec: SessionSpec,
+    packet: DispatchPacket | None = None,
+) -> dict[str, Any]:
+    evidence = _load_audit_evidence(record.audit_evidence)
+    if packet is not None:
+        verification = record.result_proposal or record.extraction
+        verification_status = _mapping_value(verification.get("verification")).get(
+            "status", "not_run"
+        )
+        evidence.setdefault("decision_points", []).append(
+            {
+                "decision_id": f"decision-{record.session_id}-dispatch",
+                "decision_type": "dispatch",
+                "source": "harness",
+                "evidence_available_at_time": [
+                    "dispatch_packet.routing_decision",
+                    "dispatch_packet.assignment",
+                    "dispatch.session_spec",
+                ],
+                "action_selected": f"dispatch_agent:{spec.agent_id}",
+                "alternatives_visible": [
+                    f"routing_mode:{item['mode']}"
+                    for item in packet.routing_decision.rejected_modes
+                ],
+                "selected_context": {
+                    "routing_mode": packet.routing_decision.selected_mode,
+                    "selection_policy_version": packet.routing_decision.selection_policy_version,
+                    "agent_id": spec.agent_id,
+                    "target_provider": spec.target_provider,
+                    "target_model": spec.target_model,
+                },
+                "later_outcome": {
+                    "session_status": record.status,
+                    "exit_reason": record.exit.get("reason"),
+                    "changed_files_count": record.outcome_metrics.get(
+                        "changed_files_count"
+                    ),
+                    "agent_verification_status": verification_status,
+                },
+            }
+        )
+    effects = evidence.setdefault("side_effects", [])
+    credential_env = spec.provider_api_key_env
+    if spec.target_model and spec.target_provider:
+        credential_env = resolve_agent_binding(
+            spec.agent_id,
+            target_model=spec.target_model,
+            target_provider=spec.target_provider,
+            provider_base_url=spec.provider_base_url,
+            provider_api_key_env=spec.provider_api_key_env,
+            provider_wire_api=spec.provider_wire_api,
+        ).api_key_env
+    if (
+        spec.agent_id != "fake"
+        and record.status != "dry_run"
+        and record.exit.get("reason") != "launch_failed"
+    ):
+        effects.append(
+            {"type": "process", "source": "harness", "verified": True, "evidence_ref": "exit"}
+        )
+        if credential_env:
+            effects.append(
+                {
+                    "type": "credential",
+                    "source": "harness",
+                    "verified": True,
+                    "evidence_ref": "dispatch.session_spec.provider_api_key_env",
+                }
+            )
+    if _int_value(record.outcome_metrics.get("changed_files_count")) > 0:
+        effects.append(
+            {
+                "type": "workspace",
+                "source": "harness",
+                "verified": True,
+                "evidence_ref": "diff_refs",
+            }
+        )
+    if isinstance(record.extraction.get("provider_usage_capture"), dict):
+        effects.append(
+            {
+                "type": "network",
+                "source": "harness",
+                "verified": True,
+                "evidence_ref": "extraction.provider_usage_capture",
+            }
+        )
+    observed_effects = {
+        effect["type"]: effect for effect in effects if effect.get("verified") is not False
+    }
+    workspace_observed = all(
+        isinstance(record.workspace.get(key), str)
+        for key in ("pre_state_ref", "post_state_ref")
+    )
+    process_observed = "process" in observed_effects
+    credential_expected = bool(credential_env)
+    evidence["side_effect_coverage"] = {
+        "workspace": {
+            "status": "observed" if workspace_observed else "not_observed",
+            "evidence_source": "harness" if workspace_observed else "unavailable",
+            "evidence_ref": "workspace.pre_state_ref+post_state_ref" if workspace_observed else None,
+        },
+        "process": {
+            "status": "observed" if process_observed else (
+                "not_applicable" if record.status == "dry_run" else "not_observed"
+            ),
+            "evidence_source": "harness" if process_observed else "unavailable",
+            "evidence_ref": "exit" if process_observed else None,
+        },
+        "network": _side_effect_coverage_entry(observed_effects.get("network")),
+        "credential": (
+            _side_effect_coverage_entry(observed_effects.get("credential"))
+            if credential_expected
+            else {
+                "status": "not_applicable",
+                "evidence_source": "unavailable",
+                "evidence_ref": None,
+            }
+        ),
+        "payment": _side_effect_coverage_entry(observed_effects.get("payment")),
+    }
+    return evidence
+
+
+def _side_effect_coverage_entry(effect: dict[str, Any] | None) -> dict[str, Any]:
+    if effect is None:
+        return {
+            "status": "not_observed",
+            "evidence_source": "unavailable",
+            "evidence_ref": None,
+        }
+    return {
+        "status": "observed",
+        "evidence_source": effect["source"],
+        "evidence_ref": effect.get("evidence_ref"),
+    }
+
+
+def run_independent_verification(
+    command_text: str,
+    workdir: Path,
+    *,
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
+    try:
+        command = shlex.split(command_text)
+    except ValueError as exc:
+        raise ProtocolError(f"Verification command is invalid: {exc}") from exc
+    if not command:
+        raise ProtocolError("Verification command must not be empty")
+    if timeout_seconds <= 0:
+        raise ProtocolError("Verification timeout must be > 0")
+    if not workdir.is_dir():
+        raise ProtocolError("Verification workspace does not exist")
+
+    env = os.environ.copy()
+    sensitive_values: list[str] = []
+    for name in list(env):
+        if _secret_environment_name(name):
+            value = env.pop(name)
+            if len(value) >= 4:
+                sensitive_values.append(value)
+    env.pop("PYTHONPATH", None)
+    started_at = _now()
+    started_monotonic = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="bureauless-verification-") as temporary:
+        verification_root = Path(temporary)
+        verification_workdir = verification_root / "workspace"
+        shutil.copytree(
+            workdir,
+            verification_workdir,
+            ignore=shutil.ignore_patterns(".bureauless", ".git"),
+        )
+        home = verification_root / "home"
+        home.mkdir()
+        env.update(
+            {
+                "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "XDG_CACHE_HOME": str(home / ".cache"),
+                "XDG_DATA_HOME": str(home / ".local" / "share"),
+            }
+        )
+        try:
+            completed = _run_live_process(
+                command,
+                cwd=verification_workdir,
+                timeout=timeout_seconds,
+                env=env,
+                input_text=None,
+                controller=None,
+            )
+            status = "passed" if completed.returncode == 0 else "failed"
+            exit_code = completed.returncode
+            stdout = completed.stdout
+            stderr = completed.stderr
+        except subprocess.TimeoutExpired as exc:
+            status = "timed_out"
+            exit_code = None
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+        except OSError as exc:
+            status = "error"
+            exit_code = None
+            stdout = ""
+            stderr = str(exc)
+
+    secrets = tuple(sensitive_values)
+    stdout_text = _redact_native_text(_text_value(stdout), secrets)
+    stderr_text = _redact_native_text(_text_value(stderr), secrets)
+    return {
+        "schema": "bureauless_independent_verification_v1",
+        "source": "harness",
+        "status": status,
+        "command": command,
+        "command_sha256": hashlib.sha256(
+            json.dumps(command, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
+        "started_at": started_at,
+        "finished_at": _now(),
+        "wall_time_ms": max(1, int((time.monotonic() - started_monotonic) * 1000)),
+        "exit_code": exit_code,
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "stdout_sha256": hashlib.sha256(stdout_text.encode("utf-8")).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_text.encode("utf-8")).hexdigest(),
+        "workspace_mode": "copy_without_vcs_metadata",
+    }
+
+
+def _secret_environment_name(name: str) -> bool:
+    parts = name.upper().split("_")
+    return any(part in {"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"} for part in parts)
 
 
 def _legacy_load_provider_usage_capture(data: dict[str, Any]) -> ProviderUsageCapture:
@@ -1735,6 +2175,9 @@ def package_session_result(
         mutation_proposal_refs=list(base.mutation_proposal_refs),
         review_status=base.review_status,
         control_intents=list(base.control_intents),
+        model_identity=dict(base.model_identity),
+        metric_provenance=dict(base.metric_provenance),
+        route_evidence=dict(base.route_evidence),
     )
 
 
@@ -1950,6 +2393,7 @@ def _run_codex_cli_session(
         provider_api_key_env=spec.provider_api_key_env,
         provider_wire_api=spec.provider_wire_api,
     )
+    sensitive_values = _binding_secret_values(binding)
     telemetry_proxy: _OpenAICompatibleTelemetryProxy | None = None
     telemetry_capture: dict[str, Any] | None = None
     try:
@@ -1986,7 +2430,12 @@ def _run_codex_cli_session(
     except subprocess.TimeoutExpired as exc:
         timeout_reason = _timeout_reason(exc)
         finished_at = _now()
-        native_logs = _persist_native_logs(workspace, exc.stdout or "", exc.stderr or "")
+        native_logs = _persist_native_logs(
+            workspace,
+            exc.stdout or "",
+            exc.stderr or "",
+            sensitive_values=sensitive_values,
+        )
         _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
         outcome_metrics = _base_outcome_metrics(
             wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
@@ -2011,12 +2460,18 @@ def _run_codex_cli_session(
         )
     except OSError as exc:
         finished_at = _now()
-        native_logs = _persist_native_logs(workspace, "", str(exc))
+        warning = _redact_native_text(str(exc), sensitive_values)
+        native_logs = _persist_native_logs(
+            workspace,
+            "",
+            warning,
+            sensitive_values=sensitive_values,
+        )
         _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
         outcome_metrics = _base_outcome_metrics(
             wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
         )
-        extraction = _empty_agent_extraction("launch_failed", [str(exc)])
+        extraction = _empty_agent_extraction("launch_failed", [warning])
         extraction["contract"] = "codex_exec_v1"
         return SessionRecord(
             session_id=spec.session_id,
@@ -2038,10 +2493,17 @@ def _run_codex_cli_session(
     finished_at = _now()
     wall_time_ms = max(1, int((time.monotonic() - started_monotonic) * 1000))
     status = "completed" if completed.returncode == 0 else "failed"
-    native_logs = _persist_native_logs(workspace, completed.stdout, completed.stderr)
+    stdout = _redact_native_text(_text_value(completed.stdout), sensitive_values)
+    stderr = _redact_native_text(_text_value(completed.stderr), sensitive_values)
+    native_logs = _persist_native_logs(
+        workspace,
+        stdout,
+        stderr,
+        sensitive_values=sensitive_values,
+    )
     diff_metrics, diff_refs = _collect_workspace_delta(workdir, baseline)
     _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
-    codex_metrics, codex_extraction = _extract_codex_jsonl(completed.stdout)
+    codex_metrics, codex_extraction = _extract_codex_jsonl(stdout)
     outcome_metrics = _merge_outcome_metrics(
         _merge_outcome_metrics(_base_outcome_metrics(wall_time_ms=wall_time_ms), diff_metrics),
         codex_metrics,
@@ -2117,6 +2579,9 @@ def _run_codex_cli_session(
             ),
             review_status=review_status,
             control_intents=_list_value(codex_extraction.get("control_intents")),
+            model_identity=_model_identity(binding, codex_extraction),
+            metric_provenance=_metric_provenance(spec.agent_id, outcome_metrics, extraction),
+            route_evidence=_session_route_evidence(spec.agent_id, binding.provider_id),
         ).to_dict()
         if provider_capture is not None:
             extraction["provider_usage_capture"] = provider_capture.to_dict()
@@ -2138,6 +2603,800 @@ def _run_codex_cli_session(
         extraction=extraction,
         result_proposal=result_proposal,
     )
+
+
+def _run_claude_code_session(
+    spec: SessionSpec,
+    assignment: AssignmentPacket,
+    started_at: str,
+    started_monotonic: float,
+    *,
+    command_runner: CommandRunner | None = None,
+    dispatch_packet: DispatchPacket | None = None,
+    process_controller: _ProcessController | None = None,
+    context_resolution: dict[str, Any] | None = None,
+) -> SessionRecord:
+    source_root = Path(spec.workdir).resolve()
+    source_root.mkdir(parents=True, exist_ok=True)
+    workspace = _prepare_session_workspace(spec, source_root)
+    workdir = Path(_as_string(workspace, "path"))
+    baseline = _capture_workspace_baseline(workdir)
+    _set_workspace_state_refs(workspace, baseline.files)
+    binding = resolve_agent_binding(
+        spec.agent_id,
+        target_model=_as_string({"target_model": spec.target_model}, "target_model"),
+        target_provider=_as_string({"target_provider": spec.target_provider}, "target_provider"),
+        provider_base_url=spec.provider_base_url,
+        provider_api_key_env=spec.provider_api_key_env,
+        provider_wire_api=spec.provider_wire_api,
+    )
+    sensitive_values = _binding_secret_values(binding)
+    try:
+        completed = _run_command_runner(
+            command_runner,
+            _build_claude_code_command(binding),
+            cwd=workdir,
+            env=_build_claude_code_environment(binding, workspace),
+            timeout=spec.timeout_seconds,
+            input_text=_render_codex_assignment_prompt(
+                assignment,
+                dispatch_packet=dispatch_packet,
+                context_resolution=context_resolution,
+            ),
+            process_controller=process_controller,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return _failed_cli_session_record(
+            spec,
+            workspace,
+            baseline.files,
+            workdir,
+            started_at,
+            started_monotonic,
+            exc,
+            contract="claude_stream_json_v1",
+            binding=binding,
+        )
+
+    finished_at = _now()
+    stdout = _redact_native_text(_text_value(completed.stdout), sensitive_values)
+    stderr = _redact_native_text(_text_value(completed.stderr), sensitive_values)
+    native_logs = _persist_native_logs(
+        workspace,
+        stdout,
+        stderr,
+        sensitive_values=sensitive_values,
+    )
+    diff_metrics, diff_refs = _collect_workspace_delta(workdir, baseline)
+    _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
+    claude_metrics, extraction = _extract_claude_stream_json(stdout)
+    outcome_metrics = _merge_outcome_metrics(
+        _merge_outcome_metrics(
+            _base_outcome_metrics(
+                wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
+            ),
+            diff_metrics,
+        ),
+        claude_metrics,
+    )
+    extraction.update(
+        {
+            "contract": "claude_stream_json_v1",
+            "effective_model": binding.model,
+            "effective_provider": binding.provider_id,
+            "diff_refs": diff_refs,
+            "outcome_metrics": outcome_metrics,
+            "missing_fields": _missing_usage_fields(outcome_metrics),
+        }
+    )
+    result = None
+    if completed.returncode == 0:
+        result = ResultProposal(
+            result_id=f"result-{spec.session_id}",
+            assignment_id=assignment.assignment_id,
+            agent_id=spec.agent_id,
+            status=_string_value(extraction.get("result_status"), default="completed"),
+            effective_model=binding.model,
+            effective_provider=binding.provider_id,
+            emitted_events=_string_list_value(extraction.get("emitted_events")),
+            artifacts=_mapping_list_value(extraction.get("artifacts")),
+            outcome_metrics=outcome_metrics,
+            verification=_mapping_value(extraction.get("verification"), default={"status": "not_run"}),
+            native_log_refs=_mapping_list_value(extraction.get("native_log_refs")),
+            mutation_proposal_refs=_string_list_value(extraction.get("mutation_proposal_refs")),
+            review_status=_string_or_none(extraction.get("review_status")),
+            control_intents=_list_value(extraction.get("control_intents")),
+            model_identity=_model_identity(binding, extraction),
+            metric_provenance=_metric_provenance(spec.agent_id, outcome_metrics, extraction),
+            route_evidence=_session_route_evidence(spec.agent_id, binding.provider_id),
+        ).to_dict()
+    return SessionRecord(
+        session_id=spec.session_id,
+        assignment_id=spec.assignment_id,
+        agent_id=spec.agent_id,
+        status="completed" if completed.returncode == 0 else "failed",
+        started_at=started_at,
+        finished_at=finished_at,
+        exit={"code": completed.returncode, "reason": "completed" if completed.returncode == 0 else "failed"},
+        native_logs=native_logs,
+        diff_refs=diff_refs,
+        artifacts=[],
+        workspace=workspace,
+        outcome_metrics=outcome_metrics,
+        extraction=extraction,
+        result_proposal=result,
+    )
+
+
+def _run_gemini_cli_session(
+    spec: SessionSpec,
+    assignment: AssignmentPacket,
+    started_at: str,
+    started_monotonic: float,
+    *,
+    command_runner: CommandRunner | None = None,
+    dispatch_packet: DispatchPacket | None = None,
+    process_controller: _ProcessController | None = None,
+    context_resolution: dict[str, Any] | None = None,
+) -> SessionRecord:
+    source_root = Path(spec.workdir).resolve()
+    source_root.mkdir(parents=True, exist_ok=True)
+    workspace = _prepare_session_workspace(spec, source_root)
+    workdir = Path(_as_string(workspace, "path"))
+    baseline = _capture_workspace_baseline(workdir)
+    _set_workspace_state_refs(workspace, baseline.files)
+    binding = resolve_agent_binding(
+        spec.agent_id,
+        target_model=_as_string({"target_model": spec.target_model}, "target_model"),
+        target_provider=_as_string({"target_provider": spec.target_provider}, "target_provider"),
+        provider_base_url=spec.provider_base_url,
+        provider_api_key_env=spec.provider_api_key_env,
+        provider_wire_api=spec.provider_wire_api,
+    )
+    sensitive_values = _binding_secret_values(binding)
+    gemini_home: Path | None = None
+    try:
+        env = _build_gemini_environment(binding)
+        gemini_home = _prepare_gemini_home(workspace, env)
+        prompt = _render_codex_assignment_prompt(
+            assignment,
+            dispatch_packet=dispatch_packet,
+            context_resolution=context_resolution,
+        )
+        try:
+            completed = _run_command_runner(
+                command_runner,
+                _build_gemini_command(spec, binding, prompt),
+                cwd=workdir,
+                env=env,
+                timeout=spec.timeout_seconds,
+                input_text=None,
+                process_controller=process_controller,
+                progress_line=_is_codex_native_progress_line,
+            )
+        finally:
+            _cleanup_gemini_home(gemini_home)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return _failed_cli_session_record(
+            spec,
+            workspace,
+            baseline.files,
+            workdir,
+            started_at,
+            started_monotonic,
+            exc,
+            contract="gemini_stream_json_v1",
+            binding=binding,
+        )
+
+    finished_at = _now()
+    stdout = _redact_native_text(_text_value(completed.stdout), sensitive_values)
+    stderr = _redact_native_text(_text_value(completed.stderr), sensitive_values)
+    native_logs = _persist_native_logs(
+        workspace,
+        stdout,
+        stderr,
+        sensitive_values=sensitive_values,
+    )
+    diff_metrics, diff_refs = _collect_workspace_delta(workdir, baseline)
+    _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
+    gemini_metrics, gemini_extraction = _extract_gemini_jsonl(stdout)
+    outcome_metrics = _merge_outcome_metrics(
+        _merge_outcome_metrics(
+            _base_outcome_metrics(
+                wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
+            ),
+            diff_metrics,
+        ),
+        gemini_metrics,
+    )
+    extraction = _empty_agent_extraction("native_stream_captured", [])
+    extraction.update(
+        {
+            "contract": "gemini_stream_json_v1",
+            "effective_model": binding.model,
+            "effective_provider": binding.provider_id,
+            "diff_refs": diff_refs,
+            "outcome_metrics": outcome_metrics,
+            "missing_fields": _missing_usage_fields(outcome_metrics),
+        }
+    )
+    extraction["warnings"].extend(_string_list_value(gemini_extraction.get("warnings")))
+    extraction["parsed_fields"] = [
+        "effective_model",
+        "effective_provider",
+        *_string_list_value(gemini_extraction.get("parsed_fields")),
+    ]
+    for field in (
+        "assistant_text",
+        "native_event_stream_observed",
+        "native_tool_events",
+        "native_session_id",
+        "provider_reported_models",
+        "result_status",
+        "review_status",
+        "emitted_events",
+        "artifacts",
+        "verification",
+        "native_log_refs",
+        "mutation_proposal_refs",
+        "control_intents",
+        "context_request",
+    ):
+        if field in gemini_extraction:
+            extraction[field] = gemini_extraction[field]
+
+    result = None
+    if completed.returncode == 0:
+        result = ResultProposal(
+            result_id=f"result-{spec.session_id}",
+            assignment_id=assignment.assignment_id,
+            agent_id=spec.agent_id,
+            status=_string_value(gemini_extraction.get("result_status"), default="completed"),
+            effective_model=binding.model,
+            effective_provider=binding.provider_id,
+            emitted_events=_string_list_value(gemini_extraction.get("emitted_events")),
+            artifacts=_mapping_list_value(gemini_extraction.get("artifacts")),
+            outcome_metrics=outcome_metrics,
+            verification=_mapping_value(gemini_extraction.get("verification"), default={"status": "not_run"}),
+            native_log_refs=_mapping_list_value(gemini_extraction.get("native_log_refs")),
+            mutation_proposal_refs=_string_list_value(gemini_extraction.get("mutation_proposal_refs")),
+            review_status=_string_or_none(gemini_extraction.get("review_status")),
+            control_intents=_list_value(gemini_extraction.get("control_intents")),
+            model_identity=_model_identity(binding, extraction),
+            metric_provenance=_metric_provenance(spec.agent_id, outcome_metrics, extraction),
+            route_evidence=_session_route_evidence(spec.agent_id, binding.provider_id),
+        ).to_dict()
+    return SessionRecord(
+        session_id=spec.session_id,
+        assignment_id=spec.assignment_id,
+        agent_id=spec.agent_id,
+        status="completed" if completed.returncode == 0 else "failed",
+        started_at=started_at,
+        finished_at=finished_at,
+        exit={"code": completed.returncode, "reason": "completed" if completed.returncode == 0 else "failed"},
+        native_logs=native_logs,
+        diff_refs=diff_refs,
+        artifacts=[],
+        workspace=workspace,
+        outcome_metrics=outcome_metrics,
+        extraction=extraction,
+        result_proposal=result,
+    )
+
+
+def _run_pi_session(
+    spec: SessionSpec,
+    assignment: AssignmentPacket,
+    started_at: str,
+    started_monotonic: float,
+    *,
+    command_runner: CommandRunner | None = None,
+    dispatch_packet: DispatchPacket | None = None,
+    process_controller: _ProcessController | None = None,
+    context_resolution: dict[str, Any] | None = None,
+) -> SessionRecord:
+    source_root = Path(spec.workdir).resolve()
+    source_root.mkdir(parents=True, exist_ok=True)
+    workspace = _prepare_session_workspace(spec, source_root)
+    workdir = Path(_as_string(workspace, "path"))
+    baseline = _capture_workspace_baseline(workdir)
+    _set_workspace_state_refs(workspace, baseline.files)
+    binding = resolve_agent_binding(
+        spec.agent_id,
+        target_model=_as_string({"target_model": spec.target_model}, "target_model"),
+        target_provider=_as_string({"target_provider": spec.target_provider}, "target_provider"),
+        provider_base_url=spec.provider_base_url,
+        provider_api_key_env=spec.provider_api_key_env,
+        provider_wire_api=spec.provider_wire_api,
+    )
+    pi_root: Path | None = None
+    try:
+        env = _build_pi_environment(binding)
+        pi_root = _prepare_pi_config(workspace, binding, env)
+        completed = _run_command_runner(
+            command_runner,
+            _build_pi_command(
+                spec,
+                binding,
+                _render_codex_assignment_prompt(
+                    assignment,
+                    dispatch_packet=dispatch_packet,
+                    context_resolution=context_resolution,
+                ),
+            ),
+            cwd=workdir,
+            env=env,
+            timeout=spec.timeout_seconds,
+            input_text=None,
+            process_controller=process_controller,
+            progress_line=_is_codex_native_progress_line,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return _failed_cli_session_record(
+            spec, workspace, baseline.files, workdir, started_at, started_monotonic, exc,
+            contract="pi_json_v1",
+            binding=binding,
+        )
+    finally:
+        if pi_root is not None:
+            shutil.rmtree(pi_root, ignore_errors=True)
+
+    return _native_json_session_record(
+        spec,
+        assignment,
+        workspace,
+        workdir,
+        baseline,
+        started_at,
+        started_monotonic,
+        completed,
+        binding,
+        contract="pi_json_v1",
+        extractor=_extract_pi_jsonl,
+    )
+
+
+def _run_opencode_session(
+    spec: SessionSpec,
+    assignment: AssignmentPacket,
+    started_at: str,
+    started_monotonic: float,
+    *,
+    command_runner: CommandRunner | None = None,
+    dispatch_packet: DispatchPacket | None = None,
+    process_controller: _ProcessController | None = None,
+    context_resolution: dict[str, Any] | None = None,
+) -> SessionRecord:
+    source_root = Path(spec.workdir).resolve()
+    source_root.mkdir(parents=True, exist_ok=True)
+    workspace = _prepare_session_workspace(spec, source_root)
+    workdir = Path(_as_string(workspace, "path"))
+    baseline = _capture_workspace_baseline(workdir)
+    _set_workspace_state_refs(workspace, baseline.files)
+    binding = resolve_agent_binding(
+        spec.agent_id,
+        target_model=_as_string({"target_model": spec.target_model}, "target_model"),
+        target_provider=_as_string({"target_provider": spec.target_provider}, "target_provider"),
+        provider_base_url=spec.provider_base_url,
+        provider_api_key_env=spec.provider_api_key_env,
+        provider_wire_api=spec.provider_wire_api,
+    )
+    runtime_root: Path | None = None
+    try:
+        env = _build_opencode_environment(binding)
+        runtime_root = _prepare_opencode_runtime(workspace, binding, spec, env)
+        completed = _run_command_runner(
+            command_runner,
+            _build_opencode_command(
+                binding,
+                workdir,
+                _render_codex_assignment_prompt(
+                    assignment,
+                    dispatch_packet=dispatch_packet,
+                    context_resolution=context_resolution,
+                ),
+            ),
+            cwd=workdir,
+            env=env,
+            timeout=spec.timeout_seconds,
+            input_text=None,
+            process_controller=process_controller,
+            progress_line=_is_codex_native_progress_line,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return _failed_cli_session_record(
+            spec, workspace, baseline.files, workdir, started_at, started_monotonic, exc,
+            contract="opencode_run_json_v1",
+            binding=binding,
+        )
+    finally:
+        if runtime_root is not None:
+            shutil.rmtree(runtime_root, ignore_errors=True)
+
+    return _native_json_session_record(
+        spec,
+        assignment,
+        workspace,
+        workdir,
+        baseline,
+        started_at,
+        started_monotonic,
+        completed,
+        binding,
+        contract="opencode_run_json_v1",
+        extractor=_extract_opencode_jsonl,
+    )
+
+
+def _native_json_session_record(
+    spec: SessionSpec,
+    assignment: AssignmentPacket,
+    workspace: dict[str, Any],
+    workdir: Path,
+    baseline: WorkspaceBaseline,
+    started_at: str,
+    started_monotonic: float,
+    completed: subprocess.CompletedProcess[str],
+    binding: Any,
+    *,
+    contract: str,
+    extractor: Callable[[str], tuple[dict[str, Any], dict[str, Any]]],
+) -> SessionRecord:
+    finished_at = _now()
+    sensitive_values = _binding_secret_values(binding)
+    stdout = _redact_native_text(_text_value(completed.stdout), sensitive_values)
+    stderr = _redact_native_text(_text_value(completed.stderr), sensitive_values)
+    native_logs = _persist_native_logs(
+        workspace,
+        stdout,
+        stderr,
+        sensitive_values=sensitive_values,
+    )
+    diff_metrics, diff_refs = _collect_workspace_delta(workdir, baseline)
+    _set_workspace_state_refs(workspace, baseline.files, _snapshot_workspace_files(workdir))
+    agent_metrics, agent_extraction = extractor(stdout)
+    outcome_metrics = _merge_outcome_metrics(
+        _merge_outcome_metrics(
+            _base_outcome_metrics(
+                wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
+            ),
+            diff_metrics,
+        ),
+        agent_metrics,
+    )
+    extraction = _empty_agent_extraction("native_stream_captured", [])
+    extraction.update(
+        {
+            "contract": contract,
+            "effective_model": binding.model,
+            "effective_provider": binding.provider_id,
+            "diff_refs": diff_refs,
+            "outcome_metrics": outcome_metrics,
+            "missing_fields": _missing_usage_fields(outcome_metrics),
+        }
+    )
+    extraction["warnings"].extend(_string_list_value(agent_extraction.get("warnings")))
+    extraction["parsed_fields"] = [
+        "effective_model",
+        "effective_provider",
+        *_string_list_value(agent_extraction.get("parsed_fields")),
+    ]
+    for field in (
+        "assistant_text",
+        "native_event_stream_observed",
+        "native_tool_events",
+        "native_session_id",
+        "provider_reported_models",
+        "result_status",
+        "review_status",
+        "emitted_events",
+        "artifacts",
+        "verification",
+        "native_log_refs",
+        "mutation_proposal_refs",
+        "control_intents",
+        "context_request",
+    ):
+        if field in agent_extraction:
+            extraction[field] = agent_extraction[field]
+    result = None
+    if completed.returncode == 0:
+        result = ResultProposal(
+            result_id=f"result-{spec.session_id}",
+            assignment_id=assignment.assignment_id,
+            agent_id=spec.agent_id,
+            status=_string_value(agent_extraction.get("result_status"), default="completed"),
+            effective_model=binding.model,
+            effective_provider=binding.provider_id,
+            emitted_events=_string_list_value(agent_extraction.get("emitted_events")),
+            artifacts=_mapping_list_value(agent_extraction.get("artifacts")),
+            outcome_metrics=outcome_metrics,
+            verification=_mapping_value(agent_extraction.get("verification"), default={"status": "not_run"}),
+            native_log_refs=_mapping_list_value(agent_extraction.get("native_log_refs")),
+            mutation_proposal_refs=_string_list_value(agent_extraction.get("mutation_proposal_refs")),
+            review_status=_string_or_none(agent_extraction.get("review_status")),
+            control_intents=_list_value(agent_extraction.get("control_intents")),
+            model_identity=_model_identity(binding, extraction),
+            metric_provenance=_metric_provenance(spec.agent_id, outcome_metrics, extraction),
+            route_evidence=_session_route_evidence(spec.agent_id, binding.provider_id),
+        ).to_dict()
+    return SessionRecord(
+        session_id=spec.session_id,
+        assignment_id=spec.assignment_id,
+        agent_id=spec.agent_id,
+        status="completed" if completed.returncode == 0 else "failed",
+        started_at=started_at,
+        finished_at=finished_at,
+        exit={"code": completed.returncode, "reason": "completed" if completed.returncode == 0 else "failed"},
+        native_logs=native_logs,
+        diff_refs=diff_refs,
+        artifacts=[],
+        workspace=workspace,
+        outcome_metrics=outcome_metrics,
+        extraction=extraction,
+        result_proposal=result,
+    )
+
+
+def _failed_cli_session_record(
+    spec: SessionSpec,
+    workspace: dict[str, Any],
+    baseline_files: dict[str, str],
+    workdir: Path,
+    started_at: str,
+    started_monotonic: float,
+    exc: subprocess.TimeoutExpired | OSError,
+    *,
+    contract: str,
+    binding: Any,
+) -> SessionRecord:
+    timed_out = isinstance(exc, subprocess.TimeoutExpired)
+    reason = _timeout_reason(exc) if timed_out else "launch_failed"
+    sensitive_values = _binding_secret_values(binding)
+    warning = _redact_native_text(str(exc), sensitive_values)
+    native_logs = _persist_native_logs(
+        workspace,
+        getattr(exc, "stdout", "") or "",
+        getattr(exc, "stderr", "") or warning,
+        sensitive_values=sensitive_values,
+    )
+    _set_workspace_state_refs(workspace, baseline_files, _snapshot_workspace_files(workdir))
+    extraction = _empty_agent_extraction(reason, [warning])
+    extraction["contract"] = contract
+    return SessionRecord(
+        session_id=spec.session_id,
+        assignment_id=spec.assignment_id,
+        agent_id=spec.agent_id,
+        status="timed_out" if timed_out else "failed",
+        started_at=started_at,
+        finished_at=_now(),
+        exit={"code": None if timed_out else 1, "reason": reason},
+        native_logs=native_logs,
+        diff_refs=[],
+        artifacts=[],
+        workspace=workspace,
+        outcome_metrics=_base_outcome_metrics(
+            wall_time_ms=max(1, int((time.monotonic() - started_monotonic) * 1000))
+        ),
+        extraction=extraction,
+        result_proposal=None,
+    )
+
+
+def _build_claude_code_environment(binding: Any, workspace: dict[str, Any]) -> dict[str, str]:
+    env = os.environ.copy()
+    if not binding.api_key_env or not env.get(binding.api_key_env):
+        raise ProtocolError(
+            f"Session provider_api_key_env is not set in the environment: {binding.api_key_env}"
+        )
+    home = Path(_as_string(workspace, "session_root")) / "claude-home"
+    home.mkdir(parents=True, exist_ok=True)
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / ".config")
+    env["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+    env["ANTHROPIC_BASE_URL"] = _as_string({"base_url": binding.base_url}, "base_url").rstrip("/").removesuffix("/v1")
+    env["ANTHROPIC_API_KEY"] = env[binding.api_key_env]
+    return env
+
+
+def _build_claude_code_command(binding: Any) -> list[str]:
+    return [
+        "claude",
+        "--print",
+        "--bare",
+        "--no-session-persistence",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "acceptEdits",
+        "--model",
+        binding.model,
+    ]
+
+
+def _build_gemini_environment(binding: Any) -> dict[str, str]:
+    env = os.environ.copy()
+    if not binding.api_key_env or not env.get(binding.api_key_env):
+        raise ProtocolError(
+            f"Session provider_api_key_env is not set in the environment: {binding.api_key_env}"
+        )
+    env["GEMINI_API_KEY"] = env[binding.api_key_env]
+    env["GOOGLE_GEMINI_BASE_URL"] = _as_string({"base_url": binding.base_url}, "base_url")
+    env["GEMINI_TELEMETRY_ENABLED"] = "false"
+    env["NO_COLOR"] = "1"
+    return env
+
+
+def _prepare_gemini_home(workspace: dict[str, Any], env: dict[str, str]) -> Path:
+    home = Path(_as_string(workspace, "session_root")) / "gemini-home"
+    settings_path = home / ".gemini" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps({"security": {"auth": {"selectedType": "gemini-api-key"}}}),
+        encoding="utf-8",
+    )
+    env["HOME"] = str(home)
+    return home
+
+
+def _cleanup_gemini_home(home: Path) -> None:
+    shutil.rmtree(home, ignore_errors=True)
+
+
+def _build_gemini_command(spec: SessionSpec, binding: Any, prompt: str) -> list[str]:
+    approval_mode = {
+        "read-only": "plan",
+        "workspace-write": "auto_edit",
+        "danger-full-access": "yolo",
+    }[spec.sandbox_mode]
+    return [
+        "gemini",
+        "--skip-trust",
+        "--approval-mode",
+        approval_mode,
+        "--output-format",
+        "stream-json",
+        "--model",
+        binding.model,
+        "--prompt",
+        prompt,
+    ]
+
+
+def _build_pi_environment(binding: Any) -> dict[str, str]:
+    env = os.environ.copy()
+    if not binding.api_key_env or not env.get(binding.api_key_env):
+        raise ProtocolError(
+            f"Session provider_api_key_env is not set in the environment: {binding.api_key_env}"
+        )
+    env["BUREAULESS_PI_API_KEY"] = env[binding.api_key_env]
+    env["PI_TELEMETRY"] = "0"
+    env["PI_OFFLINE"] = "1"
+    return env
+
+
+def _prepare_pi_config(workspace: dict[str, Any], binding: Any, env: dict[str, str]) -> Path:
+    root = Path(_as_string(workspace, "session_root")) / "pi-runtime"
+    agent_dir = root / "agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    agent_dir.joinpath("models.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "bureauless": {
+                        "baseUrl": _pi_base_url(binding),
+                        "api": "anthropic-messages" if binding.provider_id == "anthropic-compatible" else "openai-completions",
+                        "apiKey": "$BUREAULESS_PI_API_KEY",
+                        "models": [{"id": binding.model}],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+    env["PI_CODING_AGENT_SESSION_DIR"] = str(root / "sessions")
+    return root
+
+
+def _pi_base_url(binding: Any) -> str:
+    base_url = _as_string({"base_url": binding.base_url}, "base_url").rstrip("/")
+    return base_url.removesuffix("/v1") if binding.provider_id == "anthropic-compatible" else base_url
+
+
+def _build_pi_command(spec: SessionSpec, binding: Any, prompt: str) -> list[str]:
+    tools = "read,grep,find,ls" if spec.sandbox_mode == "read-only" else "read,edit,write,grep,find,ls"
+    if spec.sandbox_mode == "danger-full-access":
+        tools = f"{tools},bash"
+    return [
+        "pi",
+        "--print",
+        "--mode",
+        "json",
+        "--provider",
+        "bureauless",
+        "--model",
+        binding.model,
+        "--no-session",
+        "--no-approve",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--offline",
+        "--tools",
+        tools,
+        prompt,
+    ]
+
+
+def _build_opencode_environment(binding: Any) -> dict[str, str]:
+    env = os.environ.copy()
+    if not binding.api_key_env or not env.get(binding.api_key_env):
+        raise ProtocolError(
+            f"Session provider_api_key_env is not set in the environment: {binding.api_key_env}"
+        )
+    env["BUREAULESS_OPENCODE_API_KEY"] = env[binding.api_key_env]
+    env["OPENCODE_DISABLE_CLAUDE_CODE"] = "1"
+    return env
+
+
+def _prepare_opencode_runtime(
+    workspace: dict[str, Any], binding: Any, spec: SessionSpec, env: dict[str, str]
+) -> Path:
+    root = Path(_as_string(workspace, "session_root")) / "opencode-runtime"
+    config_dir = root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    permissions: dict[str, str] = {
+        "*": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+    }
+    if spec.sandbox_mode != "read-only":
+        permissions["edit"] = "allow"
+    if spec.sandbox_mode == "danger-full-access":
+        permissions["bash"] = "allow"
+    env["HOME"] = str(root / "home")
+    env["OPENCODE_CONFIG_DIR"] = str(config_dir)
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "permission": permissions,
+            "provider": {
+                "bureauless": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "BureauLess",
+                    "options": {
+                        "baseURL": _as_string({"base_url": binding.base_url}, "base_url"),
+                        "apiKey": "{env:BUREAULESS_OPENCODE_API_KEY}",
+                    },
+                    "models": {binding.model: {"name": binding.model}},
+                }
+            },
+        }
+    )
+    return root
+
+
+def _build_opencode_command(binding: Any, workdir: Path, prompt: str) -> list[str]:
+    return [
+        "opencode",
+        "run",
+        "--pure",
+        "--format",
+        "json",
+        "--model",
+        f"bureauless/{binding.model}",
+        "--dir",
+        str(workdir),
+        prompt,
+    ]
 
 
 def _now() -> str:
@@ -2510,14 +3769,16 @@ def _persist_native_logs(
     workspace: dict[str, Any],
     stdout: str | bytes,
     stderr: str | bytes,
+    *,
+    sensitive_values: tuple[str, ...] = (),
 ) -> dict[str, str]:
     session_root = Path(_as_string(workspace, "session_root"))
     logs_dir = session_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = logs_dir / "stdout.log"
     stderr_path = logs_dir / "stderr.log"
-    stdout_text = _text_value(stdout)
-    stderr_text = _text_value(stderr)
+    stdout_text = _redact_native_text(_text_value(stdout), sensitive_values)
+    stderr_text = _redact_native_text(_text_value(stderr), sensitive_values)
     stdout_path.write_text(stdout_text, encoding="utf-8")
     stderr_path.write_text(stderr_text, encoding="utf-8")
 
@@ -2532,6 +3793,21 @@ def _persist_native_logs(
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
+
+
+def _binding_secret_values(binding: Any) -> tuple[str, ...]:
+    api_key_env = _string_or_none(getattr(binding, "api_key_env", None))
+    if api_key_env is None:
+        return ()
+    value = os.environ.get(api_key_env)
+    return (value,) if value else ()
+
+
+def _redact_native_text(text: str, sensitive_values: tuple[str, ...]) -> str:
+    for value in sensitive_values:
+        if value:
+            text = text.replace(value, "<redacted>")
+    return text
 
 
 def _empty_shell_dummy_extraction(status: str, warnings: list[str]) -> dict[str, Any]:
@@ -2600,6 +3876,43 @@ def _merge_outcome_metrics(
     ):
         merged["total_tokens"] = merged["input_tokens"] + merged["output_tokens"]
     return merged
+
+
+def _model_identity(binding: Any, extraction: dict[str, Any]) -> dict[str, Any]:
+    identity: dict[str, Any] = {"requested": binding.model}
+    cli_reported = _string_or_none(extraction.get("cli_reported_model"))
+    if cli_reported is not None:
+        identity["cli_reported"] = cli_reported
+    provider_reported = _string_list_value(extraction.get("provider_reported_models"))
+    if provider_reported:
+        identity["provider_reported"] = provider_reported
+    independently_attested = _string_or_none(extraction.get("independently_attested_model"))
+    if independently_attested is not None:
+        identity["independently_attested"] = independently_attested
+    return identity
+
+
+def _metric_provenance(
+    agent_id: str,
+    outcome_metrics: dict[str, Any],
+    extraction: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "wall_time": "harness",
+        "file_delta": "harness",
+        "token_usage": outcome_metrics.get("usage_source", "unavailable"),
+        "monetary_cost": outcome_metrics.get("cost_source", "unavailable"),
+        "tool_timeline": "native_event_stream"
+        if extraction.get("native_event_stream_observed")
+        else "not_captured",
+        "comparison_eligibility": dict(get_agent_spec(agent_id).comparison_eligibility),
+    }
+
+
+def _session_route_evidence(agent_id: str, provider_id: str) -> dict[str, Any]:
+    evidence = route_agent(agent_id, provider_id).to_dict()
+    evidence["session_route_support"] = "verified"
+    return evidence
 
 
 def _build_codex_environment(binding: Any) -> dict[str, str]:
@@ -2856,6 +4169,17 @@ def _terminalize_live_record(
     warnings = list(_string_list_value(extraction.get("warnings")))
     warnings.append(f"live session terminated as {status}: {reason}")
     extraction["warnings"] = warnings
+    audit_evidence = dict(record.audit_evidence)
+    decision_points = [
+        dict(point) for point in audit_evidence.get("decision_points", [])
+    ]
+    for point in decision_points:
+        if point.get("decision_type") != "dispatch":
+            continue
+        later_outcome = dict(point.get("later_outcome") or {})
+        later_outcome.update({"session_status": status, "exit_reason": reason})
+        point["later_outcome"] = later_outcome
+    audit_evidence["decision_points"] = decision_points
     return replace(
         record,
         status=status,
@@ -2871,6 +4195,7 @@ def _terminalize_live_record(
         },
         extraction=extraction,
         result_proposal=None,
+        audit_evidence=audit_evidence,
     )
 
 
@@ -3137,6 +4462,265 @@ def _collect_workspace_delta(
     return metrics, diff_refs
 
 
+def _extract_opencode_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    metrics: dict[str, Any] = {}
+    extraction: dict[str, Any] = {
+        "warnings": [],
+        "parsed_fields": [],
+        "native_event_stream_observed": False,
+        "native_tool_events": [],
+    }
+    assistant_parts: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            extraction["warnings"].append("opencode_jsonl_line_unparseable")
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            continue
+        extraction["native_event_stream_observed"] = True
+        event_type = event["type"]
+        part = _mapping_value(event.get("part"))
+        if event_type == "text":
+            text = _string_or_none(event.get("text")) or _string_or_none(part.get("text"))
+            if text:
+                assistant_parts.append(text)
+        if event_type == "tool_use":
+            extraction["native_tool_events"].append(
+                {
+                    "event_id": _string_or_none(event.get("tool_call_id"))
+                    or _string_or_none(part.get("callID"))
+                    or f"native-tool-{len(extraction['native_tool_events']) + 1}",
+                    "event_type": event_type,
+                    "tool_name": _string_or_none(event.get("tool_name"))
+                    or _string_or_none(part.get("tool")),
+                }
+            )
+        for value in _mapping_values(event):
+            tokens = _mapping_value(value.get("tokens"))
+            for source, target in (
+                ("input", "input_tokens"),
+                ("output", "output_tokens"),
+                ("reasoning", "reasoning_output_tokens"),
+                ("total", "total_tokens"),
+            ):
+                if isinstance(tokens.get(source), int):
+                    metrics[target] = tokens[source]
+                    extraction["parsed_fields"].append(f"tokens.{source}")
+            cache = _mapping_value(tokens.get("cache"))
+            if isinstance(cache.get("read"), int):
+                metrics["cached_input_tokens"] = cache["read"]
+                extraction["parsed_fields"].append("tokens.cache.read")
+            if isinstance(cache.get("write"), int):
+                metrics["cache_creation_input_tokens"] = cache["write"]
+                extraction["parsed_fields"].append("tokens.cache.write")
+    if "input_tokens" in metrics or "output_tokens" in metrics:
+        metrics.update({"usage_source": "agent_reported", "usage_confidence": "high"})
+    if assistant_parts:
+        text = "".join(assistant_parts)
+        extraction["assistant_text"] = text
+        extraction["parsed_fields"].append("text")
+        if _looks_structured(text.strip()):
+            structured = _extract_structured_output(text.strip(), extracted_status="extracted", contract_name="opencode_run_json_v1")
+            extraction["warnings"].extend(_string_list_value(structured.get("warnings")))
+            extraction["parsed_fields"].extend(_string_list_value(structured.get("parsed_fields")))
+            for field in ("result_status", "review_status", "emitted_events", "artifacts", "verification", "native_log_refs", "mutation_proposal_refs", "control_intents", "context_request"):
+                if field in structured:
+                    extraction[field] = structured[field]
+            for key, value in _mapping_value(structured.get("outcome_metrics")).items():
+                metrics.setdefault(key, value)
+    extraction["parsed_fields"].append("native_tool_events")
+    return metrics, extraction
+
+
+def _mapping_values(value: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        found.append(value)
+        for child in value.values():
+            found.extend(_mapping_values(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_mapping_values(child))
+    return found
+
+
+def _extract_pi_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    metrics: dict[str, Any] = {}
+    extraction: dict[str, Any] = {
+        "warnings": [],
+        "parsed_fields": [],
+        "native_event_stream_observed": False,
+        "native_tool_events": [],
+    }
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            extraction["warnings"].append("pi_jsonl_line_unparseable")
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            continue
+        extraction["native_event_stream_observed"] = True
+        if event["type"] == "session" and isinstance(event.get("id"), str):
+            extraction["native_session_id"] = event["id"]
+        if event["type"] in {"tool_execution_start", "tool_execution_end"}:
+            extraction["native_tool_events"].append(
+                {
+                    "event_id": _string_or_none(event.get("toolCallId"))
+                    or f"native-tool-{len(extraction['native_tool_events']) + 1}",
+                    "event_type": event["type"],
+                    "tool_name": _string_or_none(event.get("toolName")),
+                }
+            )
+        if event["type"] != "message_end":
+            continue
+        message = _mapping_value(event.get("message"))
+        if message.get("role") != "assistant":
+            continue
+        text = "".join(
+            part.get("text", "")
+            for part in _list_value(message.get("content"))
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+        if text:
+            extraction["assistant_text"] = text
+            extraction["parsed_fields"].append("message.content.text")
+        usage = _mapping_value(message.get("usage"))
+        for source, target in (
+            ("input", "input_tokens"),
+            ("output", "output_tokens"),
+            ("cacheRead", "cached_input_tokens"),
+            ("cacheWrite", "cache_creation_input_tokens"),
+            ("totalTokens", "total_tokens"),
+        ):
+            if isinstance(usage.get(source), int):
+                metrics[target] = usage[source]
+                extraction["parsed_fields"].append(f"message.usage.{source}")
+        cost = _mapping_value(usage.get("cost")).get("total")
+        if isinstance(cost, (int, float)):
+            metrics.update({"cost_usd": cost, "cost_source": "agent_reported", "cost_confidence": "high"})
+            extraction["parsed_fields"].append("message.usage.cost.total")
+    if "input_tokens" in metrics or "output_tokens" in metrics:
+        metrics.update({"usage_source": "agent_reported", "usage_confidence": "high"})
+    text = _string_or_none(extraction.get("assistant_text"))
+    if text and _looks_structured(text.strip()):
+        structured = _extract_structured_output(text.strip(), extracted_status="extracted", contract_name="pi_json_v1")
+        extraction["warnings"].extend(_string_list_value(structured.get("warnings")))
+        extraction["parsed_fields"].extend(_string_list_value(structured.get("parsed_fields")))
+        for field in ("result_status", "review_status", "emitted_events", "artifacts", "verification", "native_log_refs", "mutation_proposal_refs", "control_intents", "context_request"):
+            if field in structured:
+                extraction[field] = structured[field]
+        for key, value in _mapping_value(structured.get("outcome_metrics")).items():
+            metrics.setdefault(key, value)
+    extraction["parsed_fields"].append("native_tool_events")
+    return metrics, extraction
+
+
+def _extract_gemini_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    metrics: dict[str, Any] = {}
+    extraction: dict[str, Any] = {
+        "warnings": [],
+        "parsed_fields": [],
+        "native_event_stream_observed": False,
+        "native_tool_events": [],
+    }
+    assistant_parts: list[str] = []
+    provider_reported_models: list[str] = []
+
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            extraction["warnings"].append("gemini_jsonl_line_unparseable")
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event_type = _string_or_none(payload.get("type"))
+        if event_type is None:
+            continue
+        extraction["native_event_stream_observed"] = True
+        session_id = _string_or_none(payload.get("session_id"))
+        if session_id is not None:
+            extraction["native_session_id"] = session_id
+        if event_type == "message" and payload.get("role") == "assistant":
+            content = _string_or_none(payload.get("content"))
+            if content is not None:
+                assistant_parts.append(content)
+        if event_type in {"tool_use", "tool_result"}:
+            extraction["native_tool_events"].append(
+                {
+                    "event_id": _string_or_none(payload.get("tool_id"))
+                    or f"native-tool-{len(extraction['native_tool_events']) + 1}",
+                    "event_type": event_type,
+                    "tool_name": _string_or_none(payload.get("tool_name")),
+                    "native_timestamp": _string_or_none(payload.get("timestamp")),
+                }
+            )
+        if event_type == "error":
+            extraction["warnings"].append("gemini_native_error_event")
+        if event_type != "result":
+            continue
+        stats = _mapping_value(payload.get("stats"))
+        for source, target in (
+            ("input_tokens", "input_tokens"),
+            ("output_tokens", "output_tokens"),
+            ("cached", "cached_input_tokens"),
+            ("total_tokens", "total_tokens"),
+            ("duration_ms", "agent_duration_ms"),
+            ("tool_calls", "agent_tool_calls"),
+        ):
+            if isinstance(stats.get(source), int):
+                metrics[target] = stats[source]
+                extraction["parsed_fields"].append(f"stats.{source}")
+        models = _mapping_value(stats.get("models"))
+        provider_reported_models = sorted(
+            model for model in models if isinstance(model, str) and model
+        )
+
+    if "input_tokens" in metrics or "output_tokens" in metrics:
+        metrics["usage_source"] = "agent_reported"
+        metrics["usage_confidence"] = "high"
+    if assistant_parts:
+        assistant_text = "".join(assistant_parts)
+        extraction["assistant_text"] = assistant_text
+        extraction["parsed_fields"].append("message.assistant.content")
+        if _looks_structured(assistant_text.strip()):
+            structured = _extract_structured_output(
+                assistant_text.strip(),
+                extracted_status="extracted",
+                contract_name="gemini_stream_json_v1",
+            )
+            extraction["warnings"].extend(_string_list_value(structured.get("warnings")))
+            extraction["parsed_fields"].extend(
+                _string_list_value(structured.get("parsed_fields"))
+            )
+            for field in (
+                "result_status",
+                "review_status",
+                "emitted_events",
+                "artifacts",
+                "verification",
+                "native_log_refs",
+                "mutation_proposal_refs",
+                "control_intents",
+                "context_request",
+            ):
+                if field in structured:
+                    extraction[field] = structured[field]
+            for key, value in _mapping_value(structured.get("outcome_metrics")).items():
+                metrics.setdefault(key, value)
+    if provider_reported_models:
+        extraction["provider_reported_models"] = provider_reported_models
+        extraction["parsed_fields"].append("result.stats.models")
+    extraction["parsed_fields"].append("native_tool_events")
+    return metrics, extraction
+
+
 def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
     metrics: dict[str, Any] = {}
     extraction: dict[str, Any] = {"warnings": [], "parsed_fields": []}
@@ -3235,6 +4819,143 @@ def _extract_codex_jsonl(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
                 extraction["outcome_metrics"] = structured_metrics
                 for key, value in structured_metrics.items():
                     metrics.setdefault(key, value)
+    return metrics, extraction
+
+
+def _extract_claude_json(
+    stdout: str,
+    *,
+    contract_name: str = "claude_print_json_v1",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    metrics: dict[str, Any] = {}
+    extraction: dict[str, Any] = {
+        "warnings": [],
+        "parsed_fields": [],
+        "native_event_stream_observed": False,
+        "native_tool_events": [],
+    }
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        extraction["warnings"].append("claude_json_unparseable")
+        return metrics, extraction
+    if not isinstance(payload, dict):
+        extraction["warnings"].append("claude_json_not_object")
+        return metrics, extraction
+
+    usage = _mapping_value(payload.get("usage"))
+    for field in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+        if isinstance(usage.get(field), int):
+            metrics[field] = usage[field]
+            extraction["parsed_fields"].append(f"usage.{field}")
+    if isinstance(payload.get("total_cost_usd"), (int, float)):
+        metrics.update(
+            {
+                "cost_usd": payload["total_cost_usd"],
+                "cost_source": "agent_reported",
+                "cost_confidence": "high",
+            }
+        )
+        extraction["parsed_fields"].append("total_cost_usd")
+    if "input_tokens" in metrics or "output_tokens" in metrics:
+        metrics["usage_source"] = "agent_reported"
+        metrics["usage_confidence"] = "high"
+
+    result = _string_or_none(payload.get("result"))
+    if result is not None:
+        extraction["assistant_text"] = result
+        extraction["parsed_fields"].append("result")
+        if _looks_structured(result.strip()):
+            structured = _extract_structured_output(
+                result.strip(),
+                extracted_status="extracted",
+                contract_name=contract_name,
+            )
+            extraction["warnings"].extend(_string_list_value(structured.get("warnings")))
+            extraction["parsed_fields"].extend(_string_list_value(structured.get("parsed_fields")))
+            for field in (
+                "result_status",
+                "review_status",
+                "emitted_events",
+                "artifacts",
+                "verification",
+                "native_log_refs",
+                "mutation_proposal_refs",
+                "control_intents",
+                "context_request",
+            ):
+                if field in structured:
+                    extraction[field] = structured[field]
+            for key, value in _mapping_value(structured.get("outcome_metrics")).items():
+                metrics.setdefault(key, value)
+    return metrics, extraction
+
+
+def _extract_claude_stream_json(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    result_payload: dict[str, Any] | None = None
+    native_tool_events: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    event_stream_observed = False
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            warnings.append("claude_jsonl_line_unparseable")
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            continue
+        event_stream_observed = True
+        event_type = event["type"]
+        if event_type == "result":
+            result_payload = event
+            continue
+        message = _mapping_value(event.get("message"))
+        content = _list_value(message.get("content"))
+        if event_type == "assistant":
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                native_tool_events.append(
+                    {
+                        "event_id": _string_or_none(block.get("id"))
+                        or f"native-tool-{len(native_tool_events) + 1}",
+                        "event_type": "tool_use",
+                        "tool_name": _string_or_none(block.get("name")),
+                        "source_ref": f"stdout:{line_number}",
+                    }
+                )
+        if event_type == "user":
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                native_tool_events.append(
+                    {
+                        "event_id": _string_or_none(block.get("tool_use_id"))
+                        or f"native-tool-{len(native_tool_events) + 1}",
+                        "event_type": "tool_result",
+                        "tool_name": None,
+                        "is_error": bool(block.get("is_error", False)),
+                        "source_ref": f"stdout:{line_number}",
+                    }
+                )
+    if result_payload is None:
+        metrics: dict[str, Any] = {}
+        extraction: dict[str, Any] = {
+            "warnings": [*warnings, "claude_result_event_missing"],
+            "parsed_fields": ["native_tool_events"],
+            "native_event_stream_observed": event_stream_observed,
+            "native_tool_events": native_tool_events,
+        }
+        return metrics, extraction
+    metrics, extraction = _extract_claude_json(
+        json.dumps(result_payload), contract_name="claude_stream_json_v1"
+    )
+    extraction["warnings"] = [*warnings, *_string_list_value(extraction.get("warnings"))]
+    extraction["native_event_stream_observed"] = event_stream_observed
+    extraction["native_tool_events"] = native_tool_events
+    extraction["parsed_fields"].append("native_tool_events")
     return metrics, extraction
 
 

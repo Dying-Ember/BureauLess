@@ -1,194 +1,116 @@
 # Documentation Map
 
-The documentation is organized by decision level so future work can find the
-right context without rereading chat history.
+This directory separates stable contracts, current plans, dated evidence, and
+historical decisions. Do not use the newest-looking document when a more
+authoritative layer exists.
 
-## Roadmap
+## Authority Order
 
-Use this path for implementation order and product/runtime sequencing.
+| Layer | Answers | Update rule |
+| --- | --- | --- |
+| Source, tests, and immutable run artifacts | What actually happened? | Never broaden a claim beyond reproducible evidence. |
+| `protocol/` | What does BureauLess promise and validate now? | Update with shipped behavior. |
+| `audits/` | What was observed on a named date/version/route? | Append or supersede; preserve provenance. |
+| `roadmap/` and `tasks/` | What is current or next? | Keep status aligned with implementation. |
+| `adrs/` | What decision was accepted? | Preserve; supersede with another ADR. |
+| `rfcs/` | What design was proposed and discussed? | Keep as design history after acceptance. |
+| `architecture/` | Why is the system shaped this way? | Update only when long-lived reasoning changes. |
 
-- [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md): project
-  roadmap that keeps the harness/runtime line and the workbench/UI line separate.
+For Agent compatibility, the live machine-readable view is authoritative over
+prose summaries:
 
-## Audits
+```bash
+uv run bureauless agent matrix --evidence
+uv run bureauless audit observations --workspace /path/to/repository
+```
 
-Use this path for evidence-backed differences between documented capability
-claims and shipped behavior. Audits route remediation into roadmaps, task lists,
-RFCs, and ADRs without replacing any of them.
+## Start by Goal
 
-- [`audits/README.md`](audits/README.md): gap-analysis format, severity,
-  completion vocabulary, and processing workflow.
-- [`audits/2026-07-02-runtime-execution-gap-analysis.md`](audits/2026-07-02-runtime-execution-gap-analysis.md):
-  closed real-agent execution-spine audit; REX-001 was completed by Runtime M4
-  and ADR-004.
-- [`audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md):
-  confirmed implementation-debt audit for follow-up cleanup under RFC-007.
+| Goal | Read first | Then |
+| --- | --- | --- |
+| Run or compare coding Agents | [`protocol/agent_provider_registry.md`](protocol/agent_provider_registry.md) | Latest compatibility audit below |
+| Change dispatch, evidence, ledger, or replay | [`protocol/harness_protocol.md`](protocol/harness_protocol.md) | Runtime task index and relevant ADR |
+| Understand the Agent/runtime ownership line | [`rfcs/007-control-runtime-boundary.md`](rfcs/007-control-runtime-boundary.md) | [`adrs/007-control-runtime-boundary/README.md`](adrs/007-control-runtime-boundary/README.md) |
+| Work on current priorities | [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md) | Relevant task index |
+| Investigate a claimed capability gap | [`audits/README.md`](audits/README.md) | Relevant dated audit |
+| Change the Workbench | [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md) | Matching Workbench milestone |
+
+## Stable Protocols
+
+- [`protocol/agent_provider_registry.md`](protocol/agent_provider_registry.md):
+  Agent, Provider route, endpoint family, wire API, model addressing,
+  credentials, adapter isolation, telemetry, evidence, and comparison contract.
+- [`protocol/harness_protocol.md`](protocol/harness_protocol.md): mission,
+  workflow, ledger, assignment, result, event, gate, context, mutation,
+  telemetry, lifecycle, and acceptance invariants.
+- [`protocol/workflow_selection_policy.md`](protocol/workflow_selection_policy.md):
+  deterministic rules for choosing the smallest valid workflow shape.
+- [`protocol/advisor_policy.md`](protocol/advisor_policy.md): budget-gated
+  advisor policy and first-run heuristics.
+- [`protocol/workflow_examples.md`](protocol/workflow_examples.md): canonical
+  workflow examples used by implementation and tests.
+
+## Dated Evidence
+
+- [`audits/2026-07-15-agent-endpoint-capability-matrix.md`](audits/2026-07-15-agent-endpoint-capability-matrix.md):
+  latest isolated Agent×endpoint mutation and telemetry evidence.
+- [`audits/2026-07-13-agent-provider-compatibility.md`](audits/2026-07-13-agent-provider-compatibility.md):
+  initial Codex, Claude Code, Gemini, OpenCode, and Pi compatibility record.
 - [`audits/2026-07-11-live-demo-control-plane-bootstrap-gap.md`](audits/2026-07-11-live-demo-control-plane-bootstrap-gap.md):
-  verified remediation record for control-plane bootstrap in the real live demo.
+  verified provider-backed control-plane bootstrap remediation.
+- [`audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md):
+  RFC-007 implementation-debt audit.
+- [`audits/2026-07-02-runtime-execution-gap-analysis.md`](audits/2026-07-02-runtime-execution-gap-analysis.md):
+  closed real-Agent execution-spine audit.
 
-## Tasks
+[`audits/README.md`](audits/README.md) defines the difference between a gap
+analysis and a compatibility/verification record, plus evidence and closure
+rules.
 
-Use this path for concrete implementation task cards, milestone indexes, and
-acceptance criteria.
+## Delivery State
 
+- [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md): current
+  position, priorities, milestone history, and non-goals.
 - [`tasks/runtime_harness_tasklist.md`](tasks/runtime_harness_tasklist.md):
   runtime/harness milestone index.
-- [`tasks/runtime_harness_milestone_1_tasklist.md`](tasks/runtime_harness_milestone_1_tasklist.md):
-  runtime/harness foundation milestone.
-- [`tasks/runtime_harness_milestone_2_tasklist.md`](tasks/runtime_harness_milestone_2_tasklist.md):
-  completed runtime/harness milestone for real-agent execution loop hardening.
-- [`tasks/runtime_harness_milestone_2_5_tasklist.md`](tasks/runtime_harness_milestone_2_5_tasklist.md):
-  completed runtime/harness bridge milestone for controlled workflow mutation.
-- [`tasks/runtime_harness_milestone_3_tasklist.md`](tasks/runtime_harness_milestone_3_tasklist.md):
-  completed artifact/protocol milestone for node outcomes, bounded context
-  delivery, orchestrator decision artifacts, and advisor outcome learning.
-- [`tasks/runtime_harness_milestone_3_5_tasklist.md`](tasks/runtime_harness_milestone_3_5_tasklist.md):
-  completed remediation milestone that makes M2/M3 artifacts authoritative in
-  the real-agent execution path.
-- [`tasks/runtime_harness_milestone_4_tasklist.md`](tasks/runtime_harness_milestone_4_tasklist.md):
-  completed runtime milestone for universal inert mutation intents, trusted
-  proposal intake, retry control, workflow versions, linear temporal replay,
-  and history APIs.
-- [`tasks/runtime_harness_milestone_5_tasklist.md`](tasks/runtime_harness_milestone_5_tasklist.md):
-  completed runtime milestone for provider-side telemetry capture, usage
-  attribution, and backtest-ready metrics on the maintained OpenAI-compatible
-  path, with generic multi-agent telemetry still explicitly out of scope.
-- [`tasks/control_runtime_boundary_follow_up_tasklist.md`](tasks/control_runtime_boundary_follow_up_tasklist.md):
-  planned engineering-debt follow-up for RFC-007; it is not a delivery
-  milestone.
-- [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): workbench
+- [`tasks/workbench_tasklist.md`](tasks/workbench_tasklist.md): Workbench
   milestone index.
-- [`tasks/workbench_milestone_1_tasklist.md`](tasks/workbench_milestone_1_tasklist.md):
-  completed planning-DAG workbench milestone.
-- [`tasks/workbench_milestone_2_tasklist.md`](tasks/workbench_milestone_2_tasklist.md):
-  completed runtime console milestone for workflow, replay, gatekeeper, and
-  mutation inspection.
-- [`tasks/workbench_milestone_3_tasklist.md`](tasks/workbench_milestone_3_tasklist.md):
-  completed runtime-source loading and planning-action clarity milestone.
-- [`tasks/workbench_milestone_4_tasklist.md`](tasks/workbench_milestone_4_tasklist.md):
-  completed milestone for visual inspection of Runtime Harness Milestone 3
-  decisions, outcomes, context delivery, telemetry, and dispatch artifacts.
-- [`tasks/workbench_milestone_5_tasklist.md`](tasks/workbench_milestone_5_tasklist.md):
-  completed milestone for read-only Runtime Harness Milestone 4 timeline,
-  historical snapshot, version-selection, and diff inspection.
-- [`tasks/workbench_milestone_6_tasklist.md`](tasks/workbench_milestone_6_tasklist.md):
-  completed milestone for validated runtime operator actions including context
-  resolution, dispatch/launch controls, and acceptance-spine actions.
-- [`tasks/workbench_milestone_7_tasklist.md`](tasks/workbench_milestone_7_tasklist.md):
-  completed milestone for guided runtime bootstrap, manifest/run-bundle
-  navigation, and artifact-readiness visibility.
+- [`tasks/control_runtime_boundary_follow_up_tasklist.md`](tasks/control_runtime_boundary_follow_up_tasklist.md):
+  accepted RFC-007 cleanup debt.
 - [`tasks/engineering_boundary_refactor_tasklist.md`](tasks/engineering_boundary_refactor_tasklist.md):
-  RFC-003 implementation task list for shared errors, CLI split, application
-  services, and protocol exports.
+  implemented package-boundary refactor history.
 
-## RFCs
+Individual milestone task lists remain under `tasks/`; start from an index
+instead of guessing which historical milestone is current.
 
-Use this path for design proposals and their decision history. Implemented
-behavior is promoted into `protocol/`; the RFC remains as provenance.
+## Releases
 
-- [`rfcs/001-controlled-workflow-mutation.md`](rfcs/001-controlled-workflow-mutation.md):
-  RFC-001, implemented Milestone 2.5 design history for controlled workflow
-  mutation.
-- [`rfcs/002-ledger-evidence-and-progressive-context.md`](rfcs/002-ledger-evidence-and-progressive-context.md):
-  RFC-002, implemented design for separating native evidence, node outcomes,
-  canonical ledger facts, progressive context disclosure, and context-policy
-  feedback.
-- [`rfcs/003-engineering-boundary-refactor.md`](rfcs/003-engineering-boundary-refactor.md):
-  RFC-003, implemented engineering-boundary refactor for shared errors, CLI
-  split, application services, and narrower protocol exports.
-- [`rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](rfcs/004-temporal-replay-mutation-intake-and-retry-control.md):
-  RFC-004, implemented Runtime Milestone 4 design for mutation intent intake,
-  bounded retry control, workflow versions, and linear temporal replay.
-- [`rfcs/005-authoritative-result-acceptance-spine.md`](rfcs/005-authoritative-result-acceptance-spine.md):
-  RFC-005, implemented Runtime Milestone 3.5 design for staged result intake and
-  one authoritative review/outcome/replay acceptance chain.
-- [`rfcs/006-bounded-context-continuation.md`](rfcs/006-bounded-context-continuation.md):
-  RFC-006, implemented Runtime Milestone 3.5 bounded context continuation design.
-- [`rfcs/007-control-runtime-boundary.md`](rfcs/007-control-runtime-boundary.md):
-  RFC-007, accepted boundary for harness-owned control runtime versus
-  external-agent runtime ownership; its implementation debt is tracked by the
-  follow-up task list.
+- [`releases/v0.2.0.md`](releases/v0.2.0.md): cross-agent audit release notes,
+  implemented route summary, evidence boundary, demo, and known limitations.
 
-## ADRs
+## Decisions and Design History
 
-Use this path for decision records that resolve an RFC into a stable archived
-choice.
-
-- [`adrs/README.md`](adrs/README.md): ADR archive rules and RFC/ADR linking
-  model.
-- [`adrs/001-controlled-workflow-mutation/README.md`](adrs/001-controlled-workflow-mutation/README.md):
-  ADR-001 archive for closed GitHub issue #1 and controlled workflow mutation.
-- [`adrs/002-ledger-evidence-and-progressive-context/README.md`](adrs/002-ledger-evidence-and-progressive-context/README.md):
-  ADR-002 archive for ledger evidence and progressive context.
-- [`adrs/003-engineering-boundary-refactor/README.md`](adrs/003-engineering-boundary-refactor/README.md):
-  ADR-003 archive index for the engineering boundary refactor RFC.
-- [`adrs/004-temporal-replay-mutation-intake-and-retry-control/README.md`](adrs/004-temporal-replay-mutation-intake-and-retry-control/README.md):
-  ADR-004 accepted mutation intake, retry, ledger v3, and temporal replay design.
-- [`adrs/005-authoritative-result-acceptance-spine/README.md`](adrs/005-authoritative-result-acceptance-spine/README.md):
-  ADR-005 accepted result, review, outcome, and strict ledger acceptance design.
-- [`adrs/006-bounded-context-continuation/README.md`](adrs/006-bounded-context-continuation/README.md):
-  ADR-006 accepted bounded context continuation design.
-- [`adrs/007-control-runtime-boundary/README.md`](adrs/007-control-runtime-boundary/README.md):
-  ADR-007 archive index for the control runtime boundary RFC.
-
-## Architecture
-
-Use this path for design principles, tradeoffs, and long-lived reasoning.
-
+- [`rfcs/README.md`](rfcs/README.md): proposal index and RFC lifecycle.
+- [`adrs/README.md`](adrs/README.md): accepted-decision archive and
+  supersession rules.
+- [`architecture/context_economy.md`](architecture/context_economy.md): token
+  economy and coordination-overhead principles.
 - [`architecture/research_and_design_notes.md`](architecture/research_and_design_notes.md):
-  external references and why they matter for this project.
+  external research and long-lived design rationale.
 - [`architecture/orchestrator_system_prompt.md`](architecture/orchestrator_system_prompt.md):
   orchestrator control-plane prompt draft.
-- [`architecture/context_economy.md`](architecture/context_economy.md):
-  token economy and coordination overhead rules.
 
-## Protocol
+## Source Ownership
 
-Use this path for machine-readable contracts and validation targets.
+- `src/bureauless/agents/`: Agent registry, route evidence, and doctor checks.
+- `src/bureauless/protocol/`: protocol loaders, validation, artifact integrity,
+  assignment export, and result intake.
+- `src/bureauless/runtime/`: sessions, replay, gatekeeper, metrics, and evidence.
+- `src/bureauless/cli/`: operator commands.
+- `src/bureauless/api/`: local Workbench API.
+- `web/` and `electron/`: browser and desktop operator surfaces.
 
-- [`protocol/harness_protocol.md`](protocol/harness_protocol.md): mission,
-  ledger, workflow, assignment, report, event, gate, broadcast, artifact,
-  failure lifecycle, and invariant protocol.
-- [`protocol/workflow_selection_policy.md`](protocol/workflow_selection_policy.md):
-  deterministic routing rules for choosing the simplest valid execution mode.
-- [`protocol/advisor_policy.md`](protocol/advisor_policy.md): lazy advisor
-  gating policy and first-run heuristics.
-- [`protocol/workflow_examples.md`](protocol/workflow_examples.md): canonical
-  workflow examples for future implementation and tests.
-
-## Reading Order
-
-For a new implementation session:
-
-1. Read [`roadmap/development_roadmap.md`](roadmap/development_roadmap.md).
-2. Read any open relevant audit in [`audits/`](audits/) when the work touches a
-   known capability gap.
-3. Read the relevant protocol file for the runtime feature being changed.
-4. Read any relevant RFC in [`rfcs/`](rfcs/) if the work touches a proposed
-   but not yet accepted design.
-5. Read the relevant milestone index and task list in [`tasks/`](tasks/).
-6. Read the relevant architecture note only when the design rationale matters.
-
-## Source Layout
-
-The runtime/harness implementation follows the same boundary split as the
-documentation, but not a literal one-to-one directory mirror:
-
-- `src/bureauless/protocol/`: runtime protocol loaders, validators, artifact
-  integrity, assignment export, result import, and budget snapshot logic.
-- `src/bureauless/runtime/`: replay, gatekeeper, session wrapper, and outcome
-  metrics.
-- `src/bureauless/agents/`: external agent registry and doctor checks.
-- `src/bureauless/api/`: FastAPI workbench API.
-- `src/bureauless/cli/`: CLI entrypoint plus command modules for legacy DAG,
-  runtime, exchange, agent, session, and metrics operations.
-- `src/bureauless/core.py`: legacy DAG/run-record compatibility layer.
-
-When changing runtime behavior, update both the relevant `docs/protocol/*` file
-and the matching source package so future sessions do not have to reconstruct
-the boundary from chat history.
-
-When an implementation review discovers that a completed milestone claim is
-broader than shipped behavior, follow [`audits/README.md`](audits/README.md):
-preserve the historical task record, add a dated correction, and route every
-confirmed gap to an owned task or explicit roadmap deferral.
+When behavior changes, update source/tests and the matching stable protocol in
+the same change. Add a dated audit when the claim depends on a specific Agent
+version or endpoint instance. Do not rewrite an RFC, ADR, or completed task list
+to make old history look current.

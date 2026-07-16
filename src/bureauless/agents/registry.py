@@ -26,6 +26,12 @@ class AgentSpec:
     persistence_markers: list[str]
     cancellation: str
     metrics_capability: dict[str, str]
+    session_adapter: str | None
+    output_contract: str
+    permission_boundary: str
+    verification_levels: list[str]
+    capability_evidence: dict[str, str]
+    comparison_eligibility: dict[str, str]
 
     def to_dict(self) -> dict:
         return {
@@ -34,8 +40,21 @@ class AgentSpec:
             "kind": self.kind,
             "help_args": self.help_args,
             "version_args": self.version_args,
+            "non_interactive_markers": self.non_interactive_markers,
+            "model_override_markers": self.model_override_markers,
+            "provider_override_markers": self.provider_override_markers,
+            "config_isolation_markers": self.config_isolation_markers,
+            "working_directory_markers": self.working_directory_markers,
+            "output_stream_markers": self.output_stream_markers,
+            "persistence_markers": self.persistence_markers,
             "cancellation": self.cancellation,
             "metrics_capability": self.metrics_capability,
+            "session_adapter": self.session_adapter,
+            "output_contract": self.output_contract,
+            "permission_boundary": self.permission_boundary,
+            "verification_levels": self.verification_levels,
+            "capability_evidence": self.capability_evidence,
+            "comparison_eligibility": self.comparison_eligibility,
         }
 
 
@@ -47,6 +66,8 @@ class ProviderProfile:
     requires_base_url: bool
     supports_base_url_override: bool
     default_wire_api: str | None = None
+    route_kind: str = "custom_http"
+    endpoint_family: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +77,8 @@ class ProviderProfile:
             "requires_base_url": self.requires_base_url,
             "supports_base_url_override": self.supports_base_url_override,
             "default_wire_api": self.default_wire_api,
+            "route_kind": self.route_kind,
+            "endpoint_family": self.endpoint_family,
         }
 
 
@@ -157,6 +180,76 @@ class AgentCompatibility:
 
 
 @dataclass(frozen=True)
+class AgentRoute:
+    agent_id: str
+    state: str
+    session_adapter: str | None
+    output_contract: str
+    permission_boundary: str
+    target_provider: str | None
+    route_kind: str | None
+    endpoint_family: str | None
+    wire_api: str | None
+    runtime_contract_support: str
+    adapter_support: str
+    tested_route_support: str
+    verification_levels: list[str]
+    audit_ref: str | None
+    verified_at: str | None
+    verified_runtime_version: str | None
+    capability_evidence: dict[str, str]
+    comparison_eligibility: dict[str, str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "state": self.state,
+            "session_adapter": self.session_adapter,
+            "output_contract": self.output_contract,
+            "permission_boundary": self.permission_boundary,
+            "target_provider": self.target_provider,
+            "route_kind": self.route_kind,
+            "endpoint_family": self.endpoint_family,
+            "wire_api": self.wire_api,
+            "runtime_contract_support": self.runtime_contract_support,
+            "adapter_support": self.adapter_support,
+            "tested_route_support": self.tested_route_support,
+            "verification_levels": self.verification_levels,
+            "audit_ref": self.audit_ref,
+            "verified_at": self.verified_at,
+            "verified_runtime_version": self.verified_runtime_version,
+            "capability_evidence": self.capability_evidence,
+            "comparison_eligibility": self.comparison_eligibility,
+        }
+
+
+@dataclass(frozen=True)
+class AgentProviderRouteEvidence:
+    agent_id: str
+    provider_id: str
+    runtime_contract_support: str
+    adapter_support: str
+    tested_route_support: str
+    verification_levels: list[str]
+    audit_ref: str | None = None
+    verified_at: str | None = None
+    verified_runtime_version: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "provider_id": self.provider_id,
+            "runtime_contract_support": self.runtime_contract_support,
+            "adapter_support": self.adapter_support,
+            "tested_route_support": self.tested_route_support,
+            "verification_levels": self.verification_levels,
+            "audit_ref": self.audit_ref,
+            "verified_at": self.verified_at,
+            "verified_runtime_version": self.verified_runtime_version,
+        }
+
+
+@dataclass(frozen=True)
 class DispatchReadiness:
     agent_id: str
     readiness_state: str
@@ -209,6 +302,18 @@ AGENT_SPECS: dict[str, AgentSpec] = {
             "cost_usage": "optional",
             "progress_events": "native_jsonl",
         },
+        session_adapter="codex_exec_v1",
+        output_contract="jsonl",
+        permission_boundary="native_sandbox",
+        verification_levels=["static_contract", "fixture_tested"],
+        capability_evidence={},
+        comparison_eligibility={
+            "latency": "comparable",
+            "file_delta": "comparable",
+            "token_usage": "conditional",
+            "monetary_cost": "conditional",
+            "tool_timeline": "comparable",
+        },
     ),
     "claude-code": AgentSpec(
         agent_id="claude-code",
@@ -230,7 +335,24 @@ AGENT_SPECS: dict[str, AgentSpec] = {
             "changed_files": "required",
             "token_usage": "optional",
             "cost_usage": "optional",
-            "progress_events": "unintegrated",
+            "progress_events": "native_jsonl",
+        },
+        session_adapter="claude_stream_json_v1",
+        output_contract="jsonl",
+        permission_boundary="claude_permission_mode",
+        verification_levels=["static_contract", "fixture_tested", "live_text_probe"],
+        capability_evidence={
+            "child_only_route_injection": "verified",
+            "clean_stateless_startup": "verified",
+            "depends_on_existing_global_state": "not_observed",
+            "native_tool_timeline": "verified",
+        },
+        comparison_eligibility={
+            "latency": "comparable",
+            "file_delta": "comparable",
+            "token_usage": "conditional",
+            "monetary_cost": "conditional",
+            "tool_timeline": "comparable",
         },
     ),
     "opencode": AgentSpec(
@@ -253,7 +375,89 @@ AGENT_SPECS: dict[str, AgentSpec] = {
             "changed_files": "required",
             "token_usage": "optional",
             "cost_usage": "optional",
-            "progress_events": "unintegrated",
+            "progress_events": "native_jsonl",
+        },
+        session_adapter="opencode_run_json_v1",
+        output_contract="jsonl",
+        permission_boundary="opencode_permission_config",
+        verification_levels=["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"],
+        capability_evidence={},
+        comparison_eligibility={
+            "latency": "comparable",
+            "file_delta": "comparable",
+            "token_usage": "conditional",
+            "monetary_cost": "not_comparable",
+            "tool_timeline": "comparable",
+        },
+    ),
+    "pi": AgentSpec(
+        agent_id="pi",
+        binary="pi",
+        kind="local_agent_cli",
+        help_args=["--help"],
+        version_args=["--version"],
+        non_interactive_markers=["--print", "--mode"],
+        model_override_markers=["--model"],
+        provider_override_markers=["--provider", "--api-key"],
+        config_isolation_markers=["--no-extensions", "--no-skills", "--no-context-files", "--offline"],
+        working_directory_markers=[],
+        output_stream_markers=["--mode"],
+        persistence_markers=["--no-session", "--session", "--fork"],
+        cancellation="process_kill",
+        metrics_capability={
+            "wall_time": "required",
+            "final_status": "required",
+            "changed_files": "required",
+            "token_usage": "optional",
+            "cost_usage": "optional",
+            "progress_events": "native_jsonl",
+        },
+        session_adapter="pi_json_v1",
+        output_contract="jsonl",
+        permission_boundary="pi_tool_allow_deny",
+        verification_levels=["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"],
+        capability_evidence={},
+        comparison_eligibility={
+            "latency": "comparable",
+            "file_delta": "comparable",
+            "token_usage": "conditional",
+            "monetary_cost": "conditional",
+            "tool_timeline": "comparable",
+        },
+    ),
+    "gemini": AgentSpec(
+        agent_id="gemini",
+        binary="gemini",
+        kind="local_agent_cli",
+        help_args=["--help"],
+        version_args=["--version"],
+        non_interactive_markers=["--prompt"],
+        model_override_markers=["--model"],
+        provider_override_markers=[],
+        config_isolation_markers=["--skip-trust", "--extensions"],
+        working_directory_markers=[],
+        output_stream_markers=["--output-format", "stream-json"],
+        persistence_markers=["--resume", "--session-file", "--session-id"],
+        cancellation="process_kill",
+        metrics_capability={
+            "wall_time": "required",
+            "final_status": "required",
+            "changed_files": "required",
+            "token_usage": "optional",
+            "cost_usage": "optional",
+            "progress_events": "native_jsonl",
+        },
+        session_adapter="gemini_stream_json_v1",
+        output_contract="jsonl",
+        permission_boundary="gemini_approval_mode",
+        verification_levels=["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"],
+        capability_evidence={},
+        comparison_eligibility={
+            "latency": "comparable",
+            "file_delta": "comparable",
+            "token_usage": "conditional",
+            "monetary_cost": "not_comparable",
+            "tool_timeline": "comparable",
         },
     ),
 }
@@ -265,6 +469,8 @@ PROVIDER_PROFILES: dict[str, ProviderProfile] = {
         default_api_key_env="OPENAI_API_KEY",
         requires_base_url=False,
         supports_base_url_override=True,
+        route_kind="agent_native",
+        endpoint_family="openai",
     ),
     "openai-compatible": ProviderProfile(
         provider_id="openai-compatible",
@@ -273,11 +479,57 @@ PROVIDER_PROFILES: dict[str, ProviderProfile] = {
         requires_base_url=True,
         supports_base_url_override=True,
         default_wire_api="responses",
+        endpoint_family="openai",
+    ),
+    "openai-chat-compatible": ProviderProfile(
+        provider_id="openai-chat-compatible",
+        kind="openai_chat_completions_compatible",
+        default_api_key_env=None,
+        requires_base_url=True,
+        supports_base_url_override=True,
+        default_wire_api="chat_completions",
+        endpoint_family="openai",
+    ),
+    "anthropic-compatible": ProviderProfile(
+        provider_id="anthropic-compatible",
+        kind="anthropic_messages_compatible",
+        default_api_key_env="ANTHROPIC_API_KEY",
+        requires_base_url=True,
+        supports_base_url_override=True,
+        default_wire_api="messages",
+        endpoint_family="anthropic",
+    ),
+    "gemini-compatible": ProviderProfile(
+        provider_id="gemini-compatible",
+        kind="gemini_generate_content",
+        default_api_key_env="GEMINI_API_KEY",
+        requires_base_url=True,
+        supports_base_url_override=True,
+        default_wire_api="generateContent",
+        endpoint_family="gemini",
     ),
 }
 
+AGENT_PROVIDER_ROUTE_EVIDENCE: dict[tuple[str, str], AgentProviderRouteEvidence] = {
+    ("codex-cli", "openai"): AgentProviderRouteEvidence("codex-cli", "openai", "supported", "implemented", "not_tested", ["static_contract", "fixture_tested"]),
+    ("codex-cli", "openai-compatible"): AgentProviderRouteEvidence("codex-cli", "openai-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.144.4"),
+    ("claude-code", "anthropic-compatible"): AgentProviderRouteEvidence("claude-code", "anthropic-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_text_probe", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "2.1.202"),
+    ("gemini", "gemini-compatible"): AgentProviderRouteEvidence("gemini", "gemini-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "0.50.0"),
+    ("opencode", "openai-chat-compatible"): AgentProviderRouteEvidence("opencode", "openai-chat-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "1.17.20"),
+    ("opencode", "anthropic-compatible"): AgentProviderRouteEvidence("opencode", "anthropic-compatible", "observed", "not_implemented", "verified", ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "1.17.18"),
+    ("opencode", "openai-compatible"): AgentProviderRouteEvidence("opencode", "openai-compatible", "observed", "not_implemented", "unavailable", ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "1.17.18"),
+    ("pi", "anthropic-compatible"): AgentProviderRouteEvidence("pi", "anthropic-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_text_probe", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.80.6"),
+    ("pi", "openai-chat-compatible"): AgentProviderRouteEvidence("pi", "openai-chat-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.80.6"),
+    ("pi", "openai-compatible"): AgentProviderRouteEvidence("pi", "openai-compatible", "observed", "not_implemented", "unavailable", ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "0.80.6"),
+}
+
 AGENT_PROVIDER_BINDINGS: dict[str, set[str]] = {
-    "codex-cli": {"openai", "openai-compatible"},
+    agent_id: {
+        provider_id
+        for (bound_agent_id, provider_id), evidence in AGENT_PROVIDER_ROUTE_EVIDENCE.items()
+        if bound_agent_id == agent_id and evidence.adapter_support == "implemented"
+    }
+    for agent_id in AGENT_SPECS
 }
 
 
@@ -285,11 +537,59 @@ def list_agent_specs() -> list[AgentSpec]:
     return [AGENT_SPECS[agent_id] for agent_id in sorted(AGENT_SPECS)]
 
 
+def list_agent_route_evidence(agent_id: str | None = None) -> list[AgentRoute]:
+    if agent_id is not None:
+        get_agent_spec(agent_id)
+    return [
+        route_agent(bound_agent_id, provider_id)
+        for bound_agent_id, provider_id in sorted(AGENT_PROVIDER_ROUTE_EVIDENCE)
+        if agent_id is None or bound_agent_id == agent_id
+    ]
+
+
 def get_agent_spec(agent_id: str) -> AgentSpec:
     try:
         return AGENT_SPECS[agent_id]
     except KeyError as exc:
         raise ProtocolError(f"Unknown agent id: {agent_id}") from exc
+
+
+def route_agent(agent_id: str, target_provider: str | None = None) -> AgentRoute:
+    spec = get_agent_spec(agent_id)
+    evidence = AGENT_PROVIDER_ROUTE_EVIDENCE.get((agent_id, target_provider))
+    profile = PROVIDER_PROFILES.get(target_provider) if target_provider else None
+    adapter_support = evidence.adapter_support if evidence else ("implemented" if spec.session_adapter else "not_implemented")
+    return AgentRoute(
+        agent_id=agent_id,
+        state="dispatchable" if adapter_support == "implemented" else "registration_only",
+        session_adapter=spec.session_adapter if adapter_support == "implemented" else None,
+        output_contract=spec.output_contract,
+        permission_boundary=spec.permission_boundary,
+        target_provider=target_provider,
+        route_kind=profile.route_kind if profile else None,
+        endpoint_family=profile.endpoint_family if profile else None,
+        wire_api=profile.default_wire_api if profile else None,
+        runtime_contract_support=(
+            evidence.runtime_contract_support
+            if evidence
+            else "supported" if target_provider is None and spec.session_adapter else "unknown"
+        ),
+        adapter_support=adapter_support,
+        tested_route_support=evidence.tested_route_support if evidence else "not_applicable" if target_provider is None else "not_tested",
+        verification_levels=list(evidence.verification_levels if evidence else spec.verification_levels),
+        audit_ref=evidence.audit_ref if evidence else None,
+        verified_at=evidence.verified_at if evidence else None,
+        verified_runtime_version=evidence.verified_runtime_version if evidence else None,
+        capability_evidence=dict(spec.capability_evidence),
+        comparison_eligibility=dict(spec.comparison_eligibility),
+    )
+
+
+def session_adapter_for(agent_id: str) -> str:
+    route = route_agent(agent_id)
+    if route.session_adapter is None:
+        raise ProtocolError(f"Agent is registered but has no session adapter: {agent_id}")
+    return route.session_adapter
 
 
 def list_provider_profiles() -> list[ProviderProfile]:
@@ -334,27 +634,29 @@ def resolve_agent_binding(
     api_key_env = provider_api_key_env.strip() if isinstance(provider_api_key_env, str) else None
     if api_key_env is None:
         api_key_env = profile.default_api_key_env
-    if target_provider == "openai-compatible" and not api_key_env:
-        raise ProtocolError("Provider 'openai-compatible' requires provider_api_key_env")
+    if target_provider in {"openai-compatible", "openai-chat-compatible"} and not api_key_env:
+        raise ProtocolError(f"Provider {target_provider!r} requires provider_api_key_env")
 
     wire_api = provider_wire_api.strip() if isinstance(provider_wire_api, str) else None
     if wire_api is None:
         wire_api = profile.default_wire_api
 
-    config_overrides: dict[str, Any] = {"model_provider": "openai"}
-    if target_provider == "openai":
-        if base_url:
-            config_overrides["openai_base_url"] = base_url
-    else:
-        custom_provider_id = "bureauless"
-        config_overrides = {
-            "model_provider": custom_provider_id,
-            f"model_providers.{custom_provider_id}.name": custom_provider_id,
-            f"model_providers.{custom_provider_id}.base_url": base_url,
-            f"model_providers.{custom_provider_id}.requires_openai_auth": True,
-        }
-        if wire_api:
-            config_overrides[f"model_providers.{custom_provider_id}.wire_api"] = wire_api
+    config_overrides: dict[str, Any] = {}
+    if agent_id == "codex-cli":
+        if target_provider == "openai":
+            config_overrides = {"model_provider": "openai"}
+            if base_url:
+                config_overrides["openai_base_url"] = base_url
+        else:
+            custom_provider_id = "bureauless"
+            config_overrides = {
+                "model_provider": custom_provider_id,
+                f"model_providers.{custom_provider_id}.name": custom_provider_id,
+                f"model_providers.{custom_provider_id}.base_url": base_url,
+                f"model_providers.{custom_provider_id}.requires_openai_auth": True,
+            }
+            if wire_api:
+                config_overrides[f"model_providers.{custom_provider_id}.wire_api"] = wire_api
 
     return AgentBinding(
         agent_id=agent_id,
@@ -485,9 +787,17 @@ def assess_agent_compatibility(
     capabilities = {
         "non_interactive_execution": _check_level(checks["non_interactive"]),
         "model_override": _check_level(checks["model_override"]),
-        "provider_override": _check_level(checks["provider_override"]),
+        "provider_override": _check_level(
+            checks["provider_override"],
+            fallback="strong"
+            if not spec.provider_override_markers and AGENT_PROVIDER_BINDINGS.get(spec.agent_id)
+            else None,
+        ),
         "config_isolation": _check_level(checks["config_isolation"]),
-        "working_directory_control": _check_level(checks["working_directory"]),
+        "working_directory_control": _check_level(
+            checks["working_directory"],
+            fallback="strong" if not spec.working_directory_markers else None,
+        ),
         "output_capture": _check_level(checks["output_stream"], fallback="weak"),
         "timeout_control": "strong" if doctor.binary_path else "none",
         "cancellation_control": _cancellation_level(spec, doctor),
@@ -608,7 +918,7 @@ def _check_level(check: DoctorCheck, fallback: str | None = None) -> str:
 def _cancellation_level(spec: AgentSpec, doctor: DoctorResult) -> str:
     if doctor.binary_path is None:
         return "none"
-    if spec.cancellation == "process_kill" and spec.agent_id == "codex-cli":
+    if spec.cancellation == "process_kill":
         return "strong"
     if spec.cancellation:
         return "weak"

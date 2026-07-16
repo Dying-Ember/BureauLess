@@ -32,7 +32,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     session_run_parser.add_argument("dispatch_packet")
     session_run_parser.add_argument("--ledger")
     session_run_parser.add_argument("--run-bundle")
-    session_run_parser.add_argument("--agent", required=True, choices=["fake", "shell-dummy", "codex-cli"])
+    session_run_parser.add_argument("--agent", required=True)
     session_run_parser.add_argument("--workdir", default=".")
     session_run_parser.add_argument("--timeout-seconds", type=float, default=30.0)
     session_run_parser.add_argument("--isolation-mode", choices=["copy", "worktree"], default="copy")

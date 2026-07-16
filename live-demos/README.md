@@ -24,6 +24,13 @@
 - 默认不把敏感信息写进版本库。
 - 默认不把嘈杂运行产物纳入 git。
 
+## 维护中的 Demo
+
+- [`2026-07-16-agent-audit-v0.2.0/README.md`](2026-07-16-agent-audit-v0.2.0/README.md)：
+  v0.2.0 发布 Demo；包含无密钥 dry-run 和可选真实 Responses route。
+- [`2026-07-10-完整流程真实试跑/README.md`](2026-07-10-完整流程真实试跑/README.md)：
+  早期完整 control-plane 真实试跑与审计任务。
+
 ## 目录结构
 
 每次 run 建一个独立子目录：
