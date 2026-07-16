@@ -323,11 +323,14 @@ cross-agent equivalence.
 audit_evidence:
   decision_points:
     - evidence_available_at_time: [artifact-or-event-ref]
-      action_selected: dispatch_agent:codex-cli
+      decision_type: routing_mode_selection
+      action_selected: routing_mode:single_agent
       alternatives_visible: [routing_mode:small_dag]
       candidate_set:
-        - {action: dispatch_agent:codex-cli, disposition: selected, reason: bounded_run}
+        - {action: routing_mode:single_agent, disposition: selected, reason: bounded_run}
         - {action: routing_mode:small_dag, disposition: rejected, reason: no_dependencies}
+      fixed_bindings: {agent_id: codex-cli, target_model: gpt-5, target_provider: openai}
+      selection_scope: {routing_mode: harness_profile_fixed}
       selection_basis: {budget_confidence: low, triggered_rules: [bounded_single_agent_audit]}
       later_outcome: {session_status: completed}
   side_effects:
@@ -370,38 +373,55 @@ command hash, exit code, stdout/stderr hashes, status, and timing are stored in
 digest. Agent-reported verification remains a separate field.
 
 For comparable benchmark trials, pass an opaque `--cohort-id`. Benchmark
-identity v2 records separate task, delivered-context, and execution-contract
-digests, the Harness-observed pre-run workspace state, and the independent
+identity v3 records separate task, initial-context, realized-context-delivery,
+and execution-contract digests, the Harness-observed pre-run workspace state, and the independent
 acceptance-contract digest (command, timeout, workspace mode, and environment
 policy). The execution contract retains safe comparison
 fields including Agent/adapter/runtime version, requested model and provider,
 opaque route instance, wire API, sandbox/isolation/timeout/cleanup policy,
 permission boundary, key environment-variable name, tool allow-list, and
 assignment renderer version. It does not retain the base URL or credential
-value. Without `--cohort-id`, BureauLess assigns a session-local
+value. When `BUREAULESS_ROUTE_FINGERPRINT_KEY` contains a stable local salt,
+the execution contract includes an HMAC-SHA256 over the normalized base URL
+and wire API; this detects endpoint replacement without disclosing the URL.
+Without the salt the fingerprint is explicitly unavailable. Without
+`--cohort-id`, BureauLess assigns a session-local
 `uncontrolled-<session-id>` cohort that is ineligible for paired comparison.
 Transport-only assignment and context-capsule IDs are removed before hashing
-the delivered-context contract so repeated trials do not differ solely because
-their envelope IDs are unique.
+the initial-context contract so repeated trials do not differ solely because
+their envelope IDs are unique. Context requests and resolutions are recorded
+separately as realized delivery with request-count and added-token metrics.
+Task and initial-context payloads are retained beside their digests so a
+session can be checked independently instead of trusting two matching hash
+strings.
 
 After producing a baseline and candidate with the same declared cohort, task,
-delivered context, workspace baseline, and independent acceptance contract,
+initial context, workspace baseline, and independent acceptance contract,
 generate a bounded capability comparison with:
 
 ```bash
 uv run bureauless audit contribution baseline/session.yaml candidate/session.yaml \
-  --capability-id workspace-edit --invoked true
+  --capability-id workspace-edit --invoked true \
+  --expected-changed-field target_model
 ```
 
-The v2 artifact reports controlled identity fields, execution `treatment_diff`,
+The v3 artifact defaults to `fixed-context`, which also requires identical
+realized context delivery. Use `--context-mode adaptive` to permit different
+context requests and report their request/token deltas as measured outcomes.
+It also reports controlled identity fields, execution `treatment_diff`,
 known `uncontrolled_confounders`, Harness-comparable latency/file delta and
 independent-verification outcomes. Token and monetary deltas remain conditional
 on matching native provenance. Invocation and result-use are explicit operator
-attestations, and the artifact always states `causal_claim: not_established`.
+attestations. Expected versus observed execution fields classify the comparison
+as `single_treatment`, `multi_treatment`, `treatment_mismatch`, or
+`descriptive_only`; the artifact always states `causal_claim: not_established`.
+Contribution inputs may be session YAML or an audit archive manifest. Each
+source is labeled `unverified_session` or `verified_archive`; archive inputs
+must pass the existing manifest and artifact hash verification first.
 
 | Evidence type | `codex_exec_v1` | `claude_stream_json_v1` | `gemini` | `opencode` | `pi` |
 | --- | --- | --- | --- |
-| Native output contract | JSONL event stream | one JSON result object | JSONL event stream | JSONL event stream | JSONL event stream |
+| Native output contract | JSONL event stream | JSONL event stream | JSONL event stream | JSONL event stream | JSONL event stream |
 | Final status / exit code | captured | captured | captured | captured | captured |
 | stdout and stderr | persisted as native logs | persisted as native logs | persisted as native logs | persisted as native logs | persisted as native logs |
 | Workspace diff | captured from isolated workspace | captured from isolated workspace | captured from isolated workspace | captured from isolated workspace | captured from isolated workspace |

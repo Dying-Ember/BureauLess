@@ -10736,19 +10736,19 @@ def test_live_dispatch_cancellation_kills_process_group_and_preserves_evidence(
     }
     assert record.audit_evidence["decision_points"] == [
         {
-            "decision_id": "decision-session-live-cancel-dispatch",
-            "decision_type": "dispatch",
+            "decision_id": "decision-session-live-cancel-routing-mode",
+            "decision_type": "routing_mode_selection",
             "source": "harness",
             "evidence_available_at_time": [
                 "dispatch_packet.routing_decision",
                 "dispatch_packet.assignment",
                 "dispatch.session_spec",
             ],
-            "action_selected": "dispatch_agent:shell-dummy",
+            "action_selected": "routing_mode:small_dag",
             "alternatives_visible": ["routing_mode:single_agent"],
             "candidate_set": [
                 {
-                    "action": "dispatch_agent:shell-dummy",
+                    "action": "routing_mode:small_dag",
                     "disposition": "selected",
                     "reason": "Exercise the canonical dispatch bridge.",
                 },
@@ -10758,6 +10758,11 @@ def test_live_dispatch_cancellation_kills_process_group_and_preserves_evidence(
                     "reason": "The test workflow preserves explicit staged nodes.",
                 },
             ],
+            "fixed_bindings": {
+                "agent_id": "shell-dummy",
+                "target_provider": None,
+                "target_model": None,
+            },
             "selection_basis": {
                 "selection_policy_version": "test-v1",
                 "triggered_rules": ["test_dispatch"],
@@ -10775,16 +10780,6 @@ def test_live_dispatch_cancellation_kills_process_group_and_preserves_evidence(
             },
             "selection_scope": {
                 "routing_mode": "policy_selected",
-                "agent_id": "operator_fixed",
-                "target_provider": "operator_fixed",
-                "target_model": "operator_fixed",
-            },
-            "selected_context": {
-                "routing_mode": "small_dag",
-                "selection_policy_version": "test-v1",
-                "agent_id": "shell-dummy",
-                "target_provider": None,
-                "target_model": None,
             },
             "later_outcome": {
                 "session_status": "cancelled",

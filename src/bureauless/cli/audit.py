@@ -4,9 +4,12 @@ import argparse
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
+import hmac
+import os
 from pathlib import Path
 import re
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import yaml
@@ -97,6 +100,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     contribution.add_argument(
         "--result-used", choices=["true", "false", "unknown"], default="unknown"
     )
+    contribution.add_argument(
+        "--context-mode", choices=["fixed", "adaptive"], default="fixed"
+    )
+    contribution.add_argument(
+        "--expected-changed-field", action="append", default=[]
+    )
     contribution.add_argument("--output")
 
 
@@ -172,6 +181,8 @@ def handle(args: argparse.Namespace) -> int | None:
                 if args.result_used != "unknown"
                 else "unknown"
             ),
+            context_mode=args.context_mode,
+            expected_changed_fields=args.expected_changed_field,
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         _write_yaml(output, contribution)
@@ -416,7 +427,7 @@ def run_audit(
             "status": "not_run",
             "reason": "dry_run" if dry_run and verify_command else "not_requested",
         }
-    audit_evidence["benchmark_identity"] = _benchmark_identity_v2(
+    audit_evidence["benchmark_identity"] = _benchmark_identity_v3(
         mission_goal=mission.goal,
         workflow_id=workflow.workflow_id,
         assignment=assignment,
@@ -427,7 +438,7 @@ def run_audit(
         independent_verification=audit_evidence["independent_verification"],
     )
     for point in audit_evidence.get("decision_points", []):
-        if point.get("decision_type") != "dispatch":
+        if point.get("decision_type") not in {"dispatch", "routing_mode_selection"}:
             continue
         later_outcome = dict(point.get("later_outcome") or {})
         later_outcome["independent_verification_status"] = audit_evidence[
@@ -550,23 +561,34 @@ def build_capability_contribution(
     capability_id: str,
     invoked: bool,
     result_used: bool | str = "unknown",
+    context_mode: str = "fixed",
+    expected_changed_fields: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
     capability_id = capability_id.strip()
     if not capability_id:
         raise ProtocolError("capability_id must be a non-empty string")
     if result_used not in (True, False, "unknown"):
         raise ProtocolError("result_used must be true, false, or unknown")
-    baseline = load_session_record(load_yaml_mapping(baseline_path, "Baseline session"))
-    candidate = load_session_record(load_yaml_mapping(candidate_path, "Candidate session"))
+    if context_mode not in {"fixed", "adaptive"}:
+        raise ProtocolError("context_mode must be fixed or adaptive")
+    if not all(isinstance(field, str) and field.strip() for field in expected_changed_fields):
+        raise ProtocolError("expected_changed_fields must contain non-empty strings")
+    expected_fields = {field.strip() for field in expected_changed_fields}
+    baseline, baseline_session_path, baseline_integrity = _load_comparison_source(
+        baseline_path, "Baseline"
+    )
+    candidate, candidate_session_path, candidate_integrity = _load_comparison_source(
+        candidate_path, "Candidate"
+    )
     baseline_identity = _mapping(baseline.audit_evidence.get("benchmark_identity"))
     candidate_identity = _mapping(candidate.audit_evidence.get("benchmark_identity"))
     if not baseline_identity or not candidate_identity:
         raise ProtocolError("Both sessions require benchmark_identity")
     if (
-        baseline_identity.get("schema") != "bureauless_benchmark_identity_v2"
-        or candidate_identity.get("schema") != "bureauless_benchmark_identity_v2"
+        baseline_identity.get("schema") != "bureauless_benchmark_identity_v3"
+        or candidate_identity.get("schema") != "bureauless_benchmark_identity_v3"
     ):
-        raise ProtocolError("Capability comparison requires benchmark_identity_v2")
+        raise ProtocolError("Capability comparison requires benchmark_identity_v3")
     for label, identity in (
         ("baseline", baseline_identity),
         ("candidate", candidate_identity),
@@ -578,17 +600,26 @@ def build_capability_contribution(
             raise ProtocolError(
                 f"Capability comparison {label} execution contract hash mismatch"
             )
+        realized_context = identity.get("realized_context_delivery")
+        if not isinstance(realized_context, list) or _sha256_payload(
+            {"deliveries": realized_context}
+        ) != identity.get("realized_context_delivery_sha256"):
+            raise ProtocolError(
+                f"Capability comparison {label} realized context hash mismatch"
+            )
     if not baseline_identity.get("cohort_declared") or not candidate_identity.get(
         "cohort_declared"
     ):
         raise ProtocolError("Capability comparison requires an explicitly declared cohort")
-    identity_fields = (
+    identity_fields = [
         "cohort_id",
         "task_contract_sha256",
-        "context_contract_sha256",
+        "initial_context_contract_sha256",
         "workspace_baseline_ref",
         "acceptance_contract_sha256",
-    )
+    ]
+    if context_mode == "fixed":
+        identity_fields.append("realized_context_delivery_sha256")
     mismatches = [
         key
         for key in identity_fields
@@ -615,8 +646,26 @@ def build_capability_contribution(
     )
     baseline_execution = _mapping(baseline_identity.get("execution_contract"))
     candidate_execution = _mapping(candidate_identity.get("execution_contract"))
+    baseline_context_metrics = _mapping(
+        baseline_identity.get("context_request_metrics")
+    )
+    candidate_context_metrics = _mapping(
+        candidate_identity.get("context_request_metrics")
+    )
+    treatment_diff = _mapping_diff(baseline_execution, candidate_execution)
+    changed_fields = set(treatment_diff)
+    missing_expected = sorted(expected_fields - changed_fields)
+    unexpected = sorted(changed_fields - expected_fields)
+    if not invoked or not expected_fields:
+        treatment_classification = "descriptive_only"
+    elif missing_expected or unexpected:
+        treatment_classification = "treatment_mismatch"
+    elif len(changed_fields) == 1:
+        treatment_classification = "single_treatment"
+    else:
+        treatment_classification = "multi_treatment"
     return {
-        "schema": "bureauless_capability_contribution_v2",
+        "schema": "bureauless_capability_contribution_v3",
         "capability_contribution": {
             "capability_id": capability_id,
             "invoked": invoked,
@@ -649,9 +698,37 @@ def build_capability_contribution(
                     "cost_usd",
                     "cost_source",
                 ),
+                "context_request_count": _numeric_delta(
+                    baseline_context_metrics.get("request_count"),
+                    candidate_context_metrics.get("request_count"),
+                    provenance="harness",
+                ),
+                "added_context_tokens_estimate": _numeric_delta(
+                    baseline_context_metrics.get("added_context_tokens_estimate"),
+                    candidate_context_metrics.get("added_context_tokens_estimate"),
+                    provenance="harness_estimate",
+                ),
             },
         },
+        "context_comparison": {
+            "mode": f"{context_mode}_context",
+            "initial_context_controlled": True,
+            "realized_context_same": baseline_identity.get(
+                "realized_context_delivery_sha256"
+            )
+            == candidate_identity.get("realized_context_delivery_sha256"),
+            "baseline_realized_context_sha256": baseline_identity.get(
+                "realized_context_delivery_sha256"
+            ),
+            "candidate_realized_context_sha256": candidate_identity.get(
+                "realized_context_delivery_sha256"
+            ),
+        },
         "causal_claim": "not_established",
+        "source_integrity": {
+            "baseline": baseline_integrity,
+            "candidate": candidate_integrity,
+        },
         "attestation": {
             "invoked": "operator_asserted",
             "result_used": "operator_asserted" if result_used != "unknown" else "unknown",
@@ -662,7 +739,15 @@ def build_capability_contribution(
         "controlled_fields": {
             key: baseline_identity.get(key) for key in identity_fields
         },
-        "treatment_diff": _mapping_diff(baseline_execution, candidate_execution),
+        "treatment_declaration": {
+            "capability_id": capability_id,
+            "expected_changed_fields": sorted(expected_fields),
+            "observed_changed_fields": sorted(changed_fields),
+            "unexpected_changed_fields": unexpected,
+            "missing_expected_fields": missing_expected,
+            "classification": treatment_classification,
+        },
+        "treatment_diff": treatment_diff,
         "uncontrolled_confounders": _uncontrolled_confounders(
             baseline,
             candidate,
@@ -671,15 +756,35 @@ def build_capability_contribution(
         ),
         "baseline": {
             "session_id": baseline.session_id,
-            "path": str(baseline_path),
-            "sha256": hashlib.sha256(baseline_path.read_bytes()).hexdigest(),
+            "path": str(baseline_session_path),
+            "source": str(baseline_path),
+            "sha256": hashlib.sha256(baseline_session_path.read_bytes()).hexdigest(),
         },
         "candidate": {
             "session_id": candidate.session_id,
-            "path": str(candidate_path),
-            "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+            "path": str(candidate_session_path),
+            "source": str(candidate_path),
+            "sha256": hashlib.sha256(candidate_session_path.read_bytes()).hexdigest(),
         },
     }
+
+
+def _load_comparison_source(
+    path: Path, label: str
+) -> tuple[Any, Path, str]:
+    payload = load_yaml_mapping(path, f"{label} comparison source")
+    if payload.get("schema") in {
+        "bureauless_audit_snapshot_v1",
+        "bureauless_audit_snapshot_v2",
+        "bureauless_audit_snapshot_v3",
+    }:
+        verified = verify_archive(path)
+        session_path = Path(verified["session"])
+        record = load_session_record(
+            load_yaml_mapping(session_path, f"{label} archived session")
+        )
+        return record, session_path, "verified_archive"
+    return load_session_record(payload), path, "unverified_session"
 
 
 def _numeric_delta(
@@ -721,7 +826,7 @@ def _conditional_metric_delta(
     return delta
 
 
-def _benchmark_identity_v2(
+def _benchmark_identity_v3(
     *,
     mission_goal: str,
     workflow_id: str,
@@ -750,7 +855,7 @@ def _benchmark_identity_v2(
         "expected_events": assignment.expected_events,
         "forbidden_actions": assignment.forbidden_actions,
     }
-    context_contract = {
+    initial_context_contract = {
         "assignment_renderer_version": ASSIGNMENT_RENDERER_VERSION,
         "visible_context": _without_transient_context_identity(
             assignment.visible_context
@@ -758,8 +863,8 @@ def _benchmark_identity_v2(
         "artifact_refs": assignment.artifact_refs,
         "allowed_tools": assignment.allowed_tools,
         "outcome_metrics_policy": assignment.outcome_metrics_policy,
-        "context_requests": _stable_context_requests(context_requests),
     }
+    realized_context_delivery = _stable_context_requests(context_requests)
     execution_contract = {
         "agent_id": record.get("agent_id"),
         "agent_runtime_version": doctor.get("version"),
@@ -769,6 +874,10 @@ def _benchmark_identity_v2(
         "target_model": dispatch_spec.get("target_model"),
         "target_provider": dispatch_spec.get("target_provider"),
         "route_instance_id": route_instance_id,
+        "route_configuration_fingerprint": _route_configuration_fingerprint(
+            dispatch_spec.get("provider_base_url"),
+            dispatch_spec.get("provider_wire_api") or route.get("wire_api"),
+        ),
         "route_kind": route.get("route_kind"),
         "endpoint_family": route.get("endpoint_family"),
         "wire_api": dispatch_spec.get("provider_wire_api") or route.get("wire_api"),
@@ -787,12 +896,30 @@ def _benchmark_identity_v2(
         acceptance_contract_sha256 = contract_sha256
     resolved_cohort = cohort_id or f"uncontrolled-{record.get('session_id')}"
     return {
-        "schema": "bureauless_benchmark_identity_v2",
+        "schema": "bureauless_benchmark_identity_v3",
         "cohort_id": resolved_cohort,
         "cohort_declared": cohort_id is not None,
         "trial_id": record.get("session_id"),
         "task_contract_sha256": _sha256_payload(task_contract),
-        "context_contract_sha256": _sha256_payload(context_contract),
+        "task_contract": task_contract,
+        "initial_context_contract_sha256": _sha256_payload(initial_context_contract),
+        "initial_context_contract": initial_context_contract,
+        "realized_context_delivery_sha256": _sha256_payload(
+            {"deliveries": realized_context_delivery}
+        ),
+        "realized_context_delivery": realized_context_delivery,
+        "context_request_metrics": {
+            "request_count": len(realized_context_delivery),
+            "granted_request_count": sum(
+                item["resolution"].get("status") in {"granted", "partially_granted"}
+                for item in realized_context_delivery
+            ),
+            "added_context_tokens_estimate": sum(
+                item["resolution"].get("added_tokens_estimate", 0) or 0
+                for item in realized_context_delivery
+                if isinstance(item["resolution"].get("added_tokens_estimate", 0), int)
+            ),
+        },
         "execution_contract_sha256": _sha256_payload(execution_contract),
         "execution_contract": execution_contract,
         "workspace_baseline_ref": _mapping(record.get("workspace")).get(
@@ -809,6 +936,43 @@ def _mapping_diff(
         key: {"baseline": baseline.get(key), "candidate": candidate.get(key)}
         for key in sorted(set(baseline) | set(candidate))
         if baseline.get(key) != candidate.get(key)
+    }
+
+
+def _route_configuration_fingerprint(
+    base_url: object,
+    wire_api: object,
+) -> dict[str, Any]:
+    if not isinstance(base_url, str) or not base_url.strip():
+        return {"status": "not_applicable", "algorithm": "hmac-sha256"}
+    key_env = "BUREAULESS_ROUTE_FINGERPRINT_KEY"
+    key = os.environ.get(key_env)
+    if key is None:
+        return {
+            "status": "unavailable",
+            "algorithm": "hmac-sha256",
+            "key_env": key_env,
+        }
+    if len(key) < 16:
+        raise ProtocolError(f"{key_env} must contain at least 16 characters")
+    parsed = urlsplit(base_url.strip())
+    normalized_url = urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            parsed.path.rstrip("/"),
+            "",
+            "",
+        )
+    )
+    payload = yaml.safe_dump(
+        {"base_url": normalized_url, "wire_api": wire_api}, sort_keys=True
+    ).encode("utf-8")
+    return {
+        "status": "available",
+        "algorithm": "hmac-sha256",
+        "key_env": key_env,
+        "value": hmac.new(key.encode("utf-8"), payload, hashlib.sha256).hexdigest(),
     }
 
 
@@ -1023,7 +1187,8 @@ def render_report(record: dict[str, Any]) -> str:
         f"- Route verification freshness: `{_display(registration.get('verification_freshness'))}`",
         f"- Benchmark cohort: `{_display(benchmark_identity.get('cohort_id'))}`",
         f"- Task contract: `{_display(task_contract)}`",
-        f"- Context contract: `{_display(benchmark_identity.get('context_contract_sha256'))}`",
+        f"- Initial context contract: `{_display(benchmark_identity.get('initial_context_contract_sha256'))}`",
+        f"- Realized context delivery: `{_display(benchmark_identity.get('realized_context_delivery_sha256'))}`",
         f"- Execution contract: `{_display(benchmark_identity.get('execution_contract_sha256'))}`",
         f"- Workspace baseline: `{_display(benchmark_identity.get('workspace_baseline_ref'))}`",
         "",

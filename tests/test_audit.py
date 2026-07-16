@@ -2,12 +2,16 @@ from pathlib import Path
 import hashlib
 import shlex
 import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from bureauless.cli.audit import (
+    _benchmark_identity_v3,
+    _route_configuration_fingerprint,
     _verification_freshness,
+    archive_session,
     build_capability_contribution,
     load_route_observations,
 )
@@ -87,7 +91,7 @@ def test_audit_run_materializes_the_canonical_dry_run_evidence_chain(
         "status": "not_run",
         "reason": "not_requested",
     }
-    assert session["audit_evidence"]["decision_points"][0]["decision_type"] == "dispatch"
+    assert session["audit_evidence"]["decision_points"][0]["decision_type"] == "routing_mode_selection"
     assert session["audit_evidence"]["decision_points"][0]["later_outcome"] == {
         "session_status": "dry_run",
         "exit_reason": "dry_run",
@@ -99,9 +103,17 @@ def test_audit_run_materializes_the_canonical_dry_run_evidence_chain(
     assert benchmark["cohort_id"] == "parser-benchmark-v1"
     assert benchmark["cohort_declared"] is True
     assert benchmark["trial_id"] == "session-dry-run"
-    assert benchmark["schema"] == "bureauless_benchmark_identity_v2"
+    assert benchmark["schema"] == "bureauless_benchmark_identity_v3"
     assert len(benchmark["task_contract_sha256"]) == 64
-    assert len(benchmark["context_contract_sha256"]) == 64
+    assert benchmark["task_contract"]["mission_goal"] == "Fix parser"
+    assert len(benchmark["initial_context_contract_sha256"]) == 64
+    assert len(benchmark["realized_context_delivery_sha256"]) == 64
+    assert benchmark["realized_context_delivery"] == []
+    assert benchmark["context_request_metrics"] == {
+        "request_count": 0,
+        "granted_request_count": 0,
+        "added_context_tokens_estimate": 0,
+    }
     assert len(benchmark["execution_contract_sha256"]) == 64
     assert benchmark["execution_contract"]["target_model"] == "gpt-5"
     assert benchmark["execution_contract"]["assignment_renderer_version"] == "assignment_prompt_v1"
@@ -120,7 +132,11 @@ def test_audit_run_materializes_the_canonical_dry_run_evidence_chain(
     decision = session["audit_evidence"]["decision_points"][0]
     assert decision["candidate_set"][0]["disposition"] == "selected"
     assert len(decision["candidate_set"]) == 5
-    assert decision["selection_scope"]["agent_id"] == "operator_fixed"
+    assert {item["action"].split(":", 1)[0] for item in decision["candidate_set"]} == {
+        "routing_mode"
+    }
+    assert decision["fixed_bindings"]["agent_id"] == "codex-cli"
+    assert decision["selection_scope"]["routing_mode"] == "harness_profile_fixed"
     assert decision["selection_basis"]["budget_confidence"] == "low"
     assert result["verification"] is None
     report = Path(result["report"]).read_text(encoding="utf-8")
@@ -189,13 +205,30 @@ def test_independent_verifier_isolated_workspace_and_credentials(
 def test_capability_contribution_requires_matched_verified_pair(
     tmp_path: Path, capsys
 ) -> None:
+    task_contract = {"goal": "Fix parser"}
+    initial_context_contract = {"visible_context": {"mission_goal": "Fix parser"}}
     identity = {
-        "schema": "bureauless_benchmark_identity_v2",
+        "schema": "bureauless_benchmark_identity_v3",
         "cohort_id": "cohort-1",
         "cohort_declared": True,
         "trial_id": "placeholder",
-        "task_contract_sha256": "task-sha",
-        "context_contract_sha256": "context-sha",
+        "task_contract_sha256": hashlib.sha256(
+            yaml.safe_dump(task_contract, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "task_contract": task_contract,
+        "initial_context_contract_sha256": hashlib.sha256(
+            yaml.safe_dump(initial_context_contract, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "initial_context_contract": initial_context_contract,
+        "realized_context_delivery_sha256": hashlib.sha256(
+            yaml.safe_dump({"deliveries": []}, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "realized_context_delivery": [],
+        "context_request_metrics": {
+            "request_count": 0,
+            "granted_request_count": 0,
+            "added_context_tokens_estimate": 0,
+        },
         "execution_contract_sha256": "execution-sha",
         "execution_contract": {
             "agent_id": "codex-cli",
@@ -265,6 +298,7 @@ def test_capability_contribution_requires_matched_verified_pair(
         candidate,
         capability_id="workspace-edit",
         invoked=True,
+        expected_changed_fields=["target_model"],
     )
 
     record = contribution["capability_contribution"]
@@ -273,11 +307,28 @@ def test_capability_contribution_requires_matched_verified_pair(
     assert record["measurable_delta"]["wall_time_ms"]["delta"] == -20
     assert record["measurable_delta"]["total_tokens"]["eligibility"] == "conditional"
     assert contribution["causal_claim"] == "not_established"
-    assert contribution["schema"] == "bureauless_capability_contribution_v2"
+    assert contribution["source_integrity"] == {
+        "baseline": "unverified_session",
+        "candidate": "unverified_session",
+    }
+    assert contribution["schema"] == "bureauless_capability_contribution_v3"
+    assert contribution["context_comparison"] == {
+        "mode": "fixed_context",
+        "initial_context_controlled": True,
+        "realized_context_same": True,
+        "baseline_realized_context_sha256": identity[
+            "realized_context_delivery_sha256"
+        ],
+        "candidate_realized_context_sha256": identity[
+            "realized_context_delivery_sha256"
+        ],
+    }
     assert contribution["treatment_diff"]["target_model"] == {
         "baseline": "gpt-5",
         "candidate": "gpt-5.1",
     }
+    assert contribution["treatment_declaration"]["classification"] == "single_treatment"
+    assert contribution["treatment_declaration"]["unexpected_changed_fields"] == []
     assert "network_conditions_not_controlled" in contribution["uncontrolled_confounders"]
     output = tmp_path / "contribution.yaml"
     assert main(
@@ -290,6 +341,8 @@ def test_capability_contribution_requires_matched_verified_pair(
             "workspace-edit",
             "--invoked",
             "true",
+            "--expected-changed-field",
+            "target_model",
             "--output",
             str(output),
         ]
@@ -297,8 +350,98 @@ def test_capability_contribution_requires_matched_verified_pair(
     assert yaml.safe_load(output.read_text(encoding="utf-8")) == contribution
     capsys.readouterr()
 
+    baseline_archive = archive_session(baseline, tmp_path)["manifest"]
+    candidate_archive = archive_session(candidate, tmp_path)["manifest"]
+    archived = build_capability_contribution(
+        baseline_archive,
+        candidate_archive,
+        capability_id="workspace-edit",
+        invoked=True,
+        expected_changed_fields=["target_model"],
+    )
+    assert archived["source_integrity"] == {
+        "baseline": "verified_archive",
+        "candidate": "verified_archive",
+    }
+
+    original_candidate = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+    adaptive_candidate = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+    deliveries = [
+        {
+            "request": {
+                "missing_information": "schema",
+                "requested_refs": ["schema.yaml"],
+                "expected_value": "parse correctly",
+            },
+            "resolution": {
+                "status": "granted",
+                "policy_version": "context-v1",
+                "granted_artifacts": [],
+                "denied_refs": [],
+                "unavailable_refs": [],
+                "added_tokens_estimate": 120,
+            },
+        }
+    ]
+    adaptive_identity = adaptive_candidate["audit_evidence"]["benchmark_identity"]
+    adaptive_identity["realized_context_delivery"] = deliveries
+    adaptive_identity["realized_context_delivery_sha256"] = hashlib.sha256(
+        yaml.safe_dump({"deliveries": deliveries}, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    adaptive_identity["context_request_metrics"] = {
+        "request_count": 1,
+        "granted_request_count": 1,
+        "added_context_tokens_estimate": 120,
+    }
+    candidate.write_text(
+        yaml.safe_dump(adaptive_candidate, sort_keys=False), encoding="utf-8"
+    )
+    with pytest.raises(
+        ProtocolError, match="identity mismatch: realized_context_delivery_sha256"
+    ):
+        build_capability_contribution(
+            baseline,
+            candidate,
+            capability_id="context-economy",
+            invoked=True,
+        )
+    adaptive = build_capability_contribution(
+        baseline,
+        candidate,
+        capability_id="context-economy",
+        invoked=True,
+        context_mode="adaptive",
+    )
+    assert adaptive["context_comparison"]["mode"] == "adaptive_context"
+    assert adaptive["context_comparison"]["realized_context_same"] is False
+    assert adaptive["capability_contribution"]["measurable_delta"][
+        "context_request_count"
+    ]["delta"] == 1
+    assert adaptive["capability_contribution"]["measurable_delta"][
+        "added_context_tokens_estimate"
+    ]["delta"] == 120
+    mismatch = build_capability_contribution(
+        baseline,
+        candidate,
+        capability_id="context-economy",
+        invoked=True,
+        context_mode="adaptive",
+        expected_changed_fields=["sandbox_mode"],
+    )
+    assert mismatch["treatment_declaration"]["classification"] == "treatment_mismatch"
+    assert mismatch["treatment_declaration"]["missing_expected_fields"] == [
+        "sandbox_mode"
+    ]
+    candidate.write_text(
+        yaml.safe_dump(original_candidate, sort_keys=False), encoding="utf-8"
+    )
+
     tampered = yaml.safe_load(candidate.read_text(encoding="utf-8"))
-    tampered["audit_evidence"]["benchmark_identity"]["task_contract_sha256"] = "other-task"
+    tampered_identity = tampered["audit_evidence"]["benchmark_identity"]
+    tampered_identity["task_contract"] = {"goal": "Other task"}
+    tampered_identity["task_contract_sha256"] = hashlib.sha256(
+        yaml.safe_dump(tampered_identity["task_contract"], sort_keys=True).encode("utf-8")
+    ).hexdigest()
     candidate.write_text(yaml.safe_dump(tampered, sort_keys=False), encoding="utf-8")
     with pytest.raises(ProtocolError, match="identity mismatch: task_contract_sha256"):
         build_capability_contribution(
@@ -307,10 +450,18 @@ def test_capability_contribution_requires_matched_verified_pair(
             capability_id="workspace-edit",
             invoked=True,
         )
-    tampered["audit_evidence"]["benchmark_identity"]["task_contract_sha256"] = "task-sha"
-    tampered["audit_evidence"]["benchmark_identity"]["context_contract_sha256"] = "other-context"
+    tampered_identity["task_contract"] = identity["task_contract"]
+    tampered_identity["task_contract_sha256"] = identity["task_contract_sha256"]
+    tampered_identity["initial_context_contract"] = {
+        "visible_context": {"mission_goal": "Other context"}
+    }
+    tampered_identity["initial_context_contract_sha256"] = hashlib.sha256(
+        yaml.safe_dump(
+            tampered_identity["initial_context_contract"], sort_keys=True
+        ).encode("utf-8")
+    ).hexdigest()
     candidate.write_text(yaml.safe_dump(tampered, sort_keys=False), encoding="utf-8")
-    with pytest.raises(ProtocolError, match="identity mismatch: context_contract_sha256"):
+    with pytest.raises(ProtocolError, match="identity mismatch: initial_context_contract_sha256"):
         build_capability_contribution(
             baseline,
             candidate,
@@ -339,9 +490,81 @@ def test_benchmark_context_identity_ignores_transport_assignment_ids(
         ["benchmark_identity"]
         for path in sessions
     ]
-    assert identities[0]["context_contract_sha256"] == identities[1][
-        "context_contract_sha256"
+    assert identities[0]["initial_context_contract_sha256"] == identities[1][
+        "initial_context_contract_sha256"
     ]
+
+
+def test_benchmark_identity_separates_initial_and_realized_context() -> None:
+    assignment = SimpleNamespace(
+        node_id="implement",
+        role="worker",
+        goal="Implement",
+        expected_events=["task_completed"],
+        forbidden_actions=[],
+        visible_context={"mission_goal": "Fix parser"},
+        artifact_refs=[],
+        allowed_tools=[],
+        outcome_metrics_policy={},
+    )
+    base_record = {
+        "session_id": "trial",
+        "agent_id": "codex-cli",
+        "dispatch": {"session_spec": {}},
+        "workspace": {"pre_state_ref": "workspace-sha"},
+        "extraction": {},
+    }
+    registration = {"route": {}, "doctor": {}, "provider": {}}
+    initial = _benchmark_identity_v3(
+        mission_goal="Fix parser",
+        workflow_id="workflow",
+        assignment=assignment,
+        record=base_record,
+        registration=registration,
+        route_instance_id="route",
+        cohort_id="cohort",
+        independent_verification={},
+    )
+    adaptive_record = {
+        **base_record,
+        "extraction": {
+            "context_requests": [
+                {
+                    "request": {
+                        "missing_information": "schema",
+                        "requested_refs": ["schema.yaml"],
+                        "expected_value": "parse correctly",
+                    },
+                    "resolution": {
+                        "status": "granted",
+                        "added_tokens_estimate": 120,
+                    },
+                }
+            ]
+        },
+    }
+    adaptive = _benchmark_identity_v3(
+        mission_goal="Fix parser",
+        workflow_id="workflow",
+        assignment=assignment,
+        record=adaptive_record,
+        registration=registration,
+        route_instance_id="route",
+        cohort_id="cohort",
+        independent_verification={},
+    )
+
+    assert initial["initial_context_contract_sha256"] == adaptive[
+        "initial_context_contract_sha256"
+    ]
+    assert initial["realized_context_delivery_sha256"] != adaptive[
+        "realized_context_delivery_sha256"
+    ]
+    assert adaptive["context_request_metrics"] == {
+        "request_count": 1,
+        "granted_request_count": 1,
+        "added_context_tokens_estimate": 120,
+    }
 
 
 @pytest.mark.parametrize(
@@ -359,6 +582,30 @@ def test_audit_rejects_non_opaque_route_instance_labels(
             "--route-instance-id", route_instance_id, "--dry-run",
         ]
     ) == 1
+
+
+def test_route_configuration_fingerprint_is_private_and_stable(monkeypatch) -> None:
+    monkeypatch.setenv("BUREAULESS_ROUTE_FINGERPRINT_KEY", "local-salt-0123456789")
+    first = _route_configuration_fingerprint(
+        "https://Gateway.Example/v1/", "responses"
+    )
+    same = _route_configuration_fingerprint(
+        "https://gateway.example/v1", "responses"
+    )
+    changed = _route_configuration_fingerprint(
+        "https://other.example/v1", "responses"
+    )
+
+    assert first == same
+    assert first["status"] == "available"
+    assert first["value"] != changed["value"]
+    assert "gateway.example" not in yaml.safe_dump(first)
+
+    monkeypatch.delenv("BUREAULESS_ROUTE_FINGERPRINT_KEY")
+    assert _route_configuration_fingerprint(
+        "https://gateway.example/v1", "responses"
+    )["status"] == "unavailable"
+    assert _route_configuration_fingerprint(None, None)["status"] == "not_applicable"
 
 
 def test_audit_report_renders_existing_session_evidence(tmp_path: Path) -> None:

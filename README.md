@@ -62,9 +62,9 @@ history.
   usage/cost provenance, tool events, and append-only route observations.
 - Harness-owned independent verification against a temporary copy of the
   Agent's final workspace.
-- Benchmark identity v2 and paired-run comparisons that refuse mismatched
-  tasks, delivered context, baselines, cohorts, or acceptance contracts, while
-  exposing execution treatment differences and uncontrolled confounders.
+- Benchmark identity v3 separates initial and realized context; paired-run
+  comparisons support strict fixed-context and explicit adaptive-context modes
+  while exposing treatment differences and uncontrolled confounders.
 - Harness-owned dispatch decision candidates/rejections and scoped
   workspace/process/network/credential/payment coverage with explicit blind
   spots. Agent-internal decisions are not inferred.
