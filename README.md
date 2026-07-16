@@ -62,10 +62,12 @@ history.
   usage/cost provenance, tool events, and append-only route observations.
 - Harness-owned independent verification against a temporary copy of the
   Agent's final workspace.
-- Benchmark identity and paired-run capability comparisons that refuse
-  mismatched tasks, baselines, cohorts, or acceptance contracts.
-- Explicit decision points and workspace/process/network/credential/payment
-  observation coverage.
+- Benchmark identity v2 and paired-run comparisons that refuse mismatched
+  tasks, delivered context, baselines, cohorts, or acceptance contracts, while
+  exposing execution treatment differences and uncontrolled confounders.
+- Harness-owned dispatch decision candidates/rejections and scoped
+  workspace/process/network/credential/payment coverage with explicit blind
+  spots. Agent-internal decisions are not inferred.
 
 The machine-readable source of current compatibility is:
 
@@ -293,8 +295,8 @@ Source ownership follows the runtime boundary:
 | Stable Harness protocol | [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md) |
 | Current implementation order | [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md) |
 | Dated live compatibility evidence | [`docs/audits/2026-07-15-agent-endpoint-capability-matrix.md`](docs/audits/2026-07-15-agent-endpoint-capability-matrix.md) |
+| v0.3.0 release notes | [`docs/releases/v0.3.0.md`](docs/releases/v0.3.0.md) |
 | v0.2.0 release demo | [`live-demos/2026-07-16-agent-audit-v0.2.0/README.md`](live-demos/2026-07-16-agent-audit-v0.2.0/README.md) |
-| v0.2.0 release notes | [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) |
 | Control-runtime boundary decision | [`docs/rfcs/007-control-runtime-boundary.md`](docs/rfcs/007-control-runtime-boundary.md) |
 
 ## License

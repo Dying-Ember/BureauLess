@@ -8297,7 +8297,9 @@ def test_reported_cost_is_not_promoted_to_a_payment_side_effect(tmp_path) -> Non
         for effect in record.audit_evidence["side_effects"]
     )
     assert record.audit_evidence["side_effect_coverage"]["payment"] == {
-        "status": "not_observed",
+        "status": "none",
+        "scope": "provider_billing_and_settlement",
+        "blind_spots": ["external_billing_state", "payment_settlement"],
         "evidence_source": "unavailable",
         "evidence_ref": None,
     }
@@ -10608,6 +10610,17 @@ def test_dispatch_session_persists_prelaunch_packet_and_reconstructs_binding(
     assert reconstructed_spec.target_model == "gpt-5"
     assert reconstructed_spec.target_provider == "openai"
     assert reconstructed_spec.sandbox_mode == "workspace-write"
+    assert record.result_proposal is not None
+    assert record.result_proposal["route_evidence"]["session_route_support"] == {
+        "launch": "verified",
+        "request_completed": "verified",
+        "workspace_mutation": "not_observed",
+        "telemetry": "observed",
+        "model_identity": "requested_only",
+        "cost_attribution": "unavailable",
+        "permission_boundary": "not_verified",
+        "native_event_stream": "observed",
+    }
     assert record.dispatch["review_constraints"] == packet.review_constraints
     assert record.dispatch["turn_report_policy"] == packet.turn_report_policy
     observed_report = record.extraction["turn_reports"][0]
@@ -10647,6 +10660,15 @@ def test_dispatch_session_persists_prelaunch_packet_and_reconstructs_binding(
     tampered_evidence["session_spec"] = tampered_spec
     with pytest.raises(ProtocolError, match="assignment_id does not match packet"):
         reconstruct_dispatched_session(replace(record, dispatch=tampered_evidence))
+
+    tampered_evidence = dict(record.dispatch)
+    tampered_spec = dict(tampered_evidence["session_spec"])
+    tampered_spec["agent_id"] = "claude-code"
+    tampered_evidence["session_spec"] = tampered_spec
+    with pytest.raises(ProtocolError, match="not supported for agent 'claude-code'"):
+        reconstruct_dispatched_session(
+            replace(record, agent_id="claude-code", dispatch=tampered_evidence)
+        )
 
 
 def test_live_dispatch_cancellation_kills_process_group_and_preserves_evidence(
@@ -10724,6 +10746,39 @@ def test_live_dispatch_cancellation_kills_process_group_and_preserves_evidence(
             ],
             "action_selected": "dispatch_agent:shell-dummy",
             "alternatives_visible": ["routing_mode:single_agent"],
+            "candidate_set": [
+                {
+                    "action": "dispatch_agent:shell-dummy",
+                    "disposition": "selected",
+                    "reason": "Exercise the canonical dispatch bridge.",
+                },
+                {
+                    "action": "routing_mode:single_agent",
+                    "disposition": "rejected",
+                    "reason": "The test workflow preserves explicit staged nodes.",
+                },
+            ],
+            "selection_basis": {
+                "selection_policy_version": "test-v1",
+                "triggered_rules": ["test_dispatch"],
+                "reason": "Exercise the canonical dispatch bridge.",
+                "budget_reason": None,
+                "risk_reason": None,
+                "budget_confidence": "high",
+                "estimated_coordination_ratio": 0.1,
+                "advisor_gate_decision": {
+                    "invoked": False,
+                    "policy_version": "test-v1",
+                    "reason": ["fixture"],
+                    "decision_basis": "deterministic_fixture",
+                },
+            },
+            "selection_scope": {
+                "routing_mode": "policy_selected",
+                "agent_id": "operator_fixed",
+                "target_provider": "operator_fixed",
+                "target_model": "operator_fixed",
+            },
             "selected_context": {
                 "routing_mode": "small_dag",
                 "selection_policy_version": "test-v1",
@@ -10744,11 +10799,11 @@ def test_live_dispatch_cancellation_kills_process_group_and_preserves_evidence(
         key: value["status"]
         for key, value in record.audit_evidence["side_effect_coverage"].items()
     } == {
-        "workspace": "observed",
-        "process": "observed",
-        "network": "not_observed",
+        "workspace": "partial",
+        "process": "partial",
+        "network": "none",
         "credential": "not_applicable",
-        "payment": "not_observed",
+        "payment": "none",
     }
     child_pid = int(child_pid_path.read_text(encoding="utf-8"))
     with pytest.raises(ProcessLookupError):

@@ -234,6 +234,8 @@ class AgentProviderRouteEvidence:
     audit_ref: str | None = None
     verified_at: str | None = None
     verified_runtime_version: str | None = None
+    capability_evidence: dict[str, str] | None = None
+    comparison_eligibility: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -246,6 +248,8 @@ class AgentProviderRouteEvidence:
             "audit_ref": self.audit_ref,
             "verified_at": self.verified_at,
             "verified_runtime_version": self.verified_runtime_version,
+            "capability_evidence": self.capability_evidence,
+            "comparison_eligibility": self.comparison_eligibility,
         }
 
 
@@ -510,17 +514,79 @@ PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     ),
 }
 
+COMPARISON_CONDITIONAL_COST = {
+    "latency": "comparable",
+    "file_delta": "comparable",
+    "token_usage": "conditional",
+    "monetary_cost": "conditional",
+    "tool_timeline": "comparable",
+}
+COMPARISON_NO_COST = {**COMPARISON_CONDITIONAL_COST, "monetary_cost": "not_comparable"}
+CLAUDE_ROUTE_CAPABILITY_EVIDENCE = {
+    "child_only_route_injection": "verified",
+    "clean_stateless_startup": "verified",
+    "depends_on_existing_global_state": "not_observed",
+    "native_tool_timeline": "verified",
+}
+
+
 AGENT_PROVIDER_ROUTE_EVIDENCE: dict[tuple[str, str], AgentProviderRouteEvidence] = {
-    ("codex-cli", "openai"): AgentProviderRouteEvidence("codex-cli", "openai", "supported", "implemented", "not_tested", ["static_contract", "fixture_tested"]),
-    ("codex-cli", "openai-compatible"): AgentProviderRouteEvidence("codex-cli", "openai-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.144.4"),
-    ("claude-code", "anthropic-compatible"): AgentProviderRouteEvidence("claude-code", "anthropic-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_text_probe", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "2.1.202"),
-    ("gemini", "gemini-compatible"): AgentProviderRouteEvidence("gemini", "gemini-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "0.50.0"),
-    ("opencode", "openai-chat-compatible"): AgentProviderRouteEvidence("opencode", "openai-chat-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "1.17.20"),
-    ("opencode", "anthropic-compatible"): AgentProviderRouteEvidence("opencode", "anthropic-compatible", "observed", "not_implemented", "verified", ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "1.17.18"),
-    ("opencode", "openai-compatible"): AgentProviderRouteEvidence("opencode", "openai-compatible", "observed", "not_implemented", "unavailable", ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "1.17.18"),
-    ("pi", "anthropic-compatible"): AgentProviderRouteEvidence("pi", "anthropic-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_text_probe", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.80.6"),
-    ("pi", "openai-chat-compatible"): AgentProviderRouteEvidence("pi", "openai-chat-compatible", "supported", "implemented", "verified", ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"], "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.80.6"),
-    ("pi", "openai-compatible"): AgentProviderRouteEvidence("pi", "openai-compatible", "observed", "not_implemented", "unavailable", ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "0.80.6"),
+    ("codex-cli", "openai"): AgentProviderRouteEvidence(
+        "codex-cli", "openai", "supported", "implemented", "not_tested",
+        ["static_contract", "fixture_tested"], capability_evidence={},
+        comparison_eligibility=COMPARISON_CONDITIONAL_COST,
+    ),
+    ("codex-cli", "openai-compatible"): AgentProviderRouteEvidence(
+        "codex-cli", "openai-compatible", "supported", "implemented", "verified",
+        ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"],
+        "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.144.4",
+        {}, COMPARISON_CONDITIONAL_COST,
+    ),
+    ("claude-code", "anthropic-compatible"): AgentProviderRouteEvidence(
+        "claude-code", "anthropic-compatible", "supported", "implemented", "verified",
+        ["static_contract", "fixture_tested", "live_text_probe", "live_workspace_mutation", "telemetry_verified"],
+        "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "2.1.202",
+        CLAUDE_ROUTE_CAPABILITY_EVIDENCE, COMPARISON_CONDITIONAL_COST,
+    ),
+    ("gemini", "gemini-compatible"): AgentProviderRouteEvidence(
+        "gemini", "gemini-compatible", "supported", "implemented", "verified",
+        ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"],
+        "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "0.50.0",
+        {}, COMPARISON_NO_COST,
+    ),
+    ("opencode", "openai-chat-compatible"): AgentProviderRouteEvidence(
+        "opencode", "openai-chat-compatible", "supported", "implemented", "verified",
+        ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"],
+        "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "1.17.20",
+        {}, COMPARISON_NO_COST,
+    ),
+    ("opencode", "anthropic-compatible"): AgentProviderRouteEvidence(
+        "opencode", "anthropic-compatible", "observed", "not_implemented", "verified",
+        ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "1.17.18",
+        {}, COMPARISON_NO_COST,
+    ),
+    ("opencode", "openai-compatible"): AgentProviderRouteEvidence(
+        "opencode", "openai-compatible", "observed", "not_implemented", "unavailable",
+        ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "1.17.18",
+        {}, COMPARISON_NO_COST,
+    ),
+    ("pi", "anthropic-compatible"): AgentProviderRouteEvidence(
+        "pi", "anthropic-compatible", "supported", "implemented", "verified",
+        ["static_contract", "fixture_tested", "live_text_probe", "live_workspace_mutation", "telemetry_verified"],
+        "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.80.6",
+        {}, COMPARISON_CONDITIONAL_COST,
+    ),
+    ("pi", "openai-chat-compatible"): AgentProviderRouteEvidence(
+        "pi", "openai-chat-compatible", "supported", "implemented", "verified",
+        ["static_contract", "fixture_tested", "live_workspace_mutation", "telemetry_verified"],
+        "docs/audits/2026-07-15-agent-endpoint-capability-matrix.md", "2026-07-15", "0.80.6",
+        {}, COMPARISON_CONDITIONAL_COST,
+    ),
+    ("pi", "openai-compatible"): AgentProviderRouteEvidence(
+        "pi", "openai-compatible", "observed", "not_implemented", "unavailable",
+        ["live_text_probe"], "docs/audits/2026-07-13-agent-provider-compatibility.md", "2026-07-13", "0.80.6",
+        {}, COMPARISON_NO_COST,
+    ),
 }
 
 AGENT_PROVIDER_BINDINGS: dict[str, set[str]] = {
@@ -580,8 +646,16 @@ def route_agent(agent_id: str, target_provider: str | None = None) -> AgentRoute
         audit_ref=evidence.audit_ref if evidence else None,
         verified_at=evidence.verified_at if evidence else None,
         verified_runtime_version=evidence.verified_runtime_version if evidence else None,
-        capability_evidence=dict(spec.capability_evidence),
-        comparison_eligibility=dict(spec.comparison_eligibility),
+        capability_evidence=dict(
+            evidence.capability_evidence
+            if evidence and evidence.capability_evidence is not None
+            else spec.capability_evidence
+        ),
+        comparison_eligibility=dict(
+            evidence.comparison_eligibility
+            if evidence and evidence.comparison_eligibility is not None
+            else spec.comparison_eligibility
+        ),
     )
 
 

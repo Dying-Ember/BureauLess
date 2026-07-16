@@ -61,9 +61,11 @@ Registry state and test evidence are separate fields. A route reports:
 `bureauless agent route <agent> --provider <provider>` renders those fields.
 For example, Pi's observed Responses-shaped runtime support is not reported as
 an adapter capability: its adapter is `not_implemented` and the tested route
-was `unavailable`. A successful session separately records
-`session_route_support=verified`; that is evidence for its own binding, not a
-claim about every endpoint in the family.
+was `unavailable`. A successful session separately records structured
+`session_route_support` dimensions for launch, request completion, workspace
+mutation, telemetry, model identity, cost attribution, permission boundary,
+and native events. No scalar `verified` value claims that every dimension or
+every endpoint in the family was verified.
 
 `bureauless agent matrix --evidence` renders the complete machine-readable
 Agent×Provider evidence matrix. Without `--evidence`, `agent matrix` remains
@@ -83,8 +85,11 @@ bureauless agent matrix --evidence \
 ```
 
 Use `--route-instance-id` on `audit run` to correlate repeated tests of the
-same endpoint instance. It is an operator-chosen opaque label; never put a URL,
-provider name, account identifier, or credential in it.
+same endpoint instance. It is an operator-chosen 1–128 character opaque label
+using letters, digits, `.`, `_`, or `-`; URLs, paths, whitespace, and common
+credential shapes are rejected. Syntax validation is not general secret
+detection, so the operator remains responsible for using a non-sensitive
+label rather than a provider name, account identifier, or credential.
 
 ## 1. Agent runtime types
 
@@ -114,6 +119,11 @@ The adapter, not the agent name, is the execution boundary. Two CLIs that can
 call the same endpoint still need separate adapters because their command-line
 flags, workspace controls, output shape, session-termination behavior, and reported
 usage differ.
+
+The adapter contracts are separate in the registry, but their current Python
+runners/parsers remain co-located in `runtime/sessions.py`. Splitting that file
+is maintenance work, not a missing audit capability; it should happen when
+independent adapter ownership or change frequency justifies the churn.
 
 ## 2. Provider route and endpoint-family types
 
@@ -313,9 +323,13 @@ cross-agent equivalence.
 audit_evidence:
   decision_points:
     - evidence_available_at_time: [artifact-or-event-ref]
-      action_selected: repair_parser
-      alternatives_visible: [revert, repair_parser]
-      later_outcome: {verification: passed}
+      action_selected: dispatch_agent:codex-cli
+      alternatives_visible: [routing_mode:small_dag]
+      candidate_set:
+        - {action: dispatch_agent:codex-cli, disposition: selected, reason: bounded_run}
+        - {action: routing_mode:small_dag, disposition: rejected, reason: no_dependencies}
+      selection_basis: {budget_confidence: low, triggered_rules: [bounded_single_agent_audit]}
+      later_outcome: {session_status: completed}
   side_effects:
     - type: workspace # workspace | process | network | credential | payment
       source: harness # harness | agent | provider
@@ -333,14 +347,18 @@ delivery, and transparent-proxy network evidence. Reported monetary cost stays
 telemetry; it is not payment evidence. A payment side effect requires
 independent charge evidence, which current adapters do not provide.
 The parallel `side_effect_coverage` map declares all five effect classes as
-`observed`, `not_observed`, or `not_applicable`; therefore an empty side-effect
-list never implies that network, credential, or payment activity was absent.
-Every canonical dispatch also records one Harness-owned decision point: the
-routing and Agent selection, the evidence references available at dispatch,
-explicitly rejected routing modes, and the later session outcome. It does not
-infer Agent-internal decisions from final prose or claim that a tool caused an
-outcome. Agent-internal decision points and capability contributions remain
-empty until an adapter or later audit supplies the required provenance.
+`full`, `partial`, `none`, or `not_applicable`, with a machine-readable `scope`
+and `blind_spots` list. Current automatic observations are deliberately
+`partial`: for example, provider-proxy traffic does not prove that direct Agent
+egress or child-process traffic was absent. An empty side-effect list therefore
+never implies that network, credential, or payment activity was absent.
+
+Every canonical dispatch records one Harness-owned decision point with the
+selected action, candidate set, rejection reasons, budget/risk basis, selection
+scope, evidence references available at dispatch, and later session outcome.
+The quickstart fixes Agent/model/route from operator input; it does not pretend
+those were policy-selected alternatives. It also does not infer Agent-internal
+decisions from final prose or claim that a tool caused an outcome.
 
 `audit run --verify-command '<argv>'` adds Harness-owned independent
 verification after the Agent exits. The command is parsed as argv without a
@@ -351,24 +369,33 @@ command hash, exit code, stdout/stderr hashes, status, and timing are stored in
 `verification.yaml`; the session contains only the evidence reference and
 digest. Agent-reported verification remains a separate field.
 
-For comparable benchmark trials, pass an opaque `--cohort-id`. The session and
-route observation then carry `cohort_id`, `trial_id`, a stable task-contract
-digest, the Harness-observed pre-run workspace state, and the independent
-acceptance-command digest. Without `--cohort-id`, BureauLess assigns a
-session-local `unassigned:<session-id>` cohort so unrelated runs cannot be
-silently grouped as comparable.
+For comparable benchmark trials, pass an opaque `--cohort-id`. Benchmark
+identity v2 records separate task, delivered-context, and execution-contract
+digests, the Harness-observed pre-run workspace state, and the independent
+acceptance-contract digest (command, timeout, workspace mode, and environment
+policy). The execution contract retains safe comparison
+fields including Agent/adapter/runtime version, requested model and provider,
+opaque route instance, wire API, sandbox/isolation/timeout/cleanup policy,
+permission boundary, key environment-variable name, tool allow-list, and
+assignment renderer version. It does not retain the base URL or credential
+value. Without `--cohort-id`, BureauLess assigns a session-local
+`uncontrolled-<session-id>` cohort that is ineligible for paired comparison.
+Transport-only assignment and context-capsule IDs are removed before hashing
+the delivered-context contract so repeated trials do not differ solely because
+their envelope IDs are unique.
 
 After producing a baseline and candidate with the same declared cohort, task,
-workspace baseline, and independent acceptance contract, generate a bounded
-capability comparison with:
+delivered context, workspace baseline, and independent acceptance contract,
+generate a bounded capability comparison with:
 
 ```bash
 uv run bureauless audit contribution baseline/session.yaml candidate/session.yaml \
   --capability-id workspace-edit --invoked true
 ```
 
-The append-only artifact reports Harness-comparable latency, file delta, and
-independent-verification outcomes; token and monetary deltas remain conditional
+The v2 artifact reports controlled identity fields, execution `treatment_diff`,
+known `uncontrolled_confounders`, Harness-comparable latency/file delta and
+independent-verification outcomes. Token and monetary deltas remain conditional
 on matching native provenance. Invocation and result-use are explicit operator
 attestations, and the artifact always states `causal_claim: not_established`.
 
@@ -413,8 +440,10 @@ current baseline is deliberately conservative:
 | Tool timeline | comparable when native events exist | All five adapters normalize their CLI-owned native event streams; this does not expose raw provider SSE. |
 
 The report prints the source for each session (`harness`, `agent_reported`,
-`provider_reported`, or unavailable) and the agent's declared comparison
-eligibility. A normalized value never upgrades its evidence source.
+`provider_reported`, or unavailable) and the selected Agent×Provider route's
+declared comparison eligibility. Route evidence is authoritative for telemetry
+and comparability; Agent-level values remain only a compatibility fallback for
+unbound registry views. A normalized value never upgrades its evidence source.
 
 `bureauless metrics summarize .bureauless/runs` recursively discovers the
 `session.yaml` artifacts emitted by `audit run`. Its `comparison` section

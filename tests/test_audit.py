@@ -99,19 +99,29 @@ def test_audit_run_materializes_the_canonical_dry_run_evidence_chain(
     assert benchmark["cohort_id"] == "parser-benchmark-v1"
     assert benchmark["cohort_declared"] is True
     assert benchmark["trial_id"] == "session-dry-run"
-    assert len(benchmark["task_sha256"]) == 64
+    assert benchmark["schema"] == "bureauless_benchmark_identity_v2"
+    assert len(benchmark["task_contract_sha256"]) == 64
+    assert len(benchmark["context_contract_sha256"]) == 64
+    assert len(benchmark["execution_contract_sha256"]) == 64
+    assert benchmark["execution_contract"]["target_model"] == "gpt-5"
+    assert benchmark["execution_contract"]["assignment_renderer_version"] == "assignment_prompt_v1"
     assert benchmark["workspace_baseline_ref"] is None
     assert benchmark["acceptance_contract_sha256"] is None
     assert {
         key: value["status"]
         for key, value in session["audit_evidence"]["side_effect_coverage"].items()
     } == {
-        "workspace": "not_observed",
+        "workspace": "none",
         "process": "not_applicable",
-        "network": "not_observed",
-        "credential": "not_observed",
-        "payment": "not_observed",
+        "network": "none",
+        "credential": "none",
+        "payment": "none",
     }
+    decision = session["audit_evidence"]["decision_points"][0]
+    assert decision["candidate_set"][0]["disposition"] == "selected"
+    assert len(decision["candidate_set"]) == 5
+    assert decision["selection_scope"]["agent_id"] == "operator_fixed"
+    assert decision["selection_basis"]["budget_confidence"] == "low"
     assert result["verification"] is None
     report = Path(result["report"]).read_text(encoding="utf-8")
     assert "Review status: `not_run`" in report
@@ -171,6 +181,8 @@ def test_independent_verifier_isolated_workspace_and_credentials(
     assert evidence["status"] == "passed"
     assert evidence["source"] == "harness"
     assert evidence["stdout"].strip() == "missing"
+    assert len(evidence["acceptance_contract_sha256"]) == 64
+    assert evidence["environment_policy"] == "secret_named_variables_removed"
     assert not workspace.joinpath("verifier.tmp").exists()
 
 
@@ -178,18 +190,36 @@ def test_capability_contribution_requires_matched_verified_pair(
     tmp_path: Path, capsys
 ) -> None:
     identity = {
-        "schema": "bureauless_benchmark_identity_v1",
+        "schema": "bureauless_benchmark_identity_v2",
         "cohort_id": "cohort-1",
         "cohort_declared": True,
         "trial_id": "placeholder",
-        "task_sha256": "task-sha",
+        "task_contract_sha256": "task-sha",
+        "context_contract_sha256": "context-sha",
+        "execution_contract_sha256": "execution-sha",
+        "execution_contract": {
+            "agent_id": "codex-cli",
+            "target_model": "gpt-5",
+            "target_provider": "openai",
+        },
         "workspace_baseline_ref": "workspace-sha",
         "acceptance_contract_sha256": "verify-sha",
     }
 
     def write_session(name: str, wall_time: int, changed_files: int) -> Path:
         path = tmp_path / f"{name}.yaml"
-        benchmark = {**identity, "trial_id": name}
+        execution_contract = {
+            **identity["execution_contract"],
+            "target_model": "gpt-5.1" if name == "candidate" else "gpt-5",
+        }
+        benchmark = {
+            **identity,
+            "trial_id": name,
+            "execution_contract_sha256": hashlib.sha256(
+                yaml.safe_dump(execution_contract, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+            "execution_contract": execution_contract,
+        }
         path.write_text(
             yaml.safe_dump(
                 {
@@ -243,6 +273,12 @@ def test_capability_contribution_requires_matched_verified_pair(
     assert record["measurable_delta"]["wall_time_ms"]["delta"] == -20
     assert record["measurable_delta"]["total_tokens"]["eligibility"] == "conditional"
     assert contribution["causal_claim"] == "not_established"
+    assert contribution["schema"] == "bureauless_capability_contribution_v2"
+    assert contribution["treatment_diff"]["target_model"] == {
+        "baseline": "gpt-5",
+        "candidate": "gpt-5.1",
+    }
+    assert "network_conditions_not_controlled" in contribution["uncontrolled_confounders"]
     output = tmp_path / "contribution.yaml"
     assert main(
         [
@@ -262,15 +298,67 @@ def test_capability_contribution_requires_matched_verified_pair(
     capsys.readouterr()
 
     tampered = yaml.safe_load(candidate.read_text(encoding="utf-8"))
-    tampered["audit_evidence"]["benchmark_identity"]["task_sha256"] = "other-task"
+    tampered["audit_evidence"]["benchmark_identity"]["task_contract_sha256"] = "other-task"
     candidate.write_text(yaml.safe_dump(tampered, sort_keys=False), encoding="utf-8")
-    with pytest.raises(ProtocolError, match="identity mismatch: task_sha256"):
+    with pytest.raises(ProtocolError, match="identity mismatch: task_contract_sha256"):
         build_capability_contribution(
             baseline,
             candidate,
             capability_id="workspace-edit",
             invoked=True,
         )
+    tampered["audit_evidence"]["benchmark_identity"]["task_contract_sha256"] = "task-sha"
+    tampered["audit_evidence"]["benchmark_identity"]["context_contract_sha256"] = "other-context"
+    candidate.write_text(yaml.safe_dump(tampered, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ProtocolError, match="identity mismatch: context_contract_sha256"):
+        build_capability_contribution(
+            baseline,
+            candidate,
+            capability_id="workspace-edit",
+            invoked=True,
+        )
+
+
+def test_benchmark_context_identity_ignores_transport_assignment_ids(
+    tmp_path: Path, capsys
+) -> None:
+    assert main(["audit", "init", "--workspace", str(tmp_path), "--task", "Fix parser"]) == 0
+    capsys.readouterr()
+    sessions = []
+    for session_id in ("trial-a", "trial-b"):
+        assert main(
+            [
+                "audit", "run", "--workspace", str(tmp_path), "--agent", "codex-cli",
+                "--target-model", "gpt-5", "--target-provider", "openai",
+                "--cohort-id", "cohort-1", "--session-id", session_id, "--dry-run",
+            ]
+        ) == 0
+        sessions.append(yaml.safe_load(capsys.readouterr().out)["session"])
+    identities = [
+        yaml.safe_load(Path(path).read_text(encoding="utf-8"))["audit_evidence"]
+        ["benchmark_identity"]
+        for path in sessions
+    ]
+    assert identities[0]["context_contract_sha256"] == identities[1][
+        "context_contract_sha256"
+    ]
+
+
+@pytest.mark.parametrize(
+    "route_instance_id",
+    ["https://gateway.example/v1", "route name", "a/b", "sk-" + "x" * 30],
+)
+def test_audit_rejects_non_opaque_route_instance_labels(
+    tmp_path: Path, route_instance_id: str
+) -> None:
+    assert main(["audit", "init", "--workspace", str(tmp_path), "--task", "Fix parser"]) == 0
+    assert main(
+        [
+            "audit", "run", "--workspace", str(tmp_path), "--agent", "codex-cli",
+            "--target-model", "gpt-5", "--target-provider", "openai",
+            "--route-instance-id", route_instance_id, "--dry-run",
+        ]
+    ) == 1
 
 
 def test_audit_report_renders_existing_session_evidence(tmp_path: Path) -> None:
@@ -420,6 +508,13 @@ def test_agent_route_keeps_runtime_and_tested_endpoint_evidence_separate() -> No
     assert pi_responses.route_kind == "custom_http"
     assert pi_responses.endpoint_family == "openai"
     assert pi_responses.wire_api == "responses"
+    assert pi_responses.comparison_eligibility["monetary_cost"] == "not_comparable"
+    assert (
+        route_agent("pi", "anthropic-compatible").comparison_eligibility[
+            "monetary_cost"
+        ]
+        == "conditional"
+    )
 
     claude = route_agent("claude-code", "anthropic-compatible")
     assert claude.capability_evidence["clean_stateless_startup"] == "verified"

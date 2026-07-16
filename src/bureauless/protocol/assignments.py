@@ -20,6 +20,7 @@ DEFAULT_FORBIDDEN_ACTIONS = [
     "update_canonical_ledger",
     "choose_larger_model_without_approval",
 ]
+ASSIGNMENT_RENDERER_VERSION = "assignment_prompt_v1"
 
 
 @dataclass(frozen=True)

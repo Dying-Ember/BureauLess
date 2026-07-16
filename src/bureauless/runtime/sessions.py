@@ -24,7 +24,7 @@ from uuid import uuid4
 
 import yaml
 
-from ..agents import get_agent_spec, resolve_agent_binding, route_agent, session_adapter_for
+from ..agents import resolve_agent_binding, route_agent, session_adapter_for
 from ..errors import ProtocolError
 from ..protocol.artifacts import sha256_file
 from ..protocol.assignments import AssignmentPacket, workflow_version_id
@@ -1465,6 +1465,19 @@ def _load_audit_evidence(value: Any) -> dict[str, Any]:
             point.get("later_outcome"), dict
         ):
             raise ProtocolError("Decision point later_outcome must be an object or null")
+        candidate_set = point.get("candidate_set")
+        if candidate_set is not None:
+            if not isinstance(candidate_set, list) or not candidate_set:
+                raise ProtocolError("Decision point candidate_set must be a non-empty list")
+            for candidate in candidate_set:
+                if not isinstance(candidate, dict):
+                    raise ProtocolError("Decision point candidate_set entries must be objects")
+                if not _string_or_none(candidate.get("action")):
+                    raise ProtocolError("Decision point candidate action must be non-empty")
+                if candidate.get("disposition") not in ("selected", "rejected"):
+                    raise ProtocolError("Decision point candidate disposition is invalid")
+                if not _string_or_none(candidate.get("reason")):
+                    raise ProtocolError("Decision point candidate reason must be non-empty")
 
     for effect in side_effects:
         if effect.get("type") not in ("workspace", "process", "network", "credential", "payment"):
@@ -1505,16 +1518,31 @@ def _load_audit_evidence(value: Any) -> dict[str, Any]:
     if benchmark_identity is not None:
         if not isinstance(benchmark_identity, dict):
             raise ProtocolError("Session audit_evidence.benchmark_identity must be an object")
-        if benchmark_identity.get("schema") != "bureauless_benchmark_identity_v1":
+        benchmark_schema = benchmark_identity.get("schema")
+        if benchmark_schema not in {
+            "bureauless_benchmark_identity_v1",
+            "bureauless_benchmark_identity_v2",
+        }:
             raise ProtocolError("Benchmark identity schema is invalid")
         for key in ("cohort_id", "trial_id"):
             if not _string_or_none(benchmark_identity.get(key)):
                 raise ProtocolError(f"Benchmark identity {key} must be a non-empty string")
         if not isinstance(benchmark_identity.get("cohort_declared"), bool):
             raise ProtocolError("Benchmark identity cohort_declared must be boolean")
-        task_sha = benchmark_identity.get("task_sha256")
+        task_key = (
+            "task_contract_sha256"
+            if benchmark_schema == "bureauless_benchmark_identity_v2"
+            else "task_sha256"
+        )
+        task_sha = benchmark_identity.get(task_key)
         if not isinstance(task_sha, str) or not task_sha:
-            raise ProtocolError("Benchmark identity task_sha256 must be a non-empty string")
+            raise ProtocolError(f"Benchmark identity {task_key} must be a non-empty string")
+        if benchmark_schema == "bureauless_benchmark_identity_v2":
+            for key in ("context_contract_sha256", "execution_contract_sha256"):
+                if not _string_or_none(benchmark_identity.get(key)):
+                    raise ProtocolError(f"Benchmark identity {key} must be a non-empty string")
+            if not isinstance(benchmark_identity.get("execution_contract"), dict):
+                raise ProtocolError("Benchmark identity execution_contract must be an object")
         baseline_ref = benchmark_identity.get("workspace_baseline_ref")
         if baseline_ref is not None and (
             not isinstance(baseline_ref, str) or not baseline_ref
@@ -1539,10 +1567,9 @@ def _load_audit_evidence(value: Any) -> dict[str, Any]:
         for effect_type, coverage in side_effect_coverage.items():
             if not isinstance(coverage, dict):
                 raise ProtocolError(f"Side effect coverage {effect_type} must be an object")
-            if coverage.get("status") not in (
-                "observed",
-                "not_observed",
-                "not_applicable",
+            status = coverage.get("status")
+            if status not in (
+                "observed", "not_observed", "full", "partial", "none", "not_applicable"
             ):
                 raise ProtocolError(f"Side effect coverage {effect_type} status is invalid")
             if coverage.get("evidence_source") not in (
@@ -1554,6 +1581,16 @@ def _load_audit_evidence(value: Any) -> dict[str, Any]:
                 raise ProtocolError(
                     f"Side effect coverage {effect_type} evidence_source is invalid"
                 )
+            if status in {"full", "partial", "none", "not_applicable"}:
+                if not _string_or_none(coverage.get("scope")):
+                    raise ProtocolError(f"Side effect coverage {effect_type} scope is required")
+                blind_spots = coverage.get("blind_spots")
+                if not isinstance(blind_spots, list) or not all(
+                    isinstance(item, str) and item for item in blind_spots
+                ):
+                    raise ProtocolError(
+                        f"Side effect coverage {effect_type} blind_spots must be a list of strings"
+                    )
 
     evidence = {
         "decision_points": [dict(item) for item in decision_points],
@@ -1582,6 +1619,15 @@ def _session_audit_evidence(
         verification_status = _mapping_value(verification.get("verification")).get(
             "status", "not_run"
         )
+        selected_action = f"dispatch_agent:{spec.agent_id}"
+        rejected_candidates = [
+            {
+                "action": f"routing_mode:{item['mode']}",
+                "disposition": "rejected",
+                "reason": item["rejected_because"],
+            }
+            for item in packet.routing_decision.rejected_modes
+        ]
         evidence.setdefault("decision_points", []).append(
             {
                 "decision_id": f"decision-{record.session_id}-dispatch",
@@ -1592,11 +1638,32 @@ def _session_audit_evidence(
                     "dispatch_packet.assignment",
                     "dispatch.session_spec",
                 ],
-                "action_selected": f"dispatch_agent:{spec.agent_id}",
-                "alternatives_visible": [
-                    f"routing_mode:{item['mode']}"
-                    for item in packet.routing_decision.rejected_modes
+                "action_selected": selected_action,
+                "alternatives_visible": [item["action"] for item in rejected_candidates],
+                "candidate_set": [
+                    {
+                        "action": selected_action,
+                        "disposition": "selected",
+                        "reason": packet.routing_decision.reason,
+                    },
+                    *rejected_candidates,
                 ],
+                "selection_basis": {
+                    "selection_policy_version": packet.routing_decision.selection_policy_version,
+                    "triggered_rules": packet.routing_decision.triggered_rules,
+                    "reason": packet.routing_decision.reason,
+                    "budget_reason": packet.routing_decision.budget_reason,
+                    "risk_reason": packet.routing_decision.risk_reason,
+                    "budget_confidence": packet.routing_decision.budget_confidence,
+                    "estimated_coordination_ratio": packet.routing_decision.estimated_coordination_ratio,
+                    "advisor_gate_decision": packet.routing_decision.advisor_gate_decision,
+                },
+                "selection_scope": {
+                    "routing_mode": "policy_selected",
+                    "agent_id": "operator_fixed",
+                    "target_provider": "operator_fixed",
+                    "target_model": "operator_fixed",
+                },
                 "selected_context": {
                     "routing_mode": packet.routing_decision.selected_mode,
                     "selection_policy_version": packet.routing_decision.selection_policy_version,
@@ -1670,44 +1737,72 @@ def _session_audit_evidence(
     process_observed = "process" in observed_effects
     credential_expected = bool(credential_env)
     evidence["side_effect_coverage"] = {
-        "workspace": {
-            "status": "observed" if workspace_observed else "not_observed",
-            "evidence_source": "harness" if workspace_observed else "unavailable",
-            "evidence_ref": "workspace.pre_state_ref+post_state_ref" if workspace_observed else None,
-        },
-        "process": {
-            "status": "observed" if process_observed else (
-                "not_applicable" if record.status == "dry_run" else "not_observed"
-            ),
-            "evidence_source": "harness" if process_observed else "unavailable",
-            "evidence_ref": "exit" if process_observed else None,
-        },
-        "network": _side_effect_coverage_entry(observed_effects.get("network")),
-        "credential": (
-            _side_effect_coverage_entry(observed_effects.get("credential"))
-            if credential_expected
-            else {
-                "status": "not_applicable",
-                "evidence_source": "unavailable",
-                "evidence_ref": None,
-            }
+        "workspace": _side_effect_coverage_entry(
+            observed=workspace_observed,
+            source="harness",
+            evidence_ref="workspace.pre_state_ref+post_state_ref",
+            scope="regular_file_content_hashes",
+            blind_spots=["symlinks", "file_modes", "permissions", "extended_attributes"],
         ),
-        "payment": _side_effect_coverage_entry(observed_effects.get("payment")),
+        "process": _side_effect_coverage_entry(
+            observed=process_observed,
+            source="harness",
+            evidence_ref="exit",
+            scope="outer_agent_process_group_lifecycle",
+            blind_spots=["detached_descendants", "external_processes"],
+            not_applicable=record.status == "dry_run",
+        ),
+        "network": _side_effect_coverage_entry(
+            observed="network" in observed_effects,
+            source="harness",
+            evidence_ref="extraction.provider_usage_capture",
+            scope="configured_provider_proxy",
+            blind_spots=["direct_agent_egress", "child_process_network"],
+        ),
+        "credential": (
+            _side_effect_coverage_entry(
+                observed="credential" in observed_effects,
+                source="harness",
+                evidence_ref="dispatch.session_spec.provider_api_key_env",
+                scope="selected_child_environment",
+                blind_spots=["retrieved_secrets", "transformed_secrets", "downstream_handling"],
+            )
+            if credential_expected
+            else _side_effect_coverage_entry(
+                observed=False,
+                source="unavailable",
+                evidence_ref=None,
+                scope="selected_child_environment",
+                blind_spots=[],
+                not_applicable=True,
+            )
+        ),
+        "payment": _side_effect_coverage_entry(
+            observed=False,
+            source="unavailable",
+            evidence_ref=None,
+            scope="provider_billing_and_settlement",
+            blind_spots=["external_billing_state", "payment_settlement"],
+        ),
     }
     return evidence
 
 
-def _side_effect_coverage_entry(effect: dict[str, Any] | None) -> dict[str, Any]:
-    if effect is None:
-        return {
-            "status": "not_observed",
-            "evidence_source": "unavailable",
-            "evidence_ref": None,
-        }
+def _side_effect_coverage_entry(
+    *,
+    observed: bool,
+    source: str,
+    evidence_ref: str | None,
+    scope: str,
+    blind_spots: list[str],
+    not_applicable: bool = False,
+) -> dict[str, Any]:
     return {
-        "status": "observed",
-        "evidence_source": effect["source"],
-        "evidence_ref": effect.get("evidence_ref"),
+        "status": "not_applicable" if not_applicable else "partial" if observed else "none",
+        "scope": scope,
+        "blind_spots": blind_spots,
+        "evidence_source": source if observed else "unavailable",
+        "evidence_ref": evidence_ref if observed else None,
     }
 
 
@@ -1783,6 +1878,13 @@ def run_independent_verification(
     secrets = tuple(sensitive_values)
     stdout_text = _redact_native_text(_text_value(stdout), secrets)
     stderr_text = _redact_native_text(_text_value(stderr), secrets)
+    acceptance_contract = {
+        "schema": "bureauless_independent_verification_v1",
+        "command": command,
+        "timeout_seconds": timeout_seconds,
+        "workspace_mode": "copy_without_vcs_metadata",
+        "environment_policy": "secret_named_variables_removed",
+    }
     return {
         "schema": "bureauless_independent_verification_v1",
         "source": "harness",
@@ -1791,6 +1893,12 @@ def run_independent_verification(
         "command_sha256": hashlib.sha256(
             json.dumps(command, separators=(",", ":")).encode("utf-8")
         ).hexdigest(),
+        "acceptance_contract_sha256": hashlib.sha256(
+            json.dumps(acceptance_contract, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest(),
+        "timeout_seconds": timeout_seconds,
         "started_at": started_at,
         "finished_at": _now(),
         "wall_time_ms": max(1, int((time.monotonic() - started_monotonic) * 1000)),
@@ -1800,6 +1908,7 @@ def run_independent_verification(
         "stdout_sha256": hashlib.sha256(stdout_text.encode("utf-8")).hexdigest(),
         "stderr_sha256": hashlib.sha256(stderr_text.encode("utf-8")).hexdigest(),
         "workspace_mode": "copy_without_vcs_metadata",
+        "environment_policy": "secret_named_variables_removed",
     }
 
 
@@ -2088,10 +2197,18 @@ def _load_session_spec(data: dict[str, Any]) -> SessionSpec:
 def _validate_dispatch_binding(packet: DispatchPacket, spec: SessionSpec) -> None:
     if spec.assignment_id != packet.assignment.assignment_id:
         raise ProtocolError("Dispatch binding assignment_id does not match packet")
-    if spec.agent_id == "codex-cli" and (
-        spec.target_model is None or spec.target_provider is None
-    ):
-        raise ProtocolError("Dispatch binding is missing Codex model or provider")
+    if spec.agent_id in SUPPORTED_SESSION_AGENTS:
+        return
+    if spec.target_model is None or spec.target_provider is None:
+        raise ProtocolError("Dispatch binding is missing agent model or provider")
+    resolve_agent_binding(
+        spec.agent_id,
+        target_model=spec.target_model,
+        target_provider=spec.target_provider,
+        provider_base_url=spec.provider_base_url,
+        provider_api_key_env=spec.provider_api_key_env,
+        provider_wire_api=spec.provider_wire_api,
+    )
 
 
 def _write_dispatch_packet(path: Path, packet: DispatchPacket) -> None:
@@ -2580,8 +2697,16 @@ def _run_codex_cli_session(
             review_status=review_status,
             control_intents=_list_value(codex_extraction.get("control_intents")),
             model_identity=_model_identity(binding, codex_extraction),
-            metric_provenance=_metric_provenance(spec.agent_id, outcome_metrics, extraction),
-            route_evidence=_session_route_evidence(spec.agent_id, binding.provider_id),
+            metric_provenance=_metric_provenance(
+                spec.agent_id, binding.provider_id, outcome_metrics, extraction
+            ),
+            route_evidence=_session_route_evidence(
+                spec.agent_id,
+                binding.provider_id,
+                outcome_metrics,
+                extraction,
+                _model_identity(binding, codex_extraction),
+            ),
         ).to_dict()
         if provider_capture is not None:
             extraction["provider_usage_capture"] = provider_capture.to_dict()
@@ -2707,8 +2832,16 @@ def _run_claude_code_session(
             review_status=_string_or_none(extraction.get("review_status")),
             control_intents=_list_value(extraction.get("control_intents")),
             model_identity=_model_identity(binding, extraction),
-            metric_provenance=_metric_provenance(spec.agent_id, outcome_metrics, extraction),
-            route_evidence=_session_route_evidence(spec.agent_id, binding.provider_id),
+            metric_provenance=_metric_provenance(
+                spec.agent_id, binding.provider_id, outcome_metrics, extraction
+            ),
+            route_evidence=_session_route_evidence(
+                spec.agent_id,
+                binding.provider_id,
+                outcome_metrics,
+                extraction,
+                _model_identity(binding, extraction),
+            ),
         ).to_dict()
     return SessionRecord(
         session_id=spec.session_id,
@@ -2864,8 +2997,16 @@ def _run_gemini_cli_session(
             review_status=_string_or_none(gemini_extraction.get("review_status")),
             control_intents=_list_value(gemini_extraction.get("control_intents")),
             model_identity=_model_identity(binding, extraction),
-            metric_provenance=_metric_provenance(spec.agent_id, outcome_metrics, extraction),
-            route_evidence=_session_route_evidence(spec.agent_id, binding.provider_id),
+            metric_provenance=_metric_provenance(
+                spec.agent_id, binding.provider_id, outcome_metrics, extraction
+            ),
+            route_evidence=_session_route_evidence(
+                spec.agent_id,
+                binding.provider_id,
+                outcome_metrics,
+                extraction,
+                _model_identity(binding, extraction),
+            ),
         ).to_dict()
     return SessionRecord(
         session_id=spec.session_id,
@@ -3118,8 +3259,16 @@ def _native_json_session_record(
             review_status=_string_or_none(agent_extraction.get("review_status")),
             control_intents=_list_value(agent_extraction.get("control_intents")),
             model_identity=_model_identity(binding, extraction),
-            metric_provenance=_metric_provenance(spec.agent_id, outcome_metrics, extraction),
-            route_evidence=_session_route_evidence(spec.agent_id, binding.provider_id),
+            metric_provenance=_metric_provenance(
+                spec.agent_id, binding.provider_id, outcome_metrics, extraction
+            ),
+            route_evidence=_session_route_evidence(
+                spec.agent_id,
+                binding.provider_id,
+                outcome_metrics,
+                extraction,
+                _model_identity(binding, extraction),
+            ),
         ).to_dict()
     return SessionRecord(
         session_id=spec.session_id,
@@ -3894,6 +4043,7 @@ def _model_identity(binding: Any, extraction: dict[str, Any]) -> dict[str, Any]:
 
 def _metric_provenance(
     agent_id: str,
+    provider_id: str,
     outcome_metrics: dict[str, Any],
     extraction: dict[str, Any],
 ) -> dict[str, Any]:
@@ -3905,13 +4055,54 @@ def _metric_provenance(
         "tool_timeline": "native_event_stream"
         if extraction.get("native_event_stream_observed")
         else "not_captured",
-        "comparison_eligibility": dict(get_agent_spec(agent_id).comparison_eligibility),
+        "comparison_eligibility": dict(
+            route_agent(agent_id, provider_id).comparison_eligibility
+        ),
     }
 
 
-def _session_route_evidence(agent_id: str, provider_id: str) -> dict[str, Any]:
+def _session_route_evidence(
+    agent_id: str,
+    provider_id: str,
+    outcome_metrics: dict[str, Any],
+    extraction: dict[str, Any],
+    model_identity: dict[str, Any],
+) -> dict[str, Any]:
     evidence = route_agent(agent_id, provider_id).to_dict()
-    evidence["session_route_support"] = "verified"
+    usage_source = outcome_metrics.get("usage_source", "unavailable")
+    cost_source = outcome_metrics.get("cost_source", "unavailable")
+    if model_identity.get("independently_attested"):
+        model_status = "verified"
+    elif model_identity.get("provider_reported") or model_identity.get("cli_reported"):
+        model_status = "observed"
+    else:
+        model_status = "requested_only"
+    evidence["session_route_support"] = {
+        "launch": "verified",
+        "request_completed": "verified",
+        "workspace_mutation": (
+            "verified"
+            if _int_value(outcome_metrics.get("changed_files_count")) > 0
+            else "not_observed"
+        ),
+        "telemetry": (
+            "verified"
+            if usage_source == "provider_attributed"
+            else "observed"
+            if usage_source not in {"unavailable", "agent_not_supported"}
+            else "unavailable"
+        ),
+        "model_identity": model_status,
+        "cost_attribution": (
+            "observed"
+            if cost_source not in {"unavailable", "agent_not_supported"}
+            else "unavailable"
+        ),
+        "permission_boundary": "not_verified",
+        "native_event_stream": (
+            "observed" if extraction.get("native_event_stream_observed") else "not_captured"
+        ),
+    }
     return evidence
 
 

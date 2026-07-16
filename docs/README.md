@@ -85,6 +85,9 @@ instead of guessing which historical milestone is current.
 
 ## Releases
 
+- [`releases/v0.3.0.md`](releases/v0.3.0.md): evidence-contract v2 release
+  notes, controlled benchmark identity, decision candidates, and scoped
+  side-effect coverage.
 - [`releases/v0.2.0.md`](releases/v0.2.0.md): cross-agent audit release notes,
   implemented route summary, evidence boundary, demo, and known limitations.
 

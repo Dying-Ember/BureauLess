@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -12,7 +13,10 @@ import yaml
 
 from ..agents.registry import doctor_agent, get_agent_spec, get_provider_profile, route_agent
 from ..errors import ProtocolError
-from ..protocol.assignments import export_assignment
+from ..protocol.assignments import (
+    ASSIGNMENT_RENDERER_VERSION,
+    export_assignment,
+)
 from ..protocol.dispatch import compile_dispatch_packet
 from ..protocol.harness import load_ledger, load_mission, load_workflow
 from ..protocol.routing import load_routing_decision
@@ -266,13 +270,9 @@ def run_audit(
     session_id: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    route_instance_id = route_instance_id.strip()
-    if not route_instance_id:
-        raise ProtocolError("route_instance_id must be a non-empty opaque label")
+    route_instance_id = _opaque_label(route_instance_id, "route_instance_id")
     if cohort_id is not None:
-        cohort_id = cohort_id.strip()
-        if not cohort_id:
-            raise ProtocolError("cohort_id must be a non-empty opaque label")
+        cohort_id = _opaque_label(cohort_id, "cohort_id")
     root = workspace / ".bureauless"
     mission_path = root / "mission.yaml"
     workflow_path = root / "workflow.yaml"
@@ -299,10 +299,29 @@ def run_audit(
             "selected_mode": "single_agent",
             "selection_policy_version": "audit-single-agent-v1",
             "triggered_rules": ["bounded_single_agent_audit"],
-            "rejected_modes": [],
+            "rejected_modes": [
+                {
+                    "mode": "single_agent_with_review",
+                    "rejected_because": "The audit profile was explicitly invoked for one bounded worker; independent verification remains separate.",
+                },
+                {
+                    "mode": "small_dag",
+                    "rejected_because": "The generated workflow contains one bounded implementation node with no task dependency requiring a DAG.",
+                },
+                {
+                    "mode": "parallel_swarm",
+                    "rejected_because": "No independent parallel work items were visible at dispatch time.",
+                },
+                {
+                    "mode": "stop_and_ask_human",
+                    "rejected_because": "The operator explicitly supplied the Agent, model, route, and run command.",
+                },
+            ],
             "estimated_coordination_ratio": 0.0,
-            "budget_confidence": "high",
+            "budget_confidence": "low",
             "reason": "Run one registered agent under the canonical observation contract.",
+            "budget_reason": "No provider cost estimate is available before dispatch; one worker minimizes coordination overhead.",
+            "risk_reason": "The task is bounded by an isolated workspace and optional independent verification.",
             "advisor_gate_decision": {
                 "invoked": False,
                 "policy_version": "audit-single-agent-v1",
@@ -384,6 +403,9 @@ def run_audit(
             "status": verification["status"],
             "exit_code": verification["exit_code"],
             "command_sha256": verification["command_sha256"],
+            "acceptance_contract_sha256": verification[
+                "acceptance_contract_sha256"
+            ],
             "workspace_state_ref": record.workspace.get("post_state_ref"),
             "evidence_ref": verification_path.name,
             "evidence_sha256": hashlib.sha256(verification_path.read_bytes()).hexdigest(),
@@ -394,27 +416,16 @@ def run_audit(
             "status": "not_run",
             "reason": "dry_run" if dry_run and verify_command else "not_requested",
         }
-    audit_evidence["benchmark_identity"] = {
-        "schema": "bureauless_benchmark_identity_v1",
-        "cohort_id": cohort_id or f"unassigned:{record.session_id}",
-        "cohort_declared": cohort_id is not None,
-        "trial_id": record.session_id,
-        "task_sha256": _sha256_payload(
-            {
-                "mission_goal": mission.goal,
-                "workflow_id": workflow.workflow_id,
-                "node_id": assignment.node_id,
-                "role": assignment.role,
-                "assignment_goal": assignment.goal,
-                "expected_events": assignment.expected_events,
-                "forbidden_actions": assignment.forbidden_actions,
-            }
-        ),
-        "workspace_baseline_ref": record.workspace.get("pre_state_ref"),
-        "acceptance_contract_sha256": audit_evidence[
-            "independent_verification"
-        ].get("command_sha256"),
-    }
+    audit_evidence["benchmark_identity"] = _benchmark_identity_v2(
+        mission_goal=mission.goal,
+        workflow_id=workflow.workflow_id,
+        assignment=assignment,
+        record=record.to_dict(),
+        registration=registration,
+        route_instance_id=route_instance_id,
+        cohort_id=cohort_id,
+        independent_verification=audit_evidence["independent_verification"],
+    )
     for point in audit_evidence.get("decision_points", []):
         if point.get("decision_type") != "dispatch":
             continue
@@ -551,13 +562,30 @@ def build_capability_contribution(
     candidate_identity = _mapping(candidate.audit_evidence.get("benchmark_identity"))
     if not baseline_identity or not candidate_identity:
         raise ProtocolError("Both sessions require benchmark_identity")
+    if (
+        baseline_identity.get("schema") != "bureauless_benchmark_identity_v2"
+        or candidate_identity.get("schema") != "bureauless_benchmark_identity_v2"
+    ):
+        raise ProtocolError("Capability comparison requires benchmark_identity_v2")
+    for label, identity in (
+        ("baseline", baseline_identity),
+        ("candidate", candidate_identity),
+    ):
+        execution_contract = _mapping(identity.get("execution_contract"))
+        if _sha256_payload(execution_contract) != identity.get(
+            "execution_contract_sha256"
+        ):
+            raise ProtocolError(
+                f"Capability comparison {label} execution contract hash mismatch"
+            )
     if not baseline_identity.get("cohort_declared") or not candidate_identity.get(
         "cohort_declared"
     ):
         raise ProtocolError("Capability comparison requires an explicitly declared cohort")
     identity_fields = (
         "cohort_id",
-        "task_sha256",
+        "task_contract_sha256",
+        "context_contract_sha256",
         "workspace_baseline_ref",
         "acceptance_contract_sha256",
     )
@@ -585,8 +613,10 @@ def build_capability_contribution(
     candidate_verification = _mapping(
         candidate.audit_evidence.get("independent_verification")
     )
+    baseline_execution = _mapping(baseline_identity.get("execution_contract"))
+    candidate_execution = _mapping(candidate_identity.get("execution_contract"))
     return {
-        "schema": "bureauless_capability_contribution_v1",
+        "schema": "bureauless_capability_contribution_v2",
         "capability_contribution": {
             "capability_id": capability_id,
             "invoked": invoked,
@@ -629,6 +659,16 @@ def build_capability_contribution(
         "comparison_identity": {
             key: baseline_identity.get(key) for key in identity_fields
         },
+        "controlled_fields": {
+            key: baseline_identity.get(key) for key in identity_fields
+        },
+        "treatment_diff": _mapping_diff(baseline_execution, candidate_execution),
+        "uncontrolled_confounders": _uncontrolled_confounders(
+            baseline,
+            candidate,
+            baseline_execution,
+            candidate_execution,
+        ),
         "baseline": {
             "session_id": baseline.session_id,
             "path": str(baseline_path),
@@ -679,6 +719,160 @@ def _conditional_metric_delta(
     if delta["eligibility"] == "comparable":
         delta["eligibility"] = "conditional"
     return delta
+
+
+def _benchmark_identity_v2(
+    *,
+    mission_goal: str,
+    workflow_id: str,
+    assignment: Any,
+    record: dict[str, Any],
+    registration: dict[str, Any],
+    route_instance_id: str,
+    cohort_id: str | None,
+    independent_verification: dict[str, Any],
+) -> dict[str, Any]:
+    dispatch_spec = _mapping(_mapping(record.get("dispatch")).get("session_spec"))
+    route = _mapping(registration.get("route"))
+    doctor = _mapping(registration.get("doctor"))
+    provider = _mapping(registration.get("provider"))
+    extraction = _mapping(record.get("extraction"))
+    context_requests = extraction.get("context_requests", [])
+    if not isinstance(context_requests, list):
+        context_requests = []
+
+    task_contract = {
+        "mission_goal": mission_goal,
+        "workflow_id": workflow_id,
+        "node_id": assignment.node_id,
+        "role": assignment.role,
+        "goal": assignment.goal,
+        "expected_events": assignment.expected_events,
+        "forbidden_actions": assignment.forbidden_actions,
+    }
+    context_contract = {
+        "assignment_renderer_version": ASSIGNMENT_RENDERER_VERSION,
+        "visible_context": _without_transient_context_identity(
+            assignment.visible_context
+        ),
+        "artifact_refs": assignment.artifact_refs,
+        "allowed_tools": assignment.allowed_tools,
+        "outcome_metrics_policy": assignment.outcome_metrics_policy,
+        "context_requests": _stable_context_requests(context_requests),
+    }
+    execution_contract = {
+        "agent_id": record.get("agent_id"),
+        "agent_runtime_version": doctor.get("version"),
+        "verified_runtime_version": route.get("verified_runtime_version"),
+        "session_adapter": route.get("session_adapter"),
+        "assignment_renderer_version": ASSIGNMENT_RENDERER_VERSION,
+        "target_model": dispatch_spec.get("target_model"),
+        "target_provider": dispatch_spec.get("target_provider"),
+        "route_instance_id": route_instance_id,
+        "route_kind": route.get("route_kind"),
+        "endpoint_family": route.get("endpoint_family"),
+        "wire_api": dispatch_spec.get("provider_wire_api") or route.get("wire_api"),
+        "sandbox_mode": dispatch_spec.get("sandbox_mode"),
+        "isolation_mode": dispatch_spec.get("isolation_mode"),
+        "timeout_seconds": dispatch_spec.get("timeout_seconds"),
+        "cleanup_policy": dispatch_spec.get("cleanup_policy"),
+        "permission_boundary": route.get("permission_boundary"),
+        "provider_api_key_env": dispatch_spec.get("provider_api_key_env")
+        or provider.get("default_api_key_env"),
+        "tool_allow_list": assignment.allowed_tools,
+    }
+    acceptance_contract_sha256 = None
+    contract_sha256 = independent_verification.get("acceptance_contract_sha256")
+    if isinstance(contract_sha256, str) and contract_sha256:
+        acceptance_contract_sha256 = contract_sha256
+    resolved_cohort = cohort_id or f"uncontrolled-{record.get('session_id')}"
+    return {
+        "schema": "bureauless_benchmark_identity_v2",
+        "cohort_id": resolved_cohort,
+        "cohort_declared": cohort_id is not None,
+        "trial_id": record.get("session_id"),
+        "task_contract_sha256": _sha256_payload(task_contract),
+        "context_contract_sha256": _sha256_payload(context_contract),
+        "execution_contract_sha256": _sha256_payload(execution_contract),
+        "execution_contract": execution_contract,
+        "workspace_baseline_ref": _mapping(record.get("workspace")).get(
+            "pre_state_ref"
+        ),
+        "acceptance_contract_sha256": acceptance_contract_sha256,
+    }
+
+
+def _mapping_diff(
+    baseline: dict[str, Any], candidate: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    return {
+        key: {"baseline": baseline.get(key), "candidate": candidate.get(key)}
+        for key in sorted(set(baseline) | set(candidate))
+        if baseline.get(key) != candidate.get(key)
+    }
+
+
+def _stable_context_requests(items: list[Any]) -> list[dict[str, Any]]:
+    stable: list[dict[str, Any]] = []
+    for item in items:
+        entry = _mapping(item)
+        request = _mapping(entry.get("request"))
+        resolution = _mapping(entry.get("resolution"))
+        stable.append(
+            {
+                "request": {
+                    key: request.get(key)
+                    for key in ("missing_information", "requested_refs", "expected_value")
+                },
+                "resolution": {
+                    key: resolution.get(key)
+                    for key in (
+                        "status",
+                        "policy_version",
+                        "granted_artifacts",
+                        "denied_refs",
+                        "unavailable_refs",
+                        "added_tokens_estimate",
+                    )
+                },
+            }
+        )
+    return stable
+
+
+def _without_transient_context_identity(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_transient_context_identity(item)
+            for key, item in value.items()
+            if key not in {"assignment_id", "context_capsule_id"}
+        }
+    if isinstance(value, list):
+        return [_without_transient_context_identity(item) for item in value]
+    return value
+
+
+def _uncontrolled_confounders(
+    baseline: Any,
+    candidate: Any,
+    baseline_execution: dict[str, Any],
+    candidate_execution: dict[str, Any],
+) -> list[str]:
+    confounders = [
+        "host_load_not_controlled",
+        "network_conditions_not_controlled",
+        "provider_backend_state_not_controlled",
+    ]
+    if not baseline_execution.get("agent_runtime_version") or not candidate_execution.get(
+        "agent_runtime_version"
+    ):
+        confounders.append("agent_runtime_version_not_fully_attested")
+    for label, record in (("baseline", baseline), ("candidate", candidate)):
+        result = _mapping(record.result_proposal)
+        identity = _mapping(result.get("model_identity"))
+        if not identity.get("independently_attested"):
+            confounders.append(f"{label}_model_identity_not_independently_attested")
+    return confounders
 
 
 def archive_session(session_path: Path, workspace: Path) -> dict[str, Path]:
@@ -804,6 +998,9 @@ def render_report(record: dict[str, Any]) -> str:
         audit_evidence.get("independent_verification")
     )
     benchmark_identity = _mapping(audit_evidence.get("benchmark_identity"))
+    task_contract = benchmark_identity.get(
+        "task_contract_sha256", benchmark_identity.get("task_sha256")
+    )
     decision_points = _mapping_list(audit_evidence.get("decision_points"))
     side_effects = _mapping_list(audit_evidence.get("side_effects"))
     side_effect_coverage = _mapping(audit_evidence.get("side_effect_coverage"))
@@ -825,7 +1022,9 @@ def render_report(record: dict[str, Any]) -> str:
         f"- Runtime version: `{_display(doctor.get('version'))}`",
         f"- Route verification freshness: `{_display(registration.get('verification_freshness'))}`",
         f"- Benchmark cohort: `{_display(benchmark_identity.get('cohort_id'))}`",
-        f"- Task contract: `{_display(benchmark_identity.get('task_sha256'))}`",
+        f"- Task contract: `{_display(task_contract)}`",
+        f"- Context contract: `{_display(benchmark_identity.get('context_contract_sha256'))}`",
+        f"- Execution contract: `{_display(benchmark_identity.get('execution_contract_sha256'))}`",
         f"- Workspace baseline: `{_display(benchmark_identity.get('workspace_baseline_ref'))}`",
         "",
         "## Evidence",
@@ -928,3 +1127,14 @@ def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
 def _sha256_payload(payload: dict[str, Any]) -> str:
     encoded = yaml.safe_dump(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _opaque_label(value: str, field: str) -> str:
+    label = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", label):
+        raise ProtocolError(
+            f"{field} must be a 1-128 character opaque label using letters, digits, '.', '_', or '-'"
+        )
+    if re.fullmatch(r"(?:sk-|AIza)[A-Za-z0-9_-]{20,}", label):
+        raise ProtocolError(f"{field} looks like a credential, not an opaque label")
+    return label
