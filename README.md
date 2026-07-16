@@ -4,134 +4,266 @@
 
 [![CI](https://github.com/Dying-Ember/BureauLess/actions/workflows/ci.yml/badge.svg)](https://github.com/Dying-Ember/BureauLess/actions/workflows/ci.yml)
 
-BureauLess is a small, local-first orchestration layer for DAG-shaped agent
-workflows.
+BureauLess is a local-first control and audit harness that sits outside coding
+agent runtimes. It registers heterogeneous agents and provider routes under one
+contract, dispatches bounded work, and records the evidence needed to inspect
+and compare runs.
 
-BureauLess is not an agent. It is a token-aware harness for deciding when
-agents are worth using, constraining what they may do, and recording what can
-be trusted.
+It is not an agent runtime, provider gateway, or credential broker. Codex CLI,
+Claude Code, Gemini CLI, OpenCode, and Pi keep their own model loops, tools,
+memory, streaming, and retries. BureauLess owns the boundary around them.
 
-Today, BureauLess combines YAML protocols, a Python runtime/API, CLI tools, and
-a browser/Electron workbench. It also maintains one bounded real-agent execution
-path through `codex-cli`; broader provider and agent coverage remains future
-work.
+## Why BureauLess
 
-Agent workflows tend to fail in two familiar organizational ways. Sometimes a
-tiny patch gets an org chart: planner, reviewer, advisor, coordinator, and
-everyone reading the same repository context before one worker touches one
-file. Sometimes it fails the other way: one overloaded lead fans work out to
-many workers with no middle layer, no gates, no trusted ledger, and no clear
-way to explain who is blocked, who is done, and which result should be believed.
+Agent workflows often fail like organizations. A tiny patch gets an org chart:
+planner, reviewer, advisor, and coordinator all reread the same repository
+before one worker changes one file. Or the system fails in the opposite way:
+one overloaded lead fans work out to many workers with no gates, trusted
+ledger, or clear answer to who is blocked, who is done, and which result should
+be believed.
 
-BureauLess helps choose the smallest coordination structure that can safely do
-the job. If one bounded worker is enough, do not convene a company. If the work
-fans out, add only the structure that earns its keep: assignments, gates,
-artifact checks, budget limits, replayable events, and a ledger that decides
-what becomes shared truth.
+BureauLess chooses the smallest coordination structure that can safely do the
+job. If one bounded worker is enough, do not convene a company. When work truly
+fans out, add only the assignments, gates, artifact checks, budgets, and roles
+that earn their cost.
 
-The point is not just control in the moment. If every assignment, gate,
-artifact, budget estimate, model choice, and outcome becomes durable data, the
-system can be replayed and backtested. Over time, the goal is for real runs to
-show which workflow shapes were worth it, which advisor calls paid for
-themselves, which gates caught real risk, and where the policy should get
-simpler.
+The goal is not only control during one run. Durable assignments, routing
+decisions, model choices, gates, evidence, and outcomes make runs replayable and
+backtestable. Over time, real data should show which workflow shapes were worth
+it, which advisors paid for themselves, which gates caught risk, and where the
+policy should become simpler.
 
-## Why This Exists
-
-Most agent systems are very eager to become bigger agent systems. BureauLess
-goes the other way: start with one bounded worker, add coordination only when
-the evidence says it is worth the cost.
-
-The useful question is not "how many agents can we summon?" It is "which agent
+The useful question is not "how many agents can we summon?" It is "which Agent
 work is safe, useful, auditable, and worth the tokens?"
 
-## What It Does
+## The Boundary
 
-It keeps model routing, task dependencies, review gates, and run records in
-YAML files outside of any single chat session. Codex, Claude, or another model
-can act as the orchestrator, while smaller models execute clearly bounded task
-nodes.
+| BureauLess owns | Agent runtime owns |
+| --- | --- |
+| Agent and route registration | Model and tool loops |
+| Dispatch admission and isolated workspaces | Internal planning and memory |
+| Child-only configuration and credential delivery | Provider streaming and retries |
+| Native evidence retention and normalized facts | Tool implementation details |
+| Independent verification, ledger, replay, and comparison | Its own interactive UX |
 
-- Validates planning DAGs, missions, workflows, ledgers, assignments, and
-  structured runtime artifacts.
-- Derives runnable, blocked, completed, and superseded state through replay and
-  gatekeeper rules.
-- Exports bounded assignments and can execute one maintained real-agent path
-  through isolated `codex-cli` sessions.
-- Records results, reviews, routing decisions, context delivery, telemetry, and
-  mutation decisions as inspectable artifacts and ledger events.
-- Provides a local Workbench for planning-DAG editing and runtime inspection
-  without moving canonical runtime rules into the frontend.
+The rule is simple: agents may do work, but they do not get to write trusted
+history.
+
+## What Ships Today
+
+### Cross-agent audit
+
+- One registry for Codex CLI, Claude Code, Gemini CLI, OpenCode, and Pi.
+- Explicit separation of Agent, Provider route, endpoint family, wire API,
+  model, credential delivery, and adapter capability.
+- Route-specific, one-shot child configuration without editing local Agent
+  configuration files.
+- Isolated workspace execution with native logs, workspace snapshots, diffs,
+  usage/cost provenance, tool events, and append-only route observations.
+- Harness-owned independent verification against a temporary copy of the
+  Agent's final workspace.
+- Benchmark identity and paired-run capability comparisons that refuse
+  mismatched tasks, baselines, cohorts, or acceptance contracts.
+- Explicit decision points and workspace/process/network/credential/payment
+  observation coverage.
+
+The machine-readable source of current compatibility is:
+
+```bash
+uv run bureauless agent matrix --evidence
+```
+
+Do not infer support from an Agent name, provider brand, or a generic
+"OpenAI-compatible" label. The exact route contract is authoritative.
+
+### Workflow control plane
+
+- YAML mission, workflow, ledger, assignment, result, review, routing, context,
+  mutation, telemetry, and dispatch contracts.
+- Deterministic validation, gatekeeping, replay, retry control, workflow
+  versions, and authoritative result acceptance.
+- The smallest valid coordination shape by default: one worker first, then
+  reviews or DAG structure only when the evidence justifies the overhead.
+
+### Workbench
+
+- One React UI for browser and Electron.
+- Planning-DAG editing plus runtime artifact, replay, gate, mutation, telemetry,
+  and dispatch inspection.
+- Python/FastAPI remains authoritative; the frontend does not reconstruct
+  runtime policy.
+
+## Design Philosophy
+
+1. **Start with one bounded worker.** Add review, advisors, or a DAG only when
+   task dependency, risk, or evidence justifies the coordination overhead.
+2. **Coordination must earn its tokens.** Every extra Agent needs a budget
+   reason; every advisor needs a stronger one. If coordination costs more than
+   it saves, simplify the workflow.
+3. **Evidence precedes shared truth.** Agent output is a proposal. Verification,
+   review, and acceptance decide what enters the canonical ledger.
+4. **Keep native evidence immutable.** Normalized facts make runs comparable,
+   but never erase the original logs, workspace state, or provenance.
+5. **Make failure explicit.** Retry, escalate, ask a human, split the task, or
+   stop; do not silently repeat an unchanged attempt.
+6. **Separate control from execution.** BureauLess owns admission, boundaries,
+   evidence, and history. Agent runtimes retain their model/tool internals.
+7. **Learn from runs, not demos.** Append-only records enable replay and
+   backtesting; a fixture or attractive dashboard is not production evidence.
+
+The core state model stays deliberately small:
+
+| Concept | Purpose |
+| --- | --- |
+| Mission and workflow | Goal, roles, dependencies, emitted events, and gates |
+| Assignment | Minimum context and authority for one bounded worker |
+| Run record | Native evidence, workspace effects, metrics, and result proposal |
+| Review and gate | Explicit acceptance policy before downstream progress |
+| Ledger | Append-only accepted history used for deterministic replay |
 
 ## Quick Start
 
-Install Python and workspace dependencies from a fresh checkout:
+Install the locked development dependencies:
 
 ```bash
 uv sync --dev
 npm install
 ```
 
-Start the Python API in the first terminal:
+### Inspect the registry without credentials
+
+```bash
+uv run bureauless agent list
+uv run bureauless agent matrix --evidence
+uv run bureauless agent route claude-code --provider anthropic-compatible
+```
+
+### Materialize an audit without launching an Agent
+
+```bash
+WORKSPACE=$(mktemp -d)
+
+uv run bureauless audit init \
+  --workspace "$WORKSPACE" \
+  --task "Create marker.txt and add a deterministic check"
+
+uv run bureauless audit run \
+  --workspace "$WORKSPACE" \
+  --agent codex-cli \
+  --target-model gpt-5 \
+  --target-provider openai \
+  --session-id audit-dry-run \
+  --dry-run
+```
+
+This produces the same assignment → routing → registration → dispatch →
+session → report → observation → archive chain as a live run, without invoking
+an Agent or provider.
+
+### Run a live route
+
+Use an environment-variable name, never a key value, on the command line:
+
+```bash
+export AUDIT_PROVIDER_API_KEY=...
+
+uv run bureauless audit run \
+  --workspace /path/to/repository \
+  --agent codex-cli \
+  --target-model your-model \
+  --target-provider openai-compatible \
+  --provider-wire-api responses \
+  --provider-base-url https://endpoint.example/v1 \
+  --provider-api-key-env AUDIT_PROVIDER_API_KEY \
+  --route-instance-id staging-responses \
+  --cohort-id parser-benchmark-v1 \
+  --verify-command 'python -m pytest -q'
+```
+
+Base-URL conventions differ by Agent and wire API. Use the
+[canonical route commands](docs/protocol/agent_provider_registry.md#10-canonical-commands)
+instead of adapting this example by guesswork.
+
+### Inspect and compare evidence
+
+```bash
+uv run bureauless audit report path/to/session.yaml
+uv run bureauless audit verify path/to/archive/manifest.yaml
+uv run bureauless audit observations --workspace /path/to/repository
+uv run bureauless metrics summarize /path/to/repository/.bureauless/runs
+
+uv run bureauless audit contribution \
+  baseline/session.yaml candidate/session.yaml \
+  --capability-id workspace-edit \
+  --invoked true
+```
+
+Capability contribution artifacts report measurable deltas; they deliberately
+state `causal_claim: not_established`.
+
+## Evidence Discipline
+
+- Native output remains evidence; normalized fields never replace it.
+- A tool event proves what an Agent reported doing. The workspace diff proves
+  the final file state.
+- Requested, CLI-reported, provider-reported, and independently attested model
+  identities remain separate.
+- Missing usage or currency cost stays missing; BureauLess does not estimate it.
+- Latency and workspace delta are Harness facts. Token, cost, and tool-timeline
+  comparisons retain their own provenance and eligibility.
+- Secrets are not written to the registry. Only environment-variable names are
+  recorded, and independent verification receives a scrubbed environment.
+
+See the complete
+[Agent/Provider registry contract](docs/protocol/agent_provider_registry.md)
+and the latest dated
+[endpoint capability evidence](docs/audits/2026-07-15-agent-endpoint-capability-matrix.md).
+
+## Workbench
+
+Start the API and browser UI in separate terminals:
 
 ```bash
 npm run api:dev
-```
-
-Start the browser Workbench in a second terminal:
-
-```bash
 npm run web:dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The API normally uses
-`http://127.0.0.1:8000`; if that port is busy, `api:dev` selects another local
-port and the Web launcher reads it from `.bureauless-api-url`.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). If port `8000` is busy,
+the API launcher selects another local port and records it in
+`.bureauless-api-url` for the Web launcher.
 
-With the API and Web server running, the optional Electron shell uses the same
-Workbench UI:
+Optional local surfaces:
 
 ```bash
 npm run desktop:dev
+npm run mutation-demo:prepare
+npm run web:smoke
 ```
 
-For a CLI-only sanity check:
+## Architecture in One Pass
 
-```bash
-uv run python -m bureauless mission validate examples/missions/demo/mission.yaml
-uv run python -m bureauless workflow compile examples/missions/demo/workflows/coder_reviewer_committer.yaml
-uv run python -m bureauless ledger replay \
-  examples/missions/demo/workflows/coder_reviewer_committer.yaml \
-  examples/missions/demo/ledger.yaml
-uv run python -m bureauless mission execution-spine-acceptance \
-  /tmp/bureauless-execution-spine
+```text
+mission + workflow + ledger
+            │
+            ▼
+ routing → bounded assignment → registered Agent route
+            │
+            ▼
+ isolated child session → native evidence + workspace delta
+            │
+            ▼
+ independent verification → review/acceptance → append-only ledger
+            │
+            ▼
+ observations + metrics + replay/backtesting
 ```
 
-The execution-spine command runs the deterministic Runtime M3.5 acceptance
-path and writes a failing-on-error evidence report into the target workspace.
+Canonical state is YAML. The runtime validates and transitions it; the
+Workbench displays it; external Agents never update it directly.
 
-## Maintained Live Demo
+## Development
 
-Run the provider-backed control-plane demo with an OpenAI-compatible endpoint.
-The API key stays in an environment variable; pass its name, not its value:
-
-```bash
-export DEMO_PROVIDER_BASE_URL=https://provider.example/v1
-export DEMO_PROVIDER_API_KEY=...
-RUN_DIR="live-demos/$(date +%F)-local-boundary-run"
-
-scripts/live-demo-boundary-run \
-  "$RUN_DIR/workspace" \
-  gpt-5.5 \
-  "$DEMO_PROVIDER_BASE_URL" \
-  DEMO_PROVIDER_API_KEY
-```
-
-The wrapper writes the manifest and publisher audit under the run workspace.
-See [`live-demos/README.md`](live-demos/README.md) for evidence-retention and
-redaction rules.
-
-Run the maintained checks with:
+Run the maintained checks:
 
 ```bash
 uv run python -m pytest -q
@@ -139,194 +271,31 @@ npm run web:build
 npm run web:smoke
 ```
 
-Playwright starts or reuses its own Vite dev server for `web:smoke`.
+CI runs the backend suite on Python 3.10 and builds/smoke-tests the Web and
+Electron applications on Node 24. CI never calls a real Agent or provider and
+requires no provider secrets.
 
-## Core Ideas
+Source ownership follows the runtime boundary:
 
-### Source Format
-
-Both DAG documents and run records use YAML. The project does not maintain a
-second persisted representation.
-
-### Task Node
-
-A node describes one bounded unit of work: goal, dependencies, files, model
-routing, review gate, verification, and prompt contract.
-
-### Run Record
-
-Every execution records the model, commits, changed files, verification result,
-and review status. This is what makes retries and audits possible.
-
-### Review Gate
-
-Nodes can be allowed to pass automatically, require orchestrator review, or
-require human review before downstream nodes become ready.
-
-### Failure Policy
-
-Failures are explicit: retry with the same model, escalate to a larger model,
-send to a human, or split the task further.
-
-### Token Economy
-
-Every extra agent needs a budget reason. Every advisor needs an even stronger
-one. If coordination costs more than it saves, the workflow should get simpler.
-
-### Replay And Backtesting
-
-Runs should leave enough structured evidence to replay what happened and test
-whether a different policy would have made a better routing, gate, model, or
-advisor decision.
-
-### Orchestrator And Harness
-
-The long-term architecture separates the control plane from execution:
-
-- The orchestrator plans, routes, records, reviews, and replans.
-- Worker agents execute bounded tasks.
-- The harness owns the control runtime: launch admission, execution envelopes,
-  lifecycle supervision, bounded context, evidence capture, result intake, and
-  canonical ledger transitions.
-- Adapters retain agent-runtime mechanisms such as model loops, tool internals,
-  planning, memory, and provider streaming/retry.
-- Advisors are lazy and budget-gated.
-
-The short version: agents can do work, but they do not get to write history.
-
-## Suggested Flow
-
-1. Define or load a planning DAG, mission, workflow, and ledger.
-2. Inspect runnable and blocked state through the Workbench or gatekeeper CLI.
-3. Export a bounded assignment with the required context and review policy.
-4. Execute it manually or through a supported bounded session adapter.
-5. Import and review the result, then record accepted findings and events.
-6. Replay the ledger and continue only when downstream gates are satisfied.
-
-## Workbench
-
-The Workbench handles planning-DAG editing plus runtime inspection for mission,
-workflow, ledger, replay, gatekeeper, mutation, routing, outcome, evidence,
-context, telemetry, assignment, result, turn-report, and dispatch artifacts. It
-uses one React UI for both browser and Electron. Python remains authoritative
-through the local FastAPI API.
-
-Run the local API:
-
-```bash
-npm run api:dev
-```
-
-This launcher always uses the repo-local `.venv`, so it still works even if
-your shell currently has another project's virtual environment activated.
-If port `8000` is already busy, it automatically picks the next free local
-port and writes the chosen API URL to `.bureauless-api-url`.
-
-Run the browser workbench:
-
-```bash
-npm run web:dev
-```
-
-The Vite dev server reads `.bureauless-api-url` when it starts. If the API
-launcher had to move from `8000` to another port, restart `web:dev` once so
-the proxy follows the new API address.
-
-Run the browser smoke test:
-
-```bash
-npm run web:smoke
-```
-
-Prepare an isolated controlled-mutation demo before manually testing the
-Workbench accept/reject flow:
-
-```bash
-npm run mutation-demo:prepare
-```
-
-The command resets only `.bureauless/mutation-demo`, validates no tracked demo
-state, and prints a Workbench URL containing the disposable workflow and ledger
-paths. Open that URL after `api:dev` and `web:dev` are running.
-
-Run the Electron shell:
-
-```bash
-npm run desktop:dev
-```
-
-If the local npm Electron binary is incomplete, the launcher automatically falls
-back to a system install such as `electron39`.
-
-Playwright starts or reuses the Vite dev server. The UI follows the system color
-scheme by default and also exposes `system / light / dark` controls. DAG
-documents and run records remain YAML-only.
-
-## Continuous Integration
-
-GitHub Actions runs two deterministic checks for every pull request, every push
-to `main`, merge-queue groups, and manual dispatches:
-
-- `backend`: installs locked Python dependencies with uv on Python 3.10 and runs
-  the complete pytest suite.
-- `workbench`: installs locked npm dependencies on Node 24, builds the Web and
-  Electron applications, installs Playwright Chromium, and runs the browser
-  smoke suite.
-
-CI does not invoke a real agent or model provider and requires no provider
-secrets. After both checks have completed successfully in GitHub at least once,
-the `main` ruleset should require `backend` and `workbench`, require pull
-requests to be up to date, and block force pushes and branch deletion.
-
-## Source Layout
-
-The runtime/harness code is now grouped by ownership boundary instead of living
-as one flat module shelf:
-
-- `src/bureauless/protocol/`: YAML-backed protocol models, validators,
-  assignment/result handling, artifact integrity, and budget snapshots.
-- `src/bureauless/runtime/`: replay, gatekeeper, session wrapper, and outcome
-  metrics.
-- `src/bureauless/agents/`: external agent registry and doctor checks.
-- `src/bureauless/api/`: FastAPI workbench API entrypoints.
-- `src/bureauless/cli/`: CLI entrypoints.
-- `src/bureauless/core.py`: legacy DAG/run-record primitives that remain as the
-  compatibility layer while the newer mission/workflow runtime grows around it.
+- `src/bureauless/agents/`: Agent registry, route evidence, and doctor checks.
+- `src/bureauless/protocol/`: YAML contracts, validation, and artifact intake.
+- `src/bureauless/runtime/`: sessions, replay, gatekeeper, metrics, and evidence.
+- `src/bureauless/cli/`: operator commands, including `agent` and `audit`.
+- `src/bureauless/api/`: local Workbench API.
+- `web/` and `electron/`: browser and desktop shells.
 
 ## Documentation
 
-Start with the documentation map, then use the task indexes for current delivery
-status:
-
-- [`docs/README.md`](docs/README.md)
-- [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
-- [`docs/audits/README.md`](docs/audits/README.md)
-- [`docs/audits/2026-07-02-runtime-execution-gap-analysis.md`](docs/audits/2026-07-02-runtime-execution-gap-analysis.md)
-- [`docs/audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](docs/audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md)
-- [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_3_5_tasklist.md`](docs/tasks/runtime_harness_milestone_3_5_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_4_tasklist.md`](docs/tasks/runtime_harness_milestone_4_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_5_tasklist.md`](docs/tasks/runtime_harness_milestone_5_tasklist.md)
-- [`docs/tasks/control_runtime_boundary_follow_up_tasklist.md`](docs/tasks/control_runtime_boundary_follow_up_tasklist.md)
-- [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
-- [`docs/rfcs/README.md`](docs/rfcs/README.md)
-- [`docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
-- [`docs/rfcs/005-authoritative-result-acceptance-spine.md`](docs/rfcs/005-authoritative-result-acceptance-spine.md)
-- [`docs/rfcs/006-bounded-context-continuation.md`](docs/rfcs/006-bounded-context-continuation.md)
-- [`docs/rfcs/007-control-runtime-boundary.md`](docs/rfcs/007-control-runtime-boundary.md)
-- [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md)
-- [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
-- [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)
-- [`docs/protocol/workflow_examples.md`](docs/protocol/workflow_examples.md)
-
-The docs now use one shared vocabulary:
-
-- `milestone`: a user-visible delivery target
-- `workstream`: an internal implementation grouping inside a milestone
-- `audit`: evidence-backed capability gaps and their remediation ownership
-
-That keeps runtime and workbench planning aligned instead of letting one side
-talk in phases while the other talks in milestones.
+| Need | Start here |
+| --- | --- |
+| Documentation authority and reading order | [`docs/README.md`](docs/README.md) |
+| Stable Agent/Provider/evidence contract | [`docs/protocol/agent_provider_registry.md`](docs/protocol/agent_provider_registry.md) |
+| Stable Harness protocol | [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md) |
+| Current implementation order | [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md) |
+| Dated live compatibility evidence | [`docs/audits/2026-07-15-agent-endpoint-capability-matrix.md`](docs/audits/2026-07-15-agent-endpoint-capability-matrix.md) |
+| v0.2.0 release demo | [`live-demos/2026-07-16-agent-audit-v0.2.0/README.md`](live-demos/2026-07-16-agent-audit-v0.2.0/README.md) |
+| v0.2.0 release notes | [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) |
+| Control-runtime boundary decision | [`docs/rfcs/007-control-runtime-boundary.md`](docs/rfcs/007-control-runtime-boundary.md) |
 
 ## License
 

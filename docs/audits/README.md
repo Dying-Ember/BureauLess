@@ -1,116 +1,128 @@
 # Engineering Audits
 
-Engineering audits record verified differences between documented capability
-claims and shipped behavior. They preserve evidence and remediation ownership;
-they are not substitutes for protocols, RFCs, ADRs, roadmaps, or task lists.
+Audits are dated evidence, not stable capability contracts. They record what a
+named implementation, Agent version, route, or endpoint instance actually did
+and link any resulting remediation to its owner.
 
-## When To Create An Audit
+The current contract belongs in `docs/protocol/`; current machine-readable
+Agent×Provider state comes from:
 
-Create an audit when one or more of these conditions hold:
-
-- a milestone is marked complete but a maintained execution path does not meet
-  its acceptance claim;
-- a schema, validator, fixture, API, or UI exists without a corresponding live
-  runtime integration;
-- two authoritative documents disagree about delivered behavior;
-- an incident or integration test reveals a cross-milestone design gap;
-- a capability needs coordinated remediation across protocol, runtime, API, and
-  operator surfaces.
-
-A local implementation bug with an obvious fix normally needs only an issue or
-task. A proposed semantic change normally needs an RFC. Use an audit when the
-first problem is establishing what is actually implemented and where the
-ownership gap belongs.
-
-## File Naming And Required Metadata
-
-Use `YYYY-MM-DD-<scope>-gap-analysis.md`. Every audit starts with:
-
-```markdown
-# <Scope> Gap Analysis
-
-- Status: draft | confirmed | remediating | closed
-- Audited baseline: <commit or release>
-- Audit date: YYYY-MM-DD
-- Scope: <packages, runtime path, or capability>
-- Related milestones: <links>
-- Owners: <team, workstream, or task list>
+```bash
+uv run bureauless agent matrix --evidence
 ```
 
-Each finding must include:
+## Audit Types
 
-- a stable finding ID;
-- severity;
-- the documented capability claim;
-- observed implementation and reproducible code or test evidence;
-- operational impact;
-- disposition and owning task;
-- whether an RFC or ADR is required;
-- closure evidence when resolved.
+### Gap analysis
 
-Use these severities:
+Use a gap analysis when a documented or completed capability claim differs
+from shipped behavior and the first task is establishing the real ownership
+gap. Name it:
+
+```text
+YYYY-MM-DD-<scope>-gap-analysis.md
+```
+
+Every finding needs a stable ID, severity, claimed behavior, reproducible
+evidence, operational impact, disposition, owner, and closure evidence.
+
+### Compatibility or verification record
+
+Use a verification record when the goal is to preserve a dated probe, version,
+route, endpoint-instance result, or telemetry boundary without asserting a
+project defect. Name it:
+
+```text
+YYYY-MM-DD-<scope>.md
+```
+
+These records must distinguish Agent capability, adapter support, and tested
+endpoint-instance availability. An unavailable endpoint must not be rewritten
+as an Agent incompatibility.
+
+A local implementation bug with an obvious fix normally needs only an issue or
+task. A proposed semantic change normally needs an RFC.
+
+## Required Metadata
+
+Every audit starts with:
+
+```markdown
+# <Scope>
+
+- Status: draft | recorded | confirmed | remediating | closed
+- Audited baseline: <commit, release, versions, or run set>
+- Audit date: YYYY-MM-DD
+- Scope: <packages, runtime path, agents, routes, or endpoint families>
+- Canonical contract: <protocol link>
+```
+
+Gap analyses also declare related milestones and owners. Compatibility records
+declare tested versions and the exact evidence boundary.
+
+## Evidence Rules
+
+- Native output remains evidence; normalized facts retain provenance.
+- Workspace state and independent acceptance determine mutation success, not a
+  tool event or final prose claim.
+- Requested, CLI-reported, provider-reported, and independently attested model
+  identities remain separate.
+- Missing token or currency evidence stays missing.
+- Provider brand, endpoint family, wire API, and concrete endpoint instance are
+  different claims.
+- Never record credential values or depend on local Agent configuration that a
+  clean child session cannot reproduce.
+- A fixture proves parsing or validation, not live runtime integration.
+
+## Severity for Gap Analyses
 
 | Severity | Meaning |
 | --- | --- |
 | critical | Canonical state, approval, replay, or safety can be incorrect. |
 | high | A claimed live control path is absent or materially non-authoritative. |
-| medium | The supported path works only through fixtures, post-hoc synthesis, or a narrow demo. |
+| medium | The path works only through fixtures, post-hoc synthesis, or a narrow demo. |
 | low | Documentation, ergonomics, or observability is incomplete without changing runtime correctness. |
 
-## Capability Completion Vocabulary
+## Completion Vocabulary
 
-Do not use one `completed` label to imply all delivery layers. Audits and
-roadmaps should distinguish these layers when the difference matters:
+Do not let one `completed` label imply every delivery layer:
 
-1. `schema`: data shape exists.
+1. `schema`: the data shape exists.
 2. `validation`: malformed or unauthorized data is rejected.
-3. `runtime integration`: the maintained execution path produces and consumes
-   the shape as an authoritative control input.
-4. `operator surface`: CLI, API, or Workbench can inspect or operate the path.
-5. `end-to-end evidence`: a maintained test or smoke path proves the complete
-   behavior without manual artifact fabrication.
+3. `runtime integration`: the maintained path produces and consumes it.
+4. `operator surface`: CLI, API, or Workbench can inspect or operate it.
+5. `end-to-end evidence`: a maintained test or live probe proves the complete
+   behavior without fabricated artifacts.
 
-A capability is end-to-end complete only when every required layer is complete.
+When route compatibility is involved, separately record:
+
+- `runtime_contract_support`
+- `adapter_support`
+- `tested_route_support`
+- `verification_levels`
 
 ## Processing Workflow
 
-1. **Verify**: reproduce the gap against a named commit and cite code/tests.
-2. **Classify**: separate implementation defects, missing integration, design
-   ambiguity, and documentation drift.
-3. **Record**: create or update one audit with stable finding IDs.
-4. **Route**: update the roadmap and task indexes in the same change. Assign
-   every confirmed finding to a milestone task or explicitly defer it.
-5. **Decide**: create an RFC only when behavior, ownership, compatibility, or
-   architecture still requires a decision. Record the accepted choice in an ADR.
-6. **Implement**: land code, tests, protocol changes, and operator changes under
-   the owning task.
-7. **Close**: add verification evidence, mark the finding closed, and update the
-   roadmap/task status. An issue or pull request closing is not sufficient by
-   itself.
-
-## History And Status Rules
-
-- Do not delete or silently rewrite a completed milestone's historical task
-  evidence. Add a dated post-completion correction and link the remediation.
-- A completed milestone may remain historically complete for its declared
-  delivery scope while the roadmap states that broader integration is partial.
-- Critical and high findings cannot be left without an owner or an explicit
-  deferral rationale.
-- A UI that renders a fixture does not prove runtime integration.
-- A validator that accepts an artifact does not prove that the artifact controls
-  execution.
-- An audit becomes `closed` only when all non-deferred findings have maintained
-  verification evidence.
+1. Reproduce against a named baseline.
+2. Separate implementation defects, missing integration, endpoint
+   unavailability, design ambiguity, and documentation drift.
+3. Record native evidence and normalized conclusions with provenance.
+4. For a confirmed gap, update the roadmap/task owner in the same change.
+5. Create an RFC only when behavior or ownership still needs a decision.
+6. Close a gap only after maintained verification exists.
+7. Preserve historical records; add a dated correction instead of silently
+   rewriting old evidence.
 
 ## Audit Index
 
-- [`2026-07-02-runtime-execution-gap-analysis.md`](2026-07-02-runtime-execution-gap-analysis.md):
-  closed audit of the real-agent execution spine from dispatch through
-  acceptance, progressive context, lifecycle control, and Workbench discovery;
-  mutation intake was completed by Runtime M4 and ADR-004.
-- [`2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md):
-  confirmed follow-up audit for implementation debt under RFC-007, owned by a
-  task list rather than a new delivery milestone.
+- [`2026-07-15-agent-endpoint-capability-matrix.md`](2026-07-15-agent-endpoint-capability-matrix.md):
+  current endpoint-instance compatibility and telemetry evidence.
+- [`2026-07-13-agent-provider-compatibility.md`](2026-07-13-agent-provider-compatibility.md):
+  initial five-Agent compatibility record; current state comes from the
+  registry.
 - [`2026-07-11-live-demo-control-plane-bootstrap-gap.md`](2026-07-11-live-demo-control-plane-bootstrap-gap.md):
-  verified control-plane bootstrap remediation with a real provider-backed
-  bootstrap-to-commit run.
+  verified control-plane bootstrap remediation.
+- [`2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md):
+  confirmed RFC-007 implementation-debt audit.
+- [`2026-07-02-runtime-execution-gap-analysis.md`](2026-07-02-runtime-execution-gap-analysis.md):
+  closed execution-spine gap analysis.

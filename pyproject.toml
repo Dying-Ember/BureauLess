@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bureauless"
-version = "0.1.0"
-description = "Local DAG orchestration primitives for model-routed agent workflows."
+version = "0.2.0"
+description = "Local-first control and audit harness for coding-agent runtimes."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["fastapi>=0.115", "PyYAML>=6.0", "uvicorn>=0.32"]
@@ -21,3 +21,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+norecursedirs = ["runs"]

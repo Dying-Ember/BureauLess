@@ -4,120 +4,251 @@
 
 [![CI](https://github.com/Dying-Ember/BureauLess/actions/workflows/ci.yml/badge.svg)](https://github.com/Dying-Ember/BureauLess/actions/workflows/ci.yml)
 
-BureauLess 是一个本地优先的小型编排层，用来管理 DAG 形态的 agent 工作流。
+BureauLess 是位于 coding Agent runtime 外部的本地优先控制与审计 harness。它用同一套
+契约注册不同 Agent 和 Provider route，分派有边界的工作，并记录检查与比较运行结果所需
+的证据。
 
-BureauLess 不是 Agent。它是一套带 token 经济意识的 harness：判断何时值得使用
-Agent，约束 Agent 能做什么，并记录哪些事实可信。
+它不是 Agent runtime、Provider gateway 或 credential broker。Codex CLI、Claude Code、
+Gemini CLI、OpenCode 和 Pi 继续拥有自己的模型循环、工具、记忆、streaming 和 retry；
+BureauLess 管理的是它们外面的边界。
 
-当前版本由 YAML protocol、Python runtime/API、CLI 工具和浏览器/Electron Workbench
-组成，并已经维护一条通过 `codex-cli` 运行受限真实 Agent 的路径；更广泛的 provider 和
-Agent 支持仍属于后续工作。
+## 为什么做 BureauLess
 
 Agent workflow 的失败方式很像真实组织。有时，一个小 patch 被套上一整张组织架构图：
-planner、reviewer、advisor、coordinator 都来了，每个角色都要读一遍同样的仓库上下文，
-最后真正改动的可能只有几行。有时又反过来：一个过载的负责人同时指挥一群 worker，
-没有中间层、没有 gate、没有可信 ledger，也说不清谁卡住了、谁完成了、哪个结果应该被相信。
+planner、reviewer、advisor 和 coordinator 都要重读同一份仓库，最后只有一个 worker
+改一个文件。有时又反过来：一个过载的负责人同时指挥许多 worker，却没有 gate、可信
+ledger，也说不清谁卡住了、谁完成了、哪个结果应该被相信。
 
-BureauLess 是用来选择“足够小、但足够安全”的组织形态的 harness。一个边界清楚的
-worker 能完成，就不要搭一整套组织；工作真的分叉时，也只增加那些证明自己值得存在的
-结构：assignment、gate、artifact 校验、预算限制、可回放事件，以及决定共享事实的
-ledger。
+BureauLess 用来选择“足够小、但足够安全”的协调结构。一个边界清楚的 worker 能完成，
+就不要搭一家公司；工作真的分叉时，也只增加那些能够证明自己值得成本的 assignment、
+gate、artifact check、预算和角色。
 
-重点不只是当下把 Agent 管住。如果每个 assignment、gate、artifact、预算估计、模型选择
-和结果都会变成持久数据，系统就可以 replay，也可以 backtest。跑得多了，真实数据会告诉你：
-哪些 workflow 形态值得，哪些 advisor 调用真的回本，哪些 gate 抓住了真实风险，以及
-哪些 policy 应该变得更简单。
-
-## 为什么做它
-
-很多 agent 系统天然会越长越大。BureauLess 反过来：先从一个边界清楚的 worker
-开始，只有当证据说明协调成本值得时，才增加更多编排。
+目标不只是控制一次运行。持久化的 assignment、routing decision、model choice、gate、
+evidence 和 outcome 让运行可以 replay 和 backtest。长期应该由真实数据回答：哪些
+workflow 形态值得、哪些 advisor 调用回本、哪些 gate 抓住风险，以及哪些 policy 应该
+变得更简单。
 
 真正有用的问题不是“能召唤多少个 Agent？”，而是“哪些 Agent 工作安全、有用、可审计，
 并且值得花这些 token？”
 
-## 它做什么
+## 边界
 
-这个项目把模型路由、任务依赖、review gate 和运行记录保存在 YAML 文件里，而不是
-锁在某一次聊天上下文中。Codex、Claude 或其他模型可以担任 orchestrator，较小模型
-负责执行边界清楚的任务节点。
+| BureauLess 负责 | Agent runtime 负责 |
+| --- | --- |
+| Agent 与 route 注册 | 模型与工具循环 |
+| Dispatch admission 与隔离 workspace | 内部 planning 与 memory |
+| 子进程级配置与 credential delivery | Provider streaming 与 retry |
+| 原生证据保留与事实归一化 | 工具实现细节 |
+| 独立验证、ledger、replay 与比较 | 自身的交互体验 |
 
-- 校验 planning DAG、mission、workflow、ledger、assignment 和结构化 runtime artifact。
-- 通过 replay 和 gatekeeper 规则推导 runnable、blocked、completed 和 superseded 状态。
-- 导出有边界的 assignment，并通过隔离的 `codex-cli` session 维护一条真实 Agent
-  执行路径。
-- 把 result、review、routing decision、context delivery、telemetry 和 mutation decision
-  记录为可检查的 artifact 与 ledger event。
-- 提供本地 Workbench，用于 planning-DAG 编辑和 runtime 检查，同时保持 Python runtime
-  规则权威。
+规则很简单：Agent 可以干活，但不能自己写可信历史。
+
+## 当前能力
+
+### 跨 Agent 审计
+
+- 用一个 registry 注册 Codex CLI、Claude Code、Gemini CLI、OpenCode 和 Pi。
+- 显式拆分 Agent、Provider route、endpoint family、wire API、model、credential
+  delivery 和 adapter capability。
+- 通过一次性的子进程配置接入 route，不修改本地 Agent 配置文件。
+- 在隔离 workspace 中执行，保留原生日志、workspace snapshot、diff、usage/cost
+  provenance、tool event 和追加式 route observation。
+- Harness 在 Agent 最终 workspace 的临时副本上运行独立验证。
+- Benchmark identity 和 paired-run capability comparison 会拒绝 task、baseline、
+  cohort 或 acceptance contract 不一致的运行。
+- 显式记录 decision point，以及 workspace/process/network/credential/payment 的
+  observation coverage。
+
+当前兼容性的机器可读事实来源是：
+
+```bash
+uv run bureauless agent matrix --evidence
+```
+
+不要根据 Agent 名称、Provider 品牌或笼统的“OpenAI-compatible”标签推断支持情况；
+准确的 route contract 才是权威定义。
+
+### Workflow 控制平面
+
+- YAML mission、workflow、ledger、assignment、result、review、routing、context、
+  mutation、telemetry 和 dispatch contract。
+- 确定性的 validation、gatekeeper、replay、retry control、workflow version 和
+  authoritative result acceptance。
+- 默认选择最小可行协调结构：先用一个 worker，只有证据证明开销值得时才增加 review
+  或 DAG 结构。
+
+### Workbench
+
+- 浏览器和 Electron 共用一套 React UI。
+- 支持 planning-DAG 编辑，以及 runtime artifact、replay、gate、mutation、telemetry
+  和 dispatch 检查。
+- Python/FastAPI 保持权威，前端不会重建 runtime policy。
+
+## 设计哲学
+
+1. **先从一个有边界的 worker 开始。** 只有 task dependency、风险或证据证明协调开销
+   值得时，才增加 review、advisor 或 DAG。
+2. **协调必须挣回自己的 token。** 每多一个 Agent 都要有预算理由，每个 advisor 更要
+   有更强的理由；协调成本高过收益时，workflow 就应该变简单。
+3. **证据先于共享事实。** Agent output 只是 proposal；verification、review 和
+   acceptance 决定什么能进入 canonical ledger。
+4. **原生证据不可替换。** Normalized fact 用来比较运行，但不能抹掉原生日志、workspace
+   state 或 provenance。
+5. **显式处理失败。** retry、升级模型、询问人类、拆分任务或停止；不要静默重复一次
+   没有任何变化的尝试。
+6. **控制与执行分离。** BureauLess 负责 admission、边界、证据和历史，Agent runtime
+   保留模型与工具内部机制。
+7. **从真实运行学习，而不是从 Demo 推断。** 追加式记录支持 replay/backtesting；
+   fixture 或漂亮 dashboard 不是生产证据。
+
+核心状态模型刻意保持精简：
+
+| 概念 | 用途 |
+| --- | --- |
+| Mission 与 workflow | 目标、角色、依赖、emitted event 和 gate |
+| Assignment | 一个有边界 worker 所需的最小 context 与 authority |
+| Run record | 原生证据、workspace effect、metrics 和 result proposal |
+| Review 与 gate | 下游继续前必须满足的显式 acceptance policy |
+| Ledger | 用于确定性 replay 的追加式 accepted history |
 
 ## 快速开始
 
-在新 checkout 中安装 Python 和 workspace 依赖：
+安装锁定的开发依赖：
 
 ```bash
 uv sync --dev
 npm install
 ```
 
-在第一个终端启动 Python API：
+### 不提供 credential，先检查 registry
+
+```bash
+uv run bureauless agent list
+uv run bureauless agent matrix --evidence
+uv run bureauless agent route claude-code --provider anthropic-compatible
+```
+
+### 不启动 Agent，先生成完整审计链
+
+```bash
+WORKSPACE=$(mktemp -d)
+
+uv run bureauless audit init \
+  --workspace "$WORKSPACE" \
+  --task "创建 marker.txt 并添加一个确定性检查"
+
+uv run bureauless audit run \
+  --workspace "$WORKSPACE" \
+  --agent codex-cli \
+  --target-model gpt-5 \
+  --target-provider openai \
+  --session-id audit-dry-run \
+  --dry-run
+```
+
+dry-run 不调用 Agent 或 Provider，但会生成与 live run 相同的 assignment → routing →
+registration → dispatch → session → report → observation → archive 证据链。
+
+### 运行真实 route
+
+命令行只传环境变量名，不要传 key 值：
+
+```bash
+export AUDIT_PROVIDER_API_KEY=...
+
+uv run bureauless audit run \
+  --workspace /path/to/repository \
+  --agent codex-cli \
+  --target-model your-model \
+  --target-provider openai-compatible \
+  --provider-wire-api responses \
+  --provider-base-url https://endpoint.example/v1 \
+  --provider-api-key-env AUDIT_PROVIDER_API_KEY \
+  --route-instance-id staging-responses \
+  --cohort-id parser-benchmark-v1 \
+  --verify-command 'python -m pytest -q'
+```
+
+不同 Agent 和 wire API 的 base URL 规则不同。请使用
+[canonical route 命令](docs/protocol/agent_provider_registry.md#10-canonical-commands)，
+不要靠猜测改写这个例子。
+
+### 检查与比较证据
+
+```bash
+uv run bureauless audit report path/to/session.yaml
+uv run bureauless audit verify path/to/archive/manifest.yaml
+uv run bureauless audit observations --workspace /path/to/repository
+uv run bureauless metrics summarize /path/to/repository/.bureauless/runs
+
+uv run bureauless audit contribution \
+  baseline/session.yaml candidate/session.yaml \
+  --capability-id workspace-edit \
+  --invoked true
+```
+
+Capability contribution artifact 只报告可测 delta，并明确声明
+`causal_claim: not_established`。
+
+## 证据纪律
+
+- 原生输出始终是证据；normalized field 不会替代它。
+- Tool event 证明 Agent 报告自己做了什么；workspace diff 证明最终文件状态。
+- requested、CLI-reported、provider-reported 和 independently attested model identity
+  保持分离。
+- 缺失的 usage 或货币 cost 继续缺失；BureauLess 不做估算。
+- latency 和 workspace delta 是 Harness fact；token、cost 和 tool timeline 比较保留
+  各自的 provenance 与 eligibility。
+- Registry 不写 secret，只记录环境变量名；独立验证使用清理后的环境。
+
+完整定义见
+[Agent/Provider registry contract](docs/protocol/agent_provider_registry.md)，最新实测见
+[endpoint capability evidence](docs/audits/2026-07-15-agent-endpoint-capability-matrix.md)。
+
+## Workbench
+
+在两个终端分别启动 API 和浏览器 UI：
 
 ```bash
 npm run api:dev
-```
-
-在第二个终端启动浏览器 Workbench：
-
-```bash
 npm run web:dev
 ```
 
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。API 默认使用
-`http://127.0.0.1:8000`；如果端口被占用，`api:dev` 会选择其他本地端口，Web 启动器
-会从 `.bureauless-api-url` 读取实际地址。
+打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)。如果 `8000` 端口被占用，API
+launcher 会选择另一个本地端口，并写入 `.bureauless-api-url` 供 Web launcher 读取。
 
-API 与 Web server 运行后，可以启动使用同一套 UI 的 Electron shell：
+可选的本地入口：
 
 ```bash
 npm run desktop:dev
+npm run mutation-demo:prepare
+npm run web:smoke
 ```
 
-只检查 CLI 时可以运行：
+## 一次看懂架构
 
-```bash
-uv run python -m bureauless mission validate examples/missions/demo/mission.yaml
-uv run python -m bureauless workflow compile examples/missions/demo/workflows/coder_reviewer_committer.yaml
-uv run python -m bureauless ledger replay \
-  examples/missions/demo/workflows/coder_reviewer_committer.yaml \
-  examples/missions/demo/ledger.yaml
-uv run python -m bureauless mission execution-spine-acceptance \
-  /tmp/bureauless-execution-spine
+```text
+mission + workflow + ledger
+            │
+            ▼
+ routing → bounded assignment → registered Agent route
+            │
+            ▼
+ isolated child session → native evidence + workspace delta
+            │
+            ▼
+ independent verification → review/acceptance → append-only ledger
+            │
+            ▼
+ observations + metrics + replay/backtesting
 ```
 
-`execution-spine-acceptance` 会运行确定性的 Runtime M3.5 验收路径，并在目标
-workspace 中写入遇错即失败的结构化证据报告。
+Canonical state 使用 YAML。Runtime 负责验证与状态转换，Workbench 负责展示，外部 Agent
+不能直接更新 canonical state。
 
-## 维护中的 Live Demo
+## 开发
 
-使用 OpenAI-compatible endpoint 运行 provider-backed control-plane demo。API key
-只保留在环境变量中；命令传入的是变量名，不是变量值：
-
-```bash
-export DEMO_PROVIDER_BASE_URL=https://provider.example/v1
-export DEMO_PROVIDER_API_KEY=...
-RUN_DIR="live-demos/$(date +%F)-local-boundary-run"
-
-scripts/live-demo-boundary-run \
-  "$RUN_DIR/workspace" \
-  gpt-5.5 \
-  "$DEMO_PROVIDER_BASE_URL" \
-  DEMO_PROVIDER_API_KEY
-```
-
-wrapper 会把 manifest 和 publisher audit 写入本次 run 的 workspace。证据保留与
-脱敏规则见 [`live-demos/README.md`](live-demos/README.md)。
-
-运行当前维护的验证：
+运行当前维护的检查：
 
 ```bash
 uv run python -m pytest -q
@@ -125,180 +256,30 @@ npm run web:build
 npm run web:smoke
 ```
 
-`web:smoke` 会由 Playwright 自动启动或复用 Vite dev server。
+CI 在 Python 3.10 上运行 backend suite，并在 Node 24 上构建和 smoke-test Web 与
+Electron。CI 不调用真实 Agent 或 Provider，也不需要 Provider secret。
 
-## 核心想法
+源码按 runtime boundary 分工：
 
-### 源格式
-
-DAG 文档和运行记录都使用 YAML。项目不会维护第二套持久化表示。
-
-### 任务节点
-
-一个节点描述一个有边界的工作单元：目标、依赖、相关文件、模型路由、review gate、
-验证方式和 prompt contract。
-
-### 运行记录
-
-每次执行都会记录模型、commit、变更文件、验证结果和 review 状态。retry 和 audit
-依赖这些记录。
-
-### 审查门槛
-
-节点可以自动通过，也可以要求 orchestrator review，或在下游节点变为可执行前要求
-human review。
-
-### 失败策略
-
-失败是显式建模的：可以用同一模型重试、升级到更大模型、交给人类，或进一步拆分任务。
-
-### Token 经济
-
-每多雇一个 Agent，都要有预算理由。每请一个 advisor，更要有更强的理由。如果协调成本
-高过节省，workflow 就应该变简单。
-
-### 回放与回测
-
-每次运行都应该留下足够结构化的证据，用来回放当时发生了什么，并回测另一套 policy
-是否会做出更好的 routing、gate、model 或 advisor 决策。
-
-### Orchestrator 与 Harness
-
-长期架构会把控制平面和执行平面分开：
-
-- orchestrator 负责规划、路由、记录、审查和重新规划。
-- worker agent 执行有边界的任务。
-- harness 拥有 control runtime：launch admission、execution envelope、lifecycle
-  supervision、bounded context、evidence capture、result intake 和 canonical ledger
-  transition。
-- adapter 保留 agent runtime 的机制，例如 model loop、tool internals、planning、memory
-  以及 provider streaming/retry。
-- advisor 默认懒加载，并受预算 gate 约束。
-
-简短版：Agent 可以干活，但不能自己写史。
-
-## 建议流程
-
-1. 定义或加载 planning DAG、mission、workflow 和 ledger。
-2. 通过 Workbench 或 gatekeeper CLI 检查 runnable 与 blocked 状态。
-3. 导出带必要 context 和 review policy 的有边界 assignment。
-4. 手工执行，或通过受支持的 bounded session adapter 执行。
-5. 导入并 review result，再记录 accepted finding 和 event。
-6. replay ledger，只在下游 gate 满足后继续执行。
-
-## 工作台
-
-Workbench 同时处理 planning-DAG 编辑，以及 mission、workflow、ledger、replay、
-gatekeeper、mutation、routing、outcome、evidence、context、telemetry、assignment、
-result、turn-report 和 dispatch artifact 的 runtime 检查。它使用同一套 React UI 支持
-浏览器和 Electron，Python 通过本地 FastAPI API 保持规则权威。
-
-运行本地 API：
-
-```bash
-npm run api:dev
-```
-
-这个启动器会强制使用仓库自己的 `.venv`，所以即使你当前 shell 还挂着别的项目
-的虚拟环境，也不会把 BureauLess 带偏。
-如果 `8000` 端口已经被占用，它会自动顺延到下一个可用端口，并把实际 API 地址
-写入 `.bureauless-api-url`。
-
-运行浏览器工作台：
-
-```bash
-npm run web:dev
-```
-
-Vite dev server 会在启动时读取 `.bureauless-api-url`。如果 API 启动器从 `8000`
-切到了别的端口，重启一次 `web:dev`，前端代理就会跟上新的 API 地址。
-
-执行浏览器 smoke test：
-
-```bash
-npm run web:smoke
-```
-
-手工测试 Workbench 的 mutation Accept/Reject 链路前，先生成隔离 demo：
-
-```bash
-npm run mutation-demo:prepare
-```
-
-该命令只会重置 `.bureauless/mutation-demo`，不会修改 tracked 示例或真实 ledger，
-并会输出带临时 workflow/ledger 路径的 Workbench URL。启动 `api:dev` 和
-`web:dev` 后打开该地址即可测试。
-
-运行 Electron shell：
-
-```bash
-npm run desktop:dev
-```
-
-Playwright 会自动启动或复用 Vite dev server。如果本地 npm 安装出来的 Electron
-二进制不完整，启动器会自动回退到系统里的 `electron39` 这类可执行文件。UI 默认跟随
-系统配色，也提供 `system / light / dark` 控制。DAG 文档和运行记录保持 YAML-only。
-
-## 持续集成
-
-GitHub Actions 会在每个 pull request、每次向 `main` push、merge queue group 和手工
-触发时运行两个确定性检查：
-
-- `backend`：在 Python 3.10 上通过 uv 安装锁定依赖，并运行完整 pytest suite。
-- `workbench`：在 Node 24 上安装锁定的 npm 依赖，构建 Web 与 Electron 应用，安装
-  Playwright Chromium，并运行浏览器 smoke suite。
-
-CI 不会调用真实 Agent 或模型供应商，也不需要 provider secret。两个 check 至少在
-GitHub 成功运行一次后，再把 `main` ruleset 配置为强制通过 `backend` 和 `workbench`、
-要求 pull request 基于最新分支，并禁止 force push 和删除分支。
-
-## 源码结构
-
-现在 runtime/harness 代码按 ownership boundary 分组，不再平铺在一层模块里：
-
-- `src/bureauless/protocol/`：YAML 协议模型、校验器、assignment/result 处理、
-  artifact 完整性，以及 budget snapshot。
-- `src/bureauless/runtime/`：replay、gatekeeper、session wrapper 和 outcome
-  metrics。
-- `src/bureauless/agents/`：外部 agent registry 和 doctor checks。
-- `src/bureauless/api/`：Workbench 的 FastAPI API 入口。
-- `src/bureauless/cli/`：CLI 入口。
-- `src/bureauless/core.py`：旧版 DAG / run-record 原语，当前作为兼容层保留，
-  新的 mission/workflow runtime 则围绕它逐步长出来。
+- `src/bureauless/agents/`：Agent registry、route evidence 和 doctor checks。
+- `src/bureauless/protocol/`：YAML contract、validation 和 artifact intake。
+- `src/bureauless/runtime/`：session、replay、gatekeeper、metrics 和 evidence。
+- `src/bureauless/cli/`：operator 命令，包括 `agent` 和 `audit`。
+- `src/bureauless/api/`：本地 Workbench API。
+- `web/` 与 `electron/`：浏览器和桌面 shell。
 
 ## 文档
 
-先从文档地图开始，再通过 task 索引查看当前交付状态：
-
-- [`docs/README.md`](docs/README.md)
-- [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md)
-- [`docs/audits/README.md`](docs/audits/README.md)
-- [`docs/audits/2026-07-02-runtime-execution-gap-analysis.md`](docs/audits/2026-07-02-runtime-execution-gap-analysis.md)
-- [`docs/audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md`](docs/audits/2026-07-10-control-runtime-boundary-follow-up-gap-analysis.md)
-- [`docs/tasks/runtime_harness_tasklist.md`](docs/tasks/runtime_harness_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_3_5_tasklist.md`](docs/tasks/runtime_harness_milestone_3_5_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_4_tasklist.md`](docs/tasks/runtime_harness_milestone_4_tasklist.md)
-- [`docs/tasks/runtime_harness_milestone_5_tasklist.md`](docs/tasks/runtime_harness_milestone_5_tasklist.md)
-- [`docs/tasks/control_runtime_boundary_follow_up_tasklist.md`](docs/tasks/control_runtime_boundary_follow_up_tasklist.md)
-- [`docs/tasks/workbench_tasklist.md`](docs/tasks/workbench_tasklist.md)
-- [`docs/rfcs/README.md`](docs/rfcs/README.md)
-- [`docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md`](docs/rfcs/004-temporal-replay-mutation-intake-and-retry-control.md)
-- [`docs/rfcs/005-authoritative-result-acceptance-spine.md`](docs/rfcs/005-authoritative-result-acceptance-spine.md)
-- [`docs/rfcs/006-bounded-context-continuation.md`](docs/rfcs/006-bounded-context-continuation.md)
-- [`docs/rfcs/007-control-runtime-boundary.md`](docs/rfcs/007-control-runtime-boundary.md)
-- [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md)
-- [`docs/protocol/workflow_selection_policy.md`](docs/protocol/workflow_selection_policy.md)
-- [`docs/protocol/advisor_policy.md`](docs/protocol/advisor_policy.md)
-- [`docs/protocol/workflow_examples.md`](docs/protocol/workflow_examples.md)
-
-现在文档统一使用一套术语：
-
-- `milestone`：面向验收的交付目标
-- `workstream`：某个 milestone 内部的实现分组
-- `audit`：以证据为基础的能力缺口及其 remediation owner
-
-这样 runtime 和 workbench 的规划语言会保持一致，不会一边讲 phase，
-另一边讲 milestone。
+| 需要了解什么 | 从这里开始 |
+| --- | --- |
+| 文档权威层级与阅读顺序 | [`docs/README.md`](docs/README.md) |
+| 稳定 Agent/Provider/evidence contract | [`docs/protocol/agent_provider_registry.md`](docs/protocol/agent_provider_registry.md) |
+| 稳定 Harness protocol | [`docs/protocol/harness_protocol.md`](docs/protocol/harness_protocol.md) |
+| 当前实现顺序 | [`docs/roadmap/development_roadmap.md`](docs/roadmap/development_roadmap.md) |
+| 按日期记录的兼容性实测 | [`docs/audits/2026-07-15-agent-endpoint-capability-matrix.md`](docs/audits/2026-07-15-agent-endpoint-capability-matrix.md) |
+| v0.2.0 发布 Demo | [`live-demos/2026-07-16-agent-audit-v0.2.0/README.md`](live-demos/2026-07-16-agent-audit-v0.2.0/README.md) |
+| v0.2.0 Release notes | [`docs/releases/v0.2.0.md`](docs/releases/v0.2.0.md) |
+| Control-runtime boundary decision | [`docs/rfcs/007-control-runtime-boundary.md`](docs/rfcs/007-control-runtime-boundary.md) |
 
 ## 许可证
 

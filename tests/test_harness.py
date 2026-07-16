@@ -7607,7 +7607,7 @@ def test_lists_agent_specs() -> None:
     specs = list_agent_specs()
     agent_ids = [spec.agent_id for spec in specs]
 
-    assert agent_ids == ["claude-code", "codex-cli", "opencode"]
+    assert agent_ids == ["claude-code", "codex-cli", "gemini", "opencode", "pi"]
     codex = next(spec for spec in specs if spec.agent_id == "codex-cli")
     assert codex.non_interactive_markers == ["exec"]
     assert codex.model_override_markers == ["--model"]
@@ -7726,8 +7726,32 @@ def test_agent_compatibility_reports_limited_for_partial_config_isolation() -> N
 
     assert compatibility.compatibility_state == "limited"
     assert compatibility.capabilities["config_isolation"] == "weak"
-    assert compatibility.capabilities["cancellation_control"] == "weak"
+    assert compatibility.capabilities["cancellation_control"] == "strong"
     assert "config_isolation" in compatibility.reasons
+
+
+def test_agent_compatibility_uses_registered_provider_injection_for_gemini() -> None:
+    def fake_run(command: list[str]) -> CommandOutput:
+        if "--version" in command:
+            return CommandOutput(returncode=0, stdout="gemini 1.0\n", stderr="")
+        return CommandOutput(
+            returncode=0,
+            stdout=(
+                "--prompt --model --skip-trust --extensions --output-format stream-json "
+                "--resume --session-file --session-id"
+            ),
+            stderr="",
+        )
+
+    compatibility = assess_agent_compatibility(
+        "gemini",
+        which=lambda _binary: "/usr/bin/gemini",
+        run_command=fake_run,
+    )
+
+    assert compatibility.compatibility_state == "dispatchable"
+    assert compatibility.capabilities["provider_override"] == "strong"
+    assert compatibility.capabilities["cancellation_control"] == "strong"
 
 
 def test_agent_compatibility_reports_manual_only_when_binary_missing() -> None:
@@ -7898,7 +7922,9 @@ def test_cli_agent_list(capsys) -> None:
     assert [item["agent_id"] for item in payload] == [
         "claude-code",
         "codex-cli",
+        "gemini",
         "opencode",
+        "pi",
     ]
     assert payload[1]["kind"] == "local_agent_cli"
 
@@ -7920,7 +7946,9 @@ def test_list_agent_compatibility_returns_known_agent_ids() -> None:
     assert [entry.agent_id for entry in payload] == [
         "claude-code",
         "codex-cli",
+        "gemini",
         "opencode",
+        "pi",
     ]
     assert all(entry.compatibility_state == "manual_only" for entry in payload)
 
@@ -7933,7 +7961,9 @@ def test_cli_agent_matrix(capsys) -> None:
     assert [item["agent_id"] for item in payload] == [
         "claude-code",
         "codex-cli",
+        "gemini",
         "opencode",
+        "pi",
     ]
     assert all(item["compatibility_state"] in {"dispatchable", "limited", "manual_only"} for item in payload)
 
@@ -8230,6 +8260,49 @@ def test_shell_dummy_marks_unstructured_output_as_agent_not_emitting_usage(tmp_p
     assert "total_tokens" not in record.outcome_metrics
 
 
+def test_reported_cost_is_not_promoted_to_a_payment_side_effect(tmp_path) -> None:
+    workflow = _workflow()
+    assignment = export_assignment(
+        workflow,
+        _empty_ledger(),
+        "implement",
+        assignment_id="assign-cost-only",
+    )
+    mission, packet = _dispatch_fixture(workflow, assignment, "packet-cost-only")
+    payload = yaml.safe_dump(
+        {
+            "status": "completed",
+            "emitted_events": ["patch_ready"],
+            "outcome_metrics": {
+                "cost_usd": 0.01,
+                "cost_source": "provider_reported",
+            },
+        },
+        sort_keys=False,
+    ).strip()
+    record = dispatch_session(
+        mission,
+        workflow,
+        packet,
+        agent_id="shell-dummy",
+        workdir=tmp_path,
+        dispatch_packet_path=tmp_path / "dispatch-cost-only.yaml",
+        shell_command=f"cat <<'EOF'\n{payload}\nEOF",
+        session_id="session-cost-only",
+    )
+
+    assert record.outcome_metrics["cost_usd"] == 0.01
+    assert all(
+        effect["type"] != "payment"
+        for effect in record.audit_evidence["side_effects"]
+    )
+    assert record.audit_evidence["side_effect_coverage"]["payment"] == {
+        "status": "not_observed",
+        "evidence_source": "unavailable",
+        "evidence_ref": None,
+    }
+
+
 def test_shell_dummy_reports_wrapper_failed_to_extract(tmp_path) -> None:
     workflow = _workflow()
     ledger = Ledger.from_dict(
@@ -8439,6 +8512,71 @@ def test_codex_session_requires_target_model_and_provider(tmp_path) -> None:
             workdir=tmp_path,
             session_id="session-001",
         )
+
+
+def test_gemini_session_runs_in_an_ephemeral_home_and_extracts_native_usage(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    source_root.joinpath("tracked.txt").write_text("original\n", encoding="utf-8")
+    assignment = export_assignment(_workflow(), _empty_ledger(), "implement", assignment_id="assign-001")
+    secret = "top-secret-gemini-key"
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+    spec = create_session_spec(
+        assignment=assignment,
+        agent_id="gemini",
+        workdir=source_root,
+        target_model="gemini-3-pro-preview",
+        target_provider="gemini-compatible",
+        provider_base_url="https://gateway.example/gemini",
+        session_id="session-001",
+    )
+    homes: list[Path] = []
+    stdout = "\n".join(
+        [
+            '{"type":"init","session_id":"native-session","model":"gemini-3-pro-preview"}',
+            f'{{"type":"message","role":"assistant","content":"done {secret}"}}',
+            '{"type":"tool_use","tool_id":"tool-1","tool_name":"replace"}',
+            '{"type":"tool_result","tool_id":"tool-1"}',
+            '{"type":"result","stats":{"input_tokens":100,"output_tokens":20,"cached":11,"total_tokens":131,"duration_ms":12,"tool_calls":1,"models":{"gemini-3.1-pro-preview":{}}}}',
+        ]
+    )
+
+    def fake_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        assert command[:5] == ["gemini", "--skip-trust", "--approval-mode", "auto_edit", "--output-format"]
+        assert "stream-json" in command
+        assert "--model" in command
+        assert "gemini-3-pro-preview" in command
+        assert kwargs["env"]["GEMINI_API_KEY"] == secret
+        assert kwargs["env"]["GOOGLE_GEMINI_BASE_URL"] == "https://gateway.example/gemini"
+        home = Path(kwargs["env"]["HOME"])
+        homes.append(home)
+        assert yaml.safe_load(home.joinpath(".gemini/settings.json").read_text()) == {
+            "security": {"auth": {"selectedType": "gemini-api-key"}}
+        }
+        Path(kwargs["cwd"]).joinpath("tracked.txt").write_text("changed\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    record = run_session(spec, assignment, command_runner=fake_runner)
+
+    assert record.status == "completed"
+    assert record.result_proposal is not None
+    assert record.result_proposal["effective_provider"] == "gemini-compatible"
+    assert record.outcome_metrics["input_tokens"] == 100
+    assert record.outcome_metrics["output_tokens"] == 20
+    assert record.outcome_metrics["total_tokens"] == 131
+    assert record.outcome_metrics["cached_input_tokens"] == 11
+    assert record.outcome_metrics["agent_tool_calls"] == 1
+    assert record.extraction["native_session_id"] == "native-session"
+    assert record.extraction["provider_reported_models"] == ["gemini-3.1-pro-preview"]
+    assert record.outcome_metrics["changed_files_count"] == 1
+    assert len(record.extraction["native_tool_events"]) == 2
+    serialized = yaml.safe_dump(record.to_dict())
+    assert secret not in serialized
+    assert "<redacted>" in record.native_logs["stdout"]
+    assert secret not in Path(record.native_logs["stdout_path"]).read_text(encoding="utf-8")
+    assert homes and not homes[0].exists()
 
 
 def test_codex_session_produces_importable_result_from_completed_run(tmp_path, monkeypatch) -> None:
@@ -10567,6 +10705,51 @@ def test_live_dispatch_cancellation_kills_process_group_and_preserves_evidence(
     assert Path(record.native_logs["stdout_path"]).is_file()
     assert Path(record.workspace["path"]).joinpath("partial.txt").is_file()
     assert record.outcome_metrics["changed_files_count"] == 1
+    assert {
+        (effect["type"], effect["source"], effect["verified"])
+        for effect in record.audit_evidence["side_effects"]
+    } == {
+        ("process", "harness", True),
+        ("workspace", "harness", True),
+    }
+    assert record.audit_evidence["decision_points"] == [
+        {
+            "decision_id": "decision-session-live-cancel-dispatch",
+            "decision_type": "dispatch",
+            "source": "harness",
+            "evidence_available_at_time": [
+                "dispatch_packet.routing_decision",
+                "dispatch_packet.assignment",
+                "dispatch.session_spec",
+            ],
+            "action_selected": "dispatch_agent:shell-dummy",
+            "alternatives_visible": ["routing_mode:single_agent"],
+            "selected_context": {
+                "routing_mode": "small_dag",
+                "selection_policy_version": "test-v1",
+                "agent_id": "shell-dummy",
+                "target_provider": None,
+                "target_model": None,
+            },
+            "later_outcome": {
+                "session_status": "cancelled",
+                "exit_reason": "user_cancelled",
+                "changed_files_count": 1,
+                "agent_verification_status": "not_run",
+            },
+        }
+    ]
+    assert record.audit_evidence["capability_contributions"] == []
+    assert {
+        key: value["status"]
+        for key, value in record.audit_evidence["side_effect_coverage"].items()
+    } == {
+        "workspace": "observed",
+        "process": "observed",
+        "network": "not_observed",
+        "credential": "not_applicable",
+        "payment": "not_observed",
+    }
     child_pid = int(child_pid_path.read_text(encoding="utf-8"))
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)

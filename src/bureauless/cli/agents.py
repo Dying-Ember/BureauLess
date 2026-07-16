@@ -5,12 +5,15 @@ from pathlib import Path
 
 import yaml
 
+from ..errors import ProtocolError
 from ..agents import (
     assess_agent_compatibility,
     assess_dispatch_readiness,
     doctor_agent,
     list_agent_compatibility,
+    list_agent_route_evidence,
     list_agent_specs,
+    route_agent,
 )
 
 
@@ -25,6 +28,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Summarize agent compatibility for semi-automatic runtime control",
     )
     agent_matrix_parser.add_argument("agent_id", nargs="?")
+    agent_matrix_parser.add_argument(
+        "--evidence",
+        action="store_true",
+        help="Render static Agent×Provider evidence instead of installed-binary doctor results",
+    )
+    agent_matrix_parser.add_argument(
+        "--observations",
+        help="Audit runs directory containing verified route-observation.yaml artifacts",
+    )
+    agent_route_parser = agent_subparsers.add_parser("route", help="Show the runtime route for an agent")
+    agent_route_parser.add_argument("agent_id")
+    agent_route_parser.add_argument("--provider", dest="target_provider")
     agent_readiness_parser = agent_subparsers.add_parser(
         "readiness",
         help="Evaluate dispatch readiness for an agent against a workspace and isolation mode",
@@ -47,11 +62,30 @@ def handle(args: argparse.Namespace) -> int | None:
         return 0
 
     if args.agent_command == "matrix":
-        if args.agent_id:
+        if args.evidence:
+            payload = [entry.to_dict() for entry in list_agent_route_evidence(args.agent_id)]
+            if args.observations:
+                from .audit import load_route_observations
+
+                observations = load_route_observations(Path(args.observations))
+                if args.agent_id:
+                    observations = [
+                        item for item in observations if item.get("agent_id") == args.agent_id
+                    ]
+                payload = {"routes": payload, "observations": observations}
+        elif args.agent_id:
+            if args.observations:
+                raise ProtocolError("agent matrix --observations requires --evidence")
             payload = assess_agent_compatibility(args.agent_id).to_dict()
         else:
+            if args.observations:
+                raise ProtocolError("agent matrix --observations requires --evidence")
             payload = [entry.to_dict() for entry in list_agent_compatibility()]
         print(yaml.safe_dump(payload, sort_keys=False))
+        return 0
+
+    if args.agent_command == "route":
+        print(yaml.safe_dump(route_agent(args.agent_id, args.target_provider).to_dict(), sort_keys=False))
         return 0
 
     if args.agent_command == "readiness":
